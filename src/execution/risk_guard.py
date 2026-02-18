@@ -37,42 +37,55 @@ class RiskGuard:
         blocked_tickers: 매매 금지 종목 코드 집합.
     """
 
+    # 모의투자 기본 한도
     DEFAULT_MAX_ORDER_PCT = 0.10
     DEFAULT_MAX_DAILY_TURNOVER = 0.30
     DEFAULT_MAX_SINGLE_STOCK_PCT = 0.15
 
-    def __init__(self, config: Optional[dict] = None) -> None:
+    # 실전투자 기본 한도 (보수적)
+    LIVE_MAX_ORDER_PCT = 0.05
+    LIVE_MAX_DAILY_TURNOVER = 0.20
+    LIVE_MAX_SINGLE_STOCK_PCT = 0.10
+
+    def __init__(
+        self, config: Optional[dict] = None, is_live: bool = False
+    ) -> None:
         """RiskGuard를 초기화한다.
 
         Args:
             config: 리스크 설정 딕셔너리. None이면 환경변수에서 로드.
                 keys: max_order_pct, max_daily_turnover,
                       max_single_stock_pct, blocked_tickers
+            is_live: 실전 모드 여부. True이면 보수적 기본값 적용.
         """
         cfg = config or {}
+
+        # 실전 모드이면 보수적 기본값 사용
+        if is_live:
+            default_order = self.LIVE_MAX_ORDER_PCT
+            default_turnover = self.LIVE_MAX_DAILY_TURNOVER
+            default_single = self.LIVE_MAX_SINGLE_STOCK_PCT
+        else:
+            default_order = self.DEFAULT_MAX_ORDER_PCT
+            default_turnover = self.DEFAULT_MAX_DAILY_TURNOVER
+            default_single = self.DEFAULT_MAX_SINGLE_STOCK_PCT
 
         self.max_order_pct: float = float(
             cfg.get(
                 "max_order_pct",
-                os.getenv("RISK_MAX_ORDER_PCT", str(self.DEFAULT_MAX_ORDER_PCT)),
+                os.getenv("RISK_MAX_ORDER_PCT", str(default_order)),
             )
         )
         self.max_daily_turnover: float = float(
             cfg.get(
                 "max_daily_turnover",
-                os.getenv(
-                    "RISK_MAX_DAILY_TURNOVER",
-                    str(self.DEFAULT_MAX_DAILY_TURNOVER),
-                ),
+                os.getenv("RISK_MAX_DAILY_TURNOVER", str(default_turnover)),
             )
         )
         self.max_single_stock_pct: float = float(
             cfg.get(
                 "max_single_stock_pct",
-                os.getenv(
-                    "RISK_MAX_SINGLE_STOCK_PCT",
-                    str(self.DEFAULT_MAX_SINGLE_STOCK_PCT),
-                ),
+                os.getenv("RISK_MAX_SINGLE_STOCK_PCT", str(default_single)),
             )
         )
 

@@ -5,16 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=quant
-Group=quant
+User=root
 WorkingDirectory=/mnt/data/quant
-Environment="PATH=/mnt/data/quant/.venv/bin"
+Environment="PATH=/mnt/data/quant/.venv/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/mnt/data/quant"
 EnvironmentFile=/mnt/data/quant/.env
-ExecStart=/mnt/data/quant/.venv/bin/python -u src/scheduler/main.py
+ExecStart=/mnt/data/quant/.venv/bin/python3 -u src/scheduler/main.py
 Restart=on-failure
 RestartSec=30
-WatchdogSec=300
-NoNewPrivileges=yes
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=quant-bot

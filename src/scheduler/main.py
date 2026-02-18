@@ -66,9 +66,11 @@ class TradingBot:
         self.holidays: KRXHolidays = KRXHolidays()
         self.rebalance_freq: str = rebalance_freq
 
-        # KIS 클라이언트 및 실행기
+        # KIS 클라이언트 및 실행기 (모드별 리스크 한도 자동 적용)
         self.kis_client: KISClient = KISClient()
-        self.risk_guard: RiskGuard = RiskGuard()
+        self.risk_guard: RiskGuard = RiskGuard(
+            is_live=not self.kis_client.is_paper
+        )
         self.executor: RebalanceExecutor = RebalanceExecutor(
             self.kis_client, self.risk_guard
         )
@@ -113,12 +115,15 @@ class TradingBot:
     def _send_notification(self, message: str, level: str = "INFO") -> None:
         """알림을 발송한다.
 
+        메시지 앞에 트레이딩 모드 태그([모의]/[실전])를 자동 추가한다.
+
         Args:
             message: 발송할 메시지.
             level: 알림 수준 ("INFO", "WARNING", "CRITICAL").
         """
         try:
-            self.alert_manager.send(message, level=level)
+            tagged_message = f"{self.kis_client.mode_tag} {message}"
+            self.alert_manager.send(tagged_message, level=level)
         except Exception as e:
             logger.error("알림 발송 실패: %s", e)
 
@@ -678,21 +683,25 @@ class TradingBot:
         signal.signal(signal.SIGINT, _shutdown_handler)
         signal.signal(signal.SIGTERM, _shutdown_handler)
 
+        strategy_name = (
+            getattr(self._strategy, "name", "미설정")
+            if self._strategy
+            else "미설정"
+        )
+
         logger.info("=" * 60)
         logger.info("트레이딩 봇 시작")
+        logger.info("  모드: %s", self.kis_client.trading_mode)
         logger.info("  리밸런싱 주기: %s", self.rebalance_freq)
         logger.info("  KIS API: %s", "설정됨" if self.kis_client.is_configured() else "미설정")
         logger.info("  텔레그램: %s", "설정됨" if self.notifier.is_configured() else "미설정")
-        logger.info(
-            "  전략: %s",
-            getattr(self._strategy, "name", "미설정")
-            if self._strategy
-            else "미설정",
-        )
+        logger.info("  전략: %s", strategy_name)
         logger.info("=" * 60)
 
         self._send_notification(
             f"[봇 시작] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"모드: {self.kis_client.trading_mode}\n"
+            f"전략: {strategy_name}\n"
             f"리밸런싱 주기: {self.rebalance_freq}"
         )
 

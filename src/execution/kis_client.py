@@ -5,9 +5,11 @@ REST API를 통한 주문/잔고 조회 기능을 제공한다.
 토큰 자동 갱신, 요청 재시도, 속도 제한 등을 내장한다.
 """
 
+import json
 import os
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import pandas as pd
@@ -54,22 +56,45 @@ class KISClient:
         Args:
             app_key: 한국투자증권 앱 키. None이면 환경변수 KIS_APP_KEY에서 로드.
             app_secret: 한국투자증권 앱 시크릿. None이면 환경변수 KIS_APP_SECRET에서 로드.
-            account_no: 계좌번호. None이면 환경변수 KIS_ACCOUNT_NO에서 로드.
-            is_paper: 모의투자 모드. None이면 환경변수 KIS_IS_PAPER에서 로드 (기본 True).
+            account_no: 계좌번호. None이면 모드에 따라 환경변수에서 자동 선택.
+            is_paper: 모의투자 모드. None이면 환경변수에서 로드.
+                우선순위: KIS_TRADING_MODE > KIS_IS_PAPER > 기본값(True).
         """
         self.app_key: str = app_key or os.getenv("KIS_APP_KEY", "")
         self.app_secret: str = app_secret or os.getenv("KIS_APP_SECRET", "")
-        self.account_no: str = account_no or os.getenv("KIS_ACCOUNT_NO", "")
 
+        # 모드 결정 우선순위: 파라미터 > KIS_TRADING_MODE > KIS_IS_PAPER > 기본값
         if is_paper is not None:
             self.is_paper: bool = is_paper
         else:
-            env_val = os.getenv("KIS_IS_PAPER", "true").lower()
-            self.is_paper = env_val in ("true", "1", "yes")
+            trading_mode = os.getenv("KIS_TRADING_MODE", "").lower()
+            if trading_mode == "live":
+                self.is_paper = False
+            elif trading_mode == "paper":
+                self.is_paper = True
+            else:
+                env_val = os.getenv("KIS_IS_PAPER", "true").lower()
+                self.is_paper = env_val in ("true", "1", "yes")
+
+        # 계좌번호: 파라미터 > 모드별 환경변수 > KIS_ACCOUNT_NO
+        if account_no:
+            self.account_no: str = account_no
+        elif self.is_paper:
+            self.account_no = os.getenv(
+                "KIS_PAPER_ACCOUNT_NO", os.getenv("KIS_ACCOUNT_NO", "")
+            )
+        else:
+            self.account_no = os.getenv(
+                "KIS_REAL_ACCOUNT_NO", os.getenv("KIS_ACCOUNT_NO", "")
+            )
 
         self._access_token: str = ""
         self._token_expires_at: Optional[datetime] = None
         self._last_request_time: float = 0.0
+        self._token_cache_path = Path(__file__).resolve().parent.parent.parent / ".kis_token.json"
+
+        # 캐시된 토큰 로드 시도
+        self._load_cached_token()
 
         if not self.is_configured():
             logger.warning(
@@ -77,13 +102,26 @@ class KISClient:
                 "KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCOUNT_NO를 확인하세요."
             )
         else:
-            mode = "모의투자" if self.is_paper else "실전"
-            logger.info("KIS 클라이언트 초기화 완료 (모드: %s)", mode)
+            logger.info(
+                "KIS 클라이언트 초기화 완료 (모드: %s, 계좌: %s)",
+                self.trading_mode,
+                self.account_no[:4] + "****" if len(self.account_no) >= 4 else "****",
+            )
 
     @property
     def base_url(self) -> str:
         """현재 모드에 따른 기본 URL을 반환한다."""
         return self.PAPER_BASE_URL if self.is_paper else self.REAL_BASE_URL
+
+    @property
+    def trading_mode(self) -> str:
+        """현재 트레이딩 모드 문자열을 반환한다."""
+        return "모의투자" if self.is_paper else "실전투자"
+
+    @property
+    def mode_tag(self) -> str:
+        """알림 메시지용 모드 태그를 반환한다."""
+        return "[모의]" if self.is_paper else "[실전]"
 
     def is_configured(self) -> bool:
         """API 키가 모두 설정되어 있는지 확인한다.
@@ -133,6 +171,7 @@ class KISClient:
                 seconds=max(expires_in - 3600, 0)
             )
 
+            self._save_cached_token()
             logger.info(
                 "KIS 액세스 토큰 발급 완료 (만료: %s)",
                 self._token_expires_at.strftime("%Y-%m-%d %H:%M:%S"),
@@ -151,6 +190,46 @@ class KISClient:
         ):
             logger.info("액세스 토큰 갱신 필요. 재발급합니다.")
             self.get_access_token()
+
+    def _save_cached_token(self) -> None:
+        """발급받은 토큰을 파일에 캐싱한다."""
+        try:
+            data = {
+                "access_token": self._access_token,
+                "expires_at": self._token_expires_at.isoformat()
+                if self._token_expires_at
+                else "",
+                "is_paper": self.is_paper,
+            }
+            self._token_cache_path.write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+    def _load_cached_token(self) -> None:
+        """캐시된 토큰을 파일에서 로드한다."""
+        try:
+            if not self._token_cache_path.exists():
+                return
+            data = json.loads(self._token_cache_path.read_text(encoding="utf-8"))
+            # 모드가 다르면 캐시 무효
+            if data.get("is_paper") != self.is_paper:
+                return
+            expires_at_str = data.get("expires_at", "")
+            if not expires_at_str:
+                return
+            expires_at = datetime.fromisoformat(expires_at_str)
+            if datetime.now() >= expires_at:
+                return
+            self._access_token = data["access_token"]
+            self._token_expires_at = expires_at
+            logger.info(
+                "캐시된 KIS 토큰 로드 완료 (만료: %s)",
+                expires_at.strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            pass
 
     def _headers(self, tr_id: str = "", content_type: str = "application/json") -> dict:
         """공통 요청 헤더를 생성한다.
@@ -591,10 +670,10 @@ class KISClient:
         output2 = result.get("output2", [{}])
 
         summary = output2[0] if output2 else {}
-        total_eval = int(summary.get("tot_evlu_amt", "0"))
-        cash = int(summary.get("dnca_tot_amt", "0"))
-        total_purchase = int(summary.get("pchs_amt_smtl_amt", "0"))
-        total_profit = int(summary.get("evlu_pfls_smtl_amt", "0"))
+        total_eval = int(float(summary.get("tot_evlu_amt", "0")))
+        cash = int(float(summary.get("dnca_tot_amt", "0")))
+        total_purchase = int(float(summary.get("pchs_amt_smtl_amt", "0")))
+        total_profit = int(float(summary.get("evlu_pfls_smtl_amt", "0")))
         total_profit_pct = (
             float(total_profit / total_purchase * 100)
             if total_purchase > 0
@@ -610,10 +689,10 @@ class KISClient:
                 "ticker": item.get("pdno", ""),
                 "name": item.get("prdt_name", ""),
                 "qty": qty,
-                "avg_price": int(item.get("pchs_avg_pric", "0")),
-                "current_price": int(item.get("prpr", "0")),
-                "eval_amount": int(item.get("evlu_amt", "0")),
-                "pnl": int(item.get("evlu_pfls_amt", "0")),
+                "avg_price": int(float(item.get("pchs_avg_pric", "0"))),
+                "current_price": int(float(item.get("prpr", "0"))),
+                "eval_amount": int(float(item.get("evlu_amt", "0"))),
+                "pnl": int(float(item.get("evlu_pfls_amt", "0"))),
                 "pnl_pct": float(item.get("evlu_pfls_rt", "0")),
             })
 
@@ -682,7 +761,7 @@ class KISClient:
             return balance.get("cash", 0)
 
         output = result.get("output", {})
-        buyable = int(output.get("ord_psbl_cash", "0"))
+        buyable = int(float(output.get("ord_psbl_cash", "0")))
 
         return buyable
 

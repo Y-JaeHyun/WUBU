@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 from typing import Optional
@@ -96,8 +97,10 @@ class RebalanceExecutor:
             "skipped": [],
         }
 
+        mode_tag = self.kis_client.mode_tag
         logger.info(
-            "=" * 60 + "\n리밸런싱 실행 시작: %d개 종목, 시각=%s",
+            "=" * 60 + "\n%s 리밸런싱 실행 시작: %d개 종목, 시각=%s",
+            mode_tag,
             len(target_weights),
             start_time.strftime("%Y-%m-%d %H:%M:%S"),
         )
@@ -108,6 +111,18 @@ class RebalanceExecutor:
             logger.error(msg)
             result["errors"].append(msg)
             return result
+
+        # 0-1. 실전 모드 안전장치
+        if not self.kis_client.is_paper:
+            confirmed = os.getenv("KIS_LIVE_CONFIRMED", "false").lower()
+            if confirmed not in ("true", "1", "yes"):
+                msg = (
+                    "실전 모드 리밸런싱이 차단되었습니다. "
+                    "KIS_LIVE_CONFIRMED=true를 .env에 설정하세요."
+                )
+                logger.error(msg)
+                result["errors"].append(msg)
+                return result
 
         # 1. 리스크 검증 (전체 리밸런싱)
         risk_passed, risk_warnings = self.risk_guard.check_rebalance(target_weights)

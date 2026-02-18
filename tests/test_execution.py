@@ -49,6 +49,7 @@ def _try_import_rebalance_executor():
 class TestKISClient:
     """KIS OpenAPI 클라이언트 검증."""
 
+    @patch.dict(os.environ, {"KIS_TRADING_MODE": "", "KIS_IS_PAPER": "true", "KIS_APP_KEY": "", "KIS_APP_SECRET": "", "KIS_ACCOUNT_NO": "", "KIS_PAPER_ACCOUNT_NO": "", "KIS_REAL_ACCOUNT_NO": ""})
     def test_init_default(self):
         """기본 파라미터로 초기화된다."""
         KISClient = _import_kis_client()
@@ -83,6 +84,7 @@ class TestKISClient:
             "키가 설정되면 is_configured()가 True여야 합니다."
         )
 
+    @patch.dict(os.environ, {"KIS_APP_KEY": "", "KIS_APP_SECRET": "", "KIS_ACCOUNT_NO": "", "KIS_PAPER_ACCOUNT_NO": "", "KIS_REAL_ACCOUNT_NO": "", "KIS_TRADING_MODE": ""})
     def test_is_configured_false(self):
         """필수 정보가 없으면 is_configured()가 False이다."""
         KISClient = _import_kis_client()
@@ -468,3 +470,131 @@ class TestRebalanceExecutor:
         except Exception:
             # 구현에 따라 에러 발생 가능
             pass
+
+
+# ===================================================================
+# 듀얼 모드 (모의투자/실전투자) 테스트
+# ===================================================================
+
+class TestDualTradingMode:
+    """모의투자/실전투자 듀얼 모드 전환 검증."""
+
+    @patch.dict(os.environ, {"KIS_TRADING_MODE": "", "KIS_IS_PAPER": "true", "KIS_APP_KEY": "", "KIS_APP_SECRET": "", "KIS_ACCOUNT_NO": "", "KIS_PAPER_ACCOUNT_NO": "", "KIS_REAL_ACCOUNT_NO": ""})
+    def test_default_mode_is_paper(self):
+        """기본 모드가 모의투자(paper)이다."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        assert client.is_paper is True
+
+    @patch.dict(os.environ, {"KIS_TRADING_MODE": "paper"}, clear=False)
+    def test_trading_mode_paper(self):
+        """KIS_TRADING_MODE=paper이면 모의투자 모드이다."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        assert client.is_paper is True
+        assert client.trading_mode == "모의투자"
+        assert client.mode_tag == "[모의]"
+
+    @patch.dict(os.environ, {"KIS_TRADING_MODE": "live"}, clear=False)
+    def test_trading_mode_live(self):
+        """KIS_TRADING_MODE=live이면 실전투자 모드이다."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        assert client.is_paper is False
+        assert client.trading_mode == "실전투자"
+        assert client.mode_tag == "[실전]"
+
+    @patch.dict(os.environ, {
+        "KIS_TRADING_MODE": "paper",
+        "KIS_PAPER_ACCOUNT_NO": "50112233-01",
+        "KIS_REAL_ACCOUNT_NO": "99887766-01",
+    }, clear=False)
+    def test_paper_account_selection(self):
+        """모의 모드에서 KIS_PAPER_ACCOUNT_NO가 선택된다."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        assert client.account_no == "50112233-01"
+
+    @patch.dict(os.environ, {
+        "KIS_TRADING_MODE": "live",
+        "KIS_PAPER_ACCOUNT_NO": "50112233-01",
+        "KIS_REAL_ACCOUNT_NO": "99887766-01",
+    }, clear=False)
+    def test_live_account_selection(self):
+        """실전 모드에서 KIS_REAL_ACCOUNT_NO가 선택된다."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        assert client.account_no == "99887766-01"
+
+    @patch.dict(os.environ, {
+        "KIS_TRADING_MODE": "",
+        "KIS_IS_PAPER": "false",
+    }, clear=False)
+    def test_backward_compat_is_paper(self):
+        """KIS_TRADING_MODE 없으면 KIS_IS_PAPER 사용 (하위호환)."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        assert client.is_paper is False
+
+    @patch.dict(os.environ, {
+        "KIS_TRADING_MODE": "",
+        "KIS_IS_PAPER": "true",
+        "KIS_ACCOUNT_NO": "12345678-01",
+    }, clear=False)
+    def test_fallback_account_no(self):
+        """모드별 계좌가 없으면 KIS_ACCOUNT_NO를 사용한다."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        assert client.account_no == "12345678-01"
+
+    def test_constructor_overrides_env(self):
+        """생성자 파라미터가 환경변수보다 우선한다."""
+        KISClient = _import_kis_client()
+        client = KISClient(is_paper=False, account_no="MANUAL-01")
+        assert client.is_paper is False
+        assert client.account_no == "MANUAL-01"
+
+    def test_mode_tag_property(self):
+        """mode_tag가 올바른 형식을 반환한다."""
+        KISClient = _import_kis_client()
+        paper = KISClient(is_paper=True)
+        live = KISClient(is_paper=False)
+        assert paper.mode_tag == "[모의]"
+        assert live.mode_tag == "[실전]"
+
+    def test_base_url_by_mode(self):
+        """모드에 따라 올바른 API URL이 선택된다."""
+        KISClient = _import_kis_client()
+        paper = KISClient(is_paper=True)
+        live = KISClient(is_paper=False)
+        assert "openapivts" in paper.base_url
+        assert "openapivts" not in live.base_url
+
+    @patch.dict(os.environ, {"KIS_LIVE_CONFIRMED": "false"}, clear=False)
+    def test_live_confirmed_guard(self):
+        """KIS_LIVE_CONFIRMED=false이면 실전 리밸런싱이 거부된다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor 미구현")
+
+        mock_client = MagicMock()
+        mock_client.is_configured.return_value = True
+        mock_client.is_paper = False
+        mock_client.mode_tag = "[실전]"
+
+        executor = RebalanceExecutor(kis_client=mock_client)
+        result = executor.execute_rebalance({"005930": 0.5})
+
+        assert result["success"] is False
+        assert any("KIS_LIVE_CONFIRMED" in e for e in result["errors"])
+
+    def test_live_risk_guard_defaults(self):
+        """실전 모드 RiskGuard가 보수적 한도를 사용한다."""
+        RiskGuard = _import_risk_guard()
+
+        paper_rg = RiskGuard()
+        live_rg = RiskGuard(is_live=True)
+
+        assert live_rg.max_order_pct < paper_rg.max_order_pct
+        assert live_rg.max_daily_turnover < paper_rg.max_daily_turnover
+        assert live_rg.max_single_stock_pct < paper_rg.max_single_stock_pct

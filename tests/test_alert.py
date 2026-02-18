@@ -4,6 +4,7 @@ TelegramNotifier, AlertManager, 조건 클래스(Condition)들을 검증한다.
 외부 API(텔레그램)는 mock 처리한다.
 """
 
+import os
 import time
 from unittest.mock import MagicMock, patch
 
@@ -27,6 +28,7 @@ from src.alert.telegram_bot import TelegramNotifier
 class TestTelegramNotifier:
     """TelegramNotifier 기본 동작 검증."""
 
+    @patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
     def test_telegram_not_configured(self):
         """토큰이 없으면 is_configured()가 False를 반환한다."""
         notifier = TelegramNotifier(bot_token="", chat_id="")
@@ -46,6 +48,7 @@ class TestTelegramNotifier:
             "토큰과 chat_id가 설정되면 is_configured()는 True여야 합니다."
         )
 
+    @patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""})
     def test_send_message_not_configured(self):
         """미설정 상태에서 send_message는 False를 반환한다."""
         notifier = TelegramNotifier(bot_token="", chat_id="")

@@ -95,28 +95,25 @@ def get_financial_statements(
     reprt_code = reprt_code_map.get(quarter, "11011")
 
     try:
-        # 손익계산서 조회
-        time.sleep(_RATE_LIMIT_SLEEP)
-        income_stmt = dart.finstate(corp_code, year, reprt_code=reprt_code, fs_div="CFS")
-        if income_stmt is None or income_stmt.empty:
-            # 연결재무제표 없으면 개별재무제표 조회
-            time.sleep(_RATE_LIMIT_SLEEP)
-            income_stmt = dart.finstate(corp_code, year, reprt_code=reprt_code, fs_div="OFS")
-
-        # 재무상태표 조회
-        time.sleep(_RATE_LIMIT_SLEEP)
-        balance_sheet = dart.finstate(corp_code, year, reprt_code=reprt_code, fs_div="CFS")
-        if balance_sheet is None or balance_sheet.empty:
-            time.sleep(_RATE_LIMIT_SLEEP)
-            balance_sheet = dart.finstate(corp_code, year, reprt_code=reprt_code, fs_div="OFS")
-
-        if income_stmt is None or income_stmt.empty:
-            logger.warning(f"재무제표 데이터 없음: {corp_code}, {year}Q{quarter}")
-            return pd.DataFrame()
-
         # 계정과목 추출 헬퍼
         def _extract_amount(df: pd.DataFrame, account_names: list[str]) -> Optional[float]:
-            """재무제표에서 특정 계정과목의 금액을 추출한다."""
+            """재무제표에서 특정 계정과목의 금액을 추출한다.
+
+            정확 매칭(==)을 우선 시도하고, 없으면 부분 매칭(contains)으로 fallback.
+            "부채총계"가 "자본과부채총계"에 매칭되는 문제 방지.
+            """
+            # 1차: 정확 매칭
+            for name in account_names:
+                mask = df["account_nm"].str.strip() == name
+                if mask.any():
+                    val = df.loc[mask, "thstrm_amount"].iloc[0]
+                    if isinstance(val, str):
+                        val = val.replace(",", "")
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        continue
+            # 2차: 부분 매칭 (fallback)
             for name in account_names:
                 mask = df["account_nm"].str.contains(name, na=False)
                 if mask.any():
@@ -129,21 +126,49 @@ def get_financial_statements(
                         continue
             return None
 
-        # 주요 계정 추출
-        net_income = _extract_amount(income_stmt, ["당기순이익", "당기순손익"])
-        equity = _extract_amount(balance_sheet, ["자본총계"])
-        total_assets = _extract_amount(balance_sheet, ["자산총계"])
-        total_liabilities = _extract_amount(balance_sheet, ["부채총계"])
-        gross_profit = _extract_amount(income_stmt, ["매출총이익"])
-        operating_income = _extract_amount(income_stmt, ["영업이익"])
-
-        # 현금흐름표에서 영업활동현금흐름 조회
+        # 상세 재무제표(finstate_all) 우선 시도 — 매출총이익, 현금흐름 포함
         time.sleep(_RATE_LIMIT_SLEEP)
+        stmt = None
         try:
-            cf_stmt = dart.finstate(corp_code, year, reprt_code=reprt_code, fs_div="CFS")
-            operating_cf = _extract_amount(cf_stmt, ["영업활동현금흐름", "영업활동으로인한현금흐름"]) if cf_stmt is not None else None
+            detail = dart.finstate_all(corp_code, year, reprt_code=reprt_code)
+            if detail is not None and not detail.empty:
+                stmt = detail
         except Exception:
-            operating_cf = None
+            pass
+
+        # finstate_all 실패 시 finstate(요약) fallback
+        if stmt is None or stmt.empty:
+            time.sleep(_RATE_LIMIT_SLEEP)
+            all_stmt = dart.finstate(corp_code, year, reprt_code=reprt_code)
+            if all_stmt is None or all_stmt.empty:
+                logger.warning(f"재무제표 데이터 없음: {corp_code}, {year}Q{quarter}")
+                return pd.DataFrame()
+            # 연결재무제표(CFS) 우선, 없으면 개별(OFS)
+            if "fs_div" in all_stmt.columns:
+                cfs = all_stmt[all_stmt["fs_div"] == "CFS"]
+                ofs = all_stmt[all_stmt["fs_div"] == "OFS"]
+                stmt = cfs if not cfs.empty else ofs
+            else:
+                stmt = all_stmt
+
+        if stmt is None or stmt.empty:
+            logger.warning(f"재무제표 데이터 없음: {corp_code}, {year}Q{quarter}")
+            return pd.DataFrame()
+
+        # 주요 계정 추출 (IFRS 기업별 계정명 차이 대응)
+        net_income = _extract_amount(stmt, ["당기순이익", "당기순손익"])
+        equity = _extract_amount(stmt, ["자본총계"])
+        total_assets = _extract_amount(stmt, [
+            "자산총계", "부채와자본총계", "부채와 자본 총계",
+            "자본과부채총계", "부채및자본총계",
+        ])
+        total_liabilities = _extract_amount(stmt, ["부채총계"])
+        # 부채총계가 없으면 자산 - 자본으로 계산
+        if total_liabilities is None and total_assets is not None and equity is not None:
+            total_liabilities = total_assets - equity
+        gross_profit = _extract_amount(stmt, ["매출총이익"])
+        operating_income = _extract_amount(stmt, ["영업이익"])
+        operating_cf = _extract_amount(stmt, ["영업활동현금흐름", "영업활동으로인한현금흐름"])
 
         # 지표 산출
         roe = (net_income / equity * 100) if (net_income is not None and equity and equity != 0) else np.nan
