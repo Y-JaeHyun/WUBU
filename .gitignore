@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+data/*.csv
+data/*.parquet
+data/*.pkl
+.ipynb_checkpoints/
+*.egg-info/
+dist/
+build/
+.venv/
+logs/
+*.log
+.pytest_cache/
+output/
+reports/

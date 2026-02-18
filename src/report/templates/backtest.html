@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ title }}</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #c9d1d9; --text-muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 2rem; line-height: 1.6; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 1.8rem; color: #fff; margin-bottom: .3rem; }
+  header .meta { font-size: .85rem; color: var(--text-muted); }
+  .strategy-block { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  .strategy-block h2 { font-size: 1.3rem; color: #fff; margin-bottom: 1rem; padding-bottom: .5rem; border-bottom: 1px solid var(--border); }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; text-align: center; }
+  .kpi .label { font-size: .75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+  .kpi .value { font-size: 1.5rem; font-weight: 700; margin-top: .25rem; }
+  .kpi .value.positive { color: var(--green); }
+  .kpi .value.negative { color: var(--red); }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; font-size: .9rem; }
+  th { background: var(--bg); color: var(--text-muted); font-weight: 600; text-align: left; padding: .6rem .8rem; border-bottom: 2px solid var(--border); }
+  td { padding: .5rem .8rem; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(88,166,255,.04); }
+  .text-right { text-align: right; }
+  .text-center { text-align: center; }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+  .chart-section { margin: 1.5rem 0; }
+  .chart-section h3 { font-size: 1rem; color: var(--text-muted); margin-bottom: .8rem; }
+  .chart-section img { width: 100%; border-radius: 6px; border: 1px solid var(--border); }
+  .compare-table th, .compare-table td { text-align: center; }
+  .compare-table td:first-child, .compare-table th:first-child { text-align: left; }
+  .best { background: rgba(63,185,80,.1); font-weight: 700; }
+  footer { text-align: center; color: var(--text-muted); font-size: .8rem; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>{{ title }}</h1>
+  <div class="meta">{{ generated_at }} | {{ period }}</div>
+</header>
+
+{% for s in strategies %}
+<section class="strategy-block">
+  <h2>{{ s.name }}</h2>
+  <div class="kpi-grid">
+    <div class="kpi">
+      <div class="label">Total Return</div>
+      <div class="value {{ 'positive' if s.total_return >= 0 else 'negative' }}">{{ "%.2f"|format(s.total_return) }}%</div>
+    </div>
+    <div class="kpi">
+      <div class="label">CAGR</div>
+      <div class="value {{ 'positive' if s.cagr >= 0 else 'negative' }}">{{ "%.2f"|format(s.cagr) }}%</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Sharpe Ratio</div>
+      <div class="value">{{ "%.2f"|format(s.sharpe_ratio) }}</div>
+    </div>
+    <div class="kpi">
+      <div class="label">MDD</div>
+      <div class="value negative">{{ "%.2f"|format(s.mdd) }}%</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Win Rate</div>
+      <div class="value">{{ "%.1f"|format(s.win_rate) }}%</div>
+    </div>
+    <div class="kpi">
+      <div class="label">Total Trades</div>
+      <div class="value">{{ s.total_trades|commafy }}</div>
+    </div>
+  </div>
+
+  <table>
+    <tr><th>Metric</th><th class="text-right">Value</th></tr>
+    <tr><td>Initial Capital</td><td class="text-right">{{ s.initial_capital|commafy }} KRW</td></tr>
+    <tr><td>Final Value</td><td class="text-right">{{ s.final_value|commafy }} KRW</td></tr>
+    <tr><td>Period</td><td class="text-right">{{ s.start_date }} ~ {{ s.end_date }}</td></tr>
+    <tr><td>Rebalance Count</td><td class="text-right">{{ s.rebalance_count }}</td></tr>
+  </table>
+
+  {% if s.annual_returns %}
+  <h3>Annual Returns</h3>
+  <table>
+    <tr><th class="text-center">Year</th><th class="text-right">Return</th></tr>
+    {% for ar in s.annual_returns %}
+    <tr>
+      <td class="text-center">{{ ar.year }}</td>
+      <td class="text-right {{ 'positive' if ar.return_pct >= 0 else 'negative' }}">{{ "%.2f"|format(ar.return_pct) }}%</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</section>
+{% endfor %}
+
+{% if charts %}
+<section class="strategy-block">
+  <h2>Charts</h2>
+  {% for chart in charts %}
+  <div class="chart-section">
+    <h3>{{ chart.title }}</h3>
+    <img src="{{ chart.path }}" alt="{{ chart.title }}">
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if comparison %}
+<section class="strategy-block">
+  <h2>Strategy Comparison</h2>
+  <table class="compare-table">
+    <tr>
+      <th>Metric</th>
+      {% for name in comparison.names %}
+      <th>{{ name }}</th>
+      {% endfor %}
+    </tr>
+    {% for row in comparison.rows %}
+    <tr>
+      <td>{{ row.metric }}</td>
+      {% for i in range(row.values|length) %}
+      <td class="{{ 'best' if row.best_idx == i else '' }}">{{ row.values[i] }}</td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endif %}
+
+<footer>
+  Generated by Quant Backtest System
+</footer>
+
+</div>
+</body>
+</html>
