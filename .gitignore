@@ -1,16 +1,44 @@
+# 환경변수 / 시크릿 (절대 커밋 금지)
 .env
+.env.local
+.env.production
+*.pem
+*.key
+
+# Python
 __pycache__/
 *.pyc
-data/*.csv
-data/*.parquet
-data/*.pkl
-.ipynb_checkpoints/
+*.pyo
 *.egg-info/
 dist/
 build/
 .venv/
+
+# 데이터 (용량 큼)
+data/*.csv
+data/*.parquet
+data/*.pkl
+data/*.h5
+
+# 로그
 logs/
 *.log
+
+# ML 모델 저장
+models/
+*.joblib
+*.pickle
+
+# IDE / 편집기
+.ipynb_checkpoints/
+.vscode/
+.idea/
+
+# 테스트 / 빌드
 .pytest_cache/
+htmlcov/
+.coverage
+
+# 산출물
 output/
 reports/
