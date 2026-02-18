@@ -20,5 +20,14 @@ matplotlib>=3.7
 # Environment
 python-dotenv>=1.0
 
+# DART financial data
+opendartreader>=0.2
+
+# KIS API WebSocket
+websockets>=12.0
+
+# HTML reports
+jinja2>=3.1
+
 # Testing
 pytest>=7.4

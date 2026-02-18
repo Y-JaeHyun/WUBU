@@ -19,12 +19,14 @@
 ├── .env               # 환경변수 (API 키 등)
 ├── src/               # 소스 코드
 │   ├── data/          # 데이터 수집/처리 (collector, index_collector)
-│   ├── strategy/      # 트레이딩 전략 (value, momentum, market_timing, factor_combiner, multi_factor)
+│   ├── strategy/      # 트레이딩 전략 (value, momentum, quality, three_factor, dual_momentum, factor_combiner, multi_factor, market_timing)
 │   ├── backtest/      # 백테스팅 엔진 (오버레이 지원)
 │   ├── report/        # 리포트/차트 (backtest_report, charts, metrics, scanner, daily_report)
 │   ├── alert/         # 알림 시스템 (telegram_bot, conditions, alert_manager)
+│   ├── execution/     # 실전 매매 (kis_client, order_manager, position_manager, executor, risk_guard)
+│   ├── scheduler/     # 자동화 스케줄러 (holidays, main)
 │   └── utils/         # 유틸리티
-├── tests/             # 테스트 (168+ 테스트 케이스)
+├── tests/             # 테스트 (253+ 테스트 케이스)
 ├── docs/              # 리서치/문서
 └── data/              # 데이터 저장
 ```
@@ -125,5 +127,5 @@ Research -> Planning -> Development -> QA -> 배포
 ## Development Roadmap
 - **Phase 1**: 인프라 + 밸류 팩터 (데이터 파이프라인, 백테스팅 엔진, 밸류 전략) ✅ 완료
 - **Phase 2**: 모멘텀 + 마켓 타이밍 (모멘텀 팩터, 이동평균 오버레이, 리포트, 알림) ✅ 완료
-- **Phase 3**: 멀티팩터 + 자산배분 (3팩터 모델, 듀얼 모멘텀)
-- **Phase 4**: 고도화 (리스크 패리티, ML 실험, 실전 매매 시스템, 스케줄러, install script)
+- **Phase 3**: 멀티팩터 + 자산배분 + 실전매매 (퀄리티팩터, 3팩터모델, 듀얼모멘텀, KIS API, 스케줄러) ✅ 완료
+- **Phase 4**: 고도화 (리스크 패리티, ML 실험, WebSocket 실시간, systemd 배포, install script)

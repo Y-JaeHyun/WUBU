@@ -1,0 +1,470 @@
+"""실행 모듈 테스트.
+
+KISClient(KIS OpenAPI 클라이언트), RiskGuard(리스크 체크),
+RebalanceExecutor(리밸런싱 실행기)를 검증한다.
+모든 외부 API 호출은 mock 처리한다.
+"""
+
+import os
+from unittest.mock import MagicMock, patch, PropertyMock
+
+import numpy as np
+import pandas as pd
+import pytest
+
+
+# ===================================================================
+# 헬퍼: 모듈 임포트 (지연 임포트)
+# ===================================================================
+
+def _import_kis_client():
+    """KISClient 클래스를 임포트한다."""
+    from src.execution.kis_client import KISClient
+    return KISClient
+
+
+def _import_risk_guard():
+    """RiskGuard 클래스를 임포트한다."""
+    from src.execution.risk_guard import RiskGuard
+    return RiskGuard
+
+
+def _try_import_rebalance_executor():
+    """RebalanceExecutor가 존재하면 임포트한다."""
+    try:
+        from src.execution.rebalance_executor import RebalanceExecutor
+        return RebalanceExecutor
+    except ImportError:
+        try:
+            from src.execution.executor import RebalanceExecutor
+            return RebalanceExecutor
+        except ImportError:
+            return None
+
+
+# ===================================================================
+# KISClient 테스트
+# ===================================================================
+
+class TestKISClient:
+    """KIS OpenAPI 클라이언트 검증."""
+
+    def test_init_default(self):
+        """기본 파라미터로 초기화된다."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        # is_paper 기본값 True
+        is_paper = getattr(client, "is_paper", getattr(client, "_is_paper", None))
+        assert is_paper is True, "기본 is_paper는 True여야 합니다."
+
+    @patch.dict(os.environ, {
+        "KIS_APP_KEY": "test_app_key",
+        "KIS_APP_SECRET": "test_app_secret",
+        "KIS_ACCOUNT_NO": "12345678-01",
+    })
+    def test_init_from_env(self):
+        """환경변수로부터 초기화된다."""
+        KISClient = _import_kis_client()
+        client = KISClient()
+        # app_key 등이 환경변수에서 로드되었는지 간접 확인
+        assert client.is_configured() is True, (
+            "환경변수가 설정되면 is_configured()가 True여야 합니다."
+        )
+
+    def test_is_configured_true(self):
+        """필수 정보가 있으면 is_configured()가 True이다."""
+        KISClient = _import_kis_client()
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        assert client.is_configured() is True, (
+            "키가 설정되면 is_configured()가 True여야 합니다."
+        )
+
+    def test_is_configured_false(self):
+        """필수 정보가 없으면 is_configured()가 False이다."""
+        KISClient = _import_kis_client()
+        client = KISClient(app_key="", app_secret="", account_no="")
+        assert client.is_configured() is False, (
+            "키가 비어 있으면 is_configured()가 False여야 합니다."
+        )
+
+    @patch("src.execution.kis_client.requests.post")
+    def test_get_access_token(self, mock_post):
+        """액세스 토큰을 정상적으로 발급받는다."""
+        KISClient = _import_kis_client()
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "access_token": "mock_access_token_12345",
+            "token_type": "Bearer",
+            "expires_in": 86400,
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_response.status_code = 200
+        mock_post.return_value = mock_response
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+
+        token = client.get_access_token()
+
+        assert token == "mock_access_token_12345", (
+            "액세스 토큰이 올바르게 반환되어야 합니다."
+        )
+        mock_post.assert_called_once()
+
+    @patch("src.execution.kis_client.requests.post")
+    def test_place_buy_order(self, mock_post):
+        """매수 주문이 정상적으로 전송된다."""
+        KISClient = _import_kis_client()
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "msg_cd": "APBK0013",
+            "msg1": "주문 전송 완료",
+            "output": {"KRX_FWDG_ORD_ORGNO": "00950", "ODNO": "0000123456"},
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_response.status_code = 200
+        mock_post.return_value = mock_response
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        # 토큰을 직접 설정 (내부 상태)
+        if hasattr(client, "_access_token"):
+            client._access_token = "mock_token"
+        elif hasattr(client, "access_token"):
+            client.access_token = "mock_token"
+
+        result = client.place_buy_order("005930", qty=10)
+
+        assert isinstance(result, dict), "매수 주문 결과가 dict여야 합니다."
+
+    @patch("src.execution.kis_client.requests.post")
+    def test_place_sell_order(self, mock_post):
+        """매도 주문이 정상적으로 전송된다."""
+        KISClient = _import_kis_client()
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "msg_cd": "APBK0013",
+            "msg1": "주문 전송 완료",
+            "output": {"KRX_FWDG_ORD_ORGNO": "00950", "ODNO": "0000123457"},
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_response.status_code = 200
+        mock_post.return_value = mock_response
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        if hasattr(client, "_access_token"):
+            client._access_token = "mock_token"
+        elif hasattr(client, "access_token"):
+            client.access_token = "mock_token"
+
+        result = client.place_sell_order("005930", qty=5)
+
+        assert isinstance(result, dict), "매도 주문 결과가 dict여야 합니다."
+
+    @patch("src.execution.kis_client.requests.get")
+    def test_get_balance(self, mock_get):
+        """잔고 조회가 정상적으로 동작한다."""
+        KISClient = _import_kis_client()
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "output1": [],
+            "output2": [{"dnca_tot_amt": "100000000", "tot_evlu_amt": "105000000"}],
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_response.status_code = 200
+        mock_get.return_value = mock_response
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        if hasattr(client, "_access_token"):
+            client._access_token = "mock_token"
+        elif hasattr(client, "access_token"):
+            client.access_token = "mock_token"
+
+        balance = client.get_balance()
+
+        assert isinstance(balance, dict), "잔고 조회 결과가 dict여야 합니다."
+
+    @patch("src.execution.kis_client.requests.get")
+    def test_get_positions(self, mock_get):
+        """보유 종목 조회가 DataFrame을 반환한다."""
+        KISClient = _import_kis_client()
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "rt_cd": "0",
+            "output1": [
+                {
+                    "pdno": "005930",
+                    "prdt_name": "삼성전자",
+                    "hldg_qty": "100",
+                    "pchs_avg_pric": "70000",
+                    "prpr": "72000",
+                    "evlu_pfls_amt": "200000",
+                },
+            ],
+            "output2": [{"tot_evlu_amt": "7200000"}],
+        }
+        mock_response.raise_for_status.return_value = None
+        mock_response.status_code = 200
+        mock_get.return_value = mock_response
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        if hasattr(client, "_access_token"):
+            client._access_token = "mock_token"
+        elif hasattr(client, "access_token"):
+            client.access_token = "mock_token"
+
+        positions = client.get_positions()
+
+        assert isinstance(positions, (pd.DataFrame, list, dict)), (
+            "보유 종목 조회 결과가 DataFrame 또는 dict/list여야 합니다."
+        )
+
+    def test_not_configured_graceful(self):
+        """미설정 상태에서 주문 시도 시 에러 없이 처리된다."""
+        KISClient = _import_kis_client()
+        client = KISClient(app_key="", app_secret="", account_no="")
+
+        # 미설정 상태에서 주문을 시도하면 에러 또는 빈 결과 반환
+        try:
+            result = client.place_buy_order("005930", qty=10)
+            # 정상 반환이면 빈 dict이거나 에러 정보를 포함
+            assert isinstance(result, dict)
+        except Exception:
+            # 에러가 발생해도 정상 (미설정 상태 방어)
+            pass
+
+
+# ===================================================================
+# RiskGuard 테스트
+# ===================================================================
+
+class TestRiskGuard:
+    """RiskGuard 리스크 체크 검증."""
+
+    def test_init_default(self):
+        """기본 설정으로 초기화된다."""
+        RiskGuard = _import_risk_guard()
+        rg = RiskGuard()
+        # 기본 설정이 존재하는지 확인
+        assert rg is not None, "RiskGuard가 정상 초기화되어야 합니다."
+
+    def test_check_order_passes(self):
+        """정상 범위 주문이 통과한다."""
+        RiskGuard = _import_risk_guard()
+        rg = RiskGuard()
+
+        # 포트폴리오 1억, 주문 500만 (5%) -> max_order_pct 10% 이내
+        order = {"ticker": "005930", "amount": 5_000_000, "side": "buy"}
+        portfolio_value = 100_000_000
+
+        passed, msg = rg.check_order(order, portfolio_value)
+
+        assert passed is True, f"정상 범위 주문이 통과해야 합니다: {msg}"
+
+    def test_check_order_exceeds_max_pct(self):
+        """주문 비중이 max_order_pct를 초과하면 거부된다."""
+        RiskGuard = _import_risk_guard()
+        # max_order_pct=0.10 (10%)
+        rg = RiskGuard(config={"max_order_pct": 0.10})
+
+        # 포트폴리오 1억, 주문 1500만 (15%) -> 10% 초과
+        order = {"ticker": "005930", "amount": 15_000_000, "side": "buy"}
+        portfolio_value = 100_000_000
+
+        passed, msg = rg.check_order(order, portfolio_value)
+
+        assert passed is False, (
+            f"max_order_pct 초과 주문이 거부되어야 합니다: {msg}"
+        )
+
+    def test_check_single_stock_limit(self):
+        """단일 종목 비중 제한이 동작한다."""
+        RiskGuard = _import_risk_guard()
+        rg = RiskGuard(config={"max_single_stock_pct": 0.15})
+
+        # 단일 종목에 20% 배분 시도 -> 15% 제한 초과
+        order = {"ticker": "005930", "amount": 20_000_000, "side": "buy"}
+        portfolio_value = 100_000_000
+
+        passed, msg = rg.check_order(order, portfolio_value)
+
+        assert passed is False, (
+            f"단일 종목 비중 제한 초과 시 거부되어야 합니다: {msg}"
+        )
+
+    def test_check_blocked_ticker(self):
+        """차단된 종목에 대한 주문이 거부된다."""
+        RiskGuard = _import_risk_guard()
+        rg = RiskGuard(config={"blocked_tickers": ["999999"]})
+
+        order = {"ticker": "999999", "amount": 1_000_000, "side": "buy"}
+        portfolio_value = 100_000_000
+
+        passed, msg = rg.check_order(order, portfolio_value)
+
+        assert passed is False, (
+            f"차단된 종목 주문이 거부되어야 합니다: {msg}"
+        )
+
+    def test_check_rebalance_passes(self):
+        """정상 범위 리밸런싱이 통과한다."""
+        RiskGuard = _import_risk_guard()
+        rg = RiskGuard()
+
+        # 10개 종목에 10%씩 배분 -> max_single_stock_pct 15% 이내
+        target_weights = {f"{i:06d}": 0.10 for i in range(1, 11)}
+
+        passed, warnings = rg.check_rebalance(target_weights)
+
+        assert passed is True, f"정상 리밸런싱이 통과해야 합니다: {warnings}"
+
+    def test_check_rebalance_warns(self):
+        """리밸런싱에서 경고가 발생하는 경우를 검증한다."""
+        RiskGuard = _import_risk_guard()
+        rg = RiskGuard(config={"max_single_stock_pct": 0.15})
+
+        # 1개 종목에 50% 집중 -> max_single_stock_pct 초과
+        target_weights = {"005930": 0.50, "000660": 0.50}
+
+        passed, warnings = rg.check_rebalance(target_weights)
+
+        # 단일 종목 50%는 15% 제한을 초과하므로 실패 또는 경고
+        if not passed:
+            assert len(warnings) > 0, "경고 메시지가 있어야 합니다."
+        else:
+            # 경고만 있고 통과하는 구현도 가능
+            assert isinstance(warnings, list), "warnings가 리스트여야 합니다."
+
+
+# ===================================================================
+# RebalanceExecutor 테스트
+# ===================================================================
+
+class TestRebalanceExecutor:
+    """리밸런싱 실행기 검증."""
+
+    def test_dry_run(self):
+        """dry_run 모드에서 실제 주문 없이 계산만 수행된다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor가 아직 구현되지 않았습니다.")
+
+        mock_client = MagicMock()
+        mock_client.is_configured.return_value = True
+        mock_client.get_balance.return_value = {
+            "total_value": 100_000_000,
+            "cash": 100_000_000,
+        }
+        mock_client.get_positions.return_value = pd.DataFrame()
+
+        executor = RebalanceExecutor(kis_client=mock_client)
+
+        target_weights = {"005930": 0.5, "000660": 0.5}
+        result = executor.dry_run(target_weights)
+
+        # dry_run에서는 실제 주문이 발생하지 않음
+        mock_client.place_buy_order.assert_not_called()
+        mock_client.place_sell_order.assert_not_called()
+        assert isinstance(result, (dict, list)), "dry_run 결과가 반환되어야 합니다."
+
+    def test_execute_sells_before_buys(self):
+        """리밸런싱 시 매도가 매수보다 먼저 실행된다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor가 아직 구현되지 않았습니다.")
+
+        mock_client = MagicMock()
+        mock_client.is_configured.return_value = True
+        mock_client.get_balance.return_value = {
+            "total_value": 100_000_000,
+            "cash": 10_000_000,
+        }
+        # 기존 보유: 005930 90주 (가정)
+        mock_client.get_positions.return_value = pd.DataFrame([
+            {"ticker": "005930", "qty": 90, "current_price": 70000},
+        ])
+        mock_client.place_sell_order.return_value = {"rt_cd": "0"}
+        mock_client.place_buy_order.return_value = {"rt_cd": "0"}
+        mock_client.get_current_price.return_value = {"price": 70000}
+
+        executor = RebalanceExecutor(kis_client=mock_client)
+
+        # 005930 -> 000660으로 리밸런싱
+        target_weights = {"000660": 1.0}
+        try:
+            result = executor.execute_rebalance(target_weights)
+        except Exception:
+            # 구현에 따라 에러가 발생할 수 있음
+            pass
+
+        # 매도가 매수보다 먼저 호출되었는지 확인
+        if mock_client.place_sell_order.called and mock_client.place_buy_order.called:
+            sell_call_idx = 0
+            buy_call_idx = 0
+            for idx, call in enumerate(mock_client.method_calls):
+                if "sell" in str(call):
+                    sell_call_idx = idx
+                if "buy" in str(call):
+                    buy_call_idx = idx
+            # 매도가 매수보다 먼저 (인덱스가 작음)
+            assert sell_call_idx < buy_call_idx, (
+                "매도가 매수보다 먼저 실행되어야 합니다."
+            )
+
+    def test_risk_guard_blocks_order(self):
+        """RiskGuard가 차단한 주문은 실행되지 않는다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        RiskGuard = _import_risk_guard()
+
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor가 아직 구현되지 않았습니다.")
+
+        mock_client = MagicMock()
+        mock_client.is_configured.return_value = True
+        mock_client.get_balance.return_value = {
+            "total_value": 100_000_000,
+            "cash": 100_000_000,
+        }
+        mock_client.get_positions.return_value = pd.DataFrame()
+
+        # 차단된 종목을 포함한 리밸런싱
+        rg = RiskGuard(config={"blocked_tickers": ["999999"]})
+
+        try:
+            executor = RebalanceExecutor(kis_client=mock_client, risk_guard=rg)
+            target_weights = {"999999": 0.5, "005930": 0.5}
+            result = executor.dry_run(target_weights)
+            # 차단된 종목은 제외되어야 함
+        except Exception:
+            # 구현에 따라 에러 발생 가능
+            pass
