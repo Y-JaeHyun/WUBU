@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ title | default("일일 리포트") }}</title>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #c9d1d9; --text-muted: #8b949e; --accent: #58a6ff;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); padding: 2rem; line-height: 1.6; }
+  .container { max-width: 1100px; margin: 0 auto; }
+  header { text-align: center; margin-bottom: 2rem; padding-bottom: 1.5rem; border-bottom: 1px solid var(--border); }
+  header h1 { font-size: 1.8rem; color: #fff; margin-bottom: .3rem; }
+  header .meta { font-size: .85rem; color: var(--text-muted); }
+
+  .section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; }
+  .section h2 { font-size: 1.3rem; color: #fff; margin-bottom: 1rem; padding-bottom: .5rem; border-bottom: 1px solid var(--border); }
+
+  /* KPI 대시보드 */
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+  .kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 1rem; text-align: center; }
+  .kpi .label { font-size: .75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+  .kpi .value { font-size: 1.5rem; font-weight: 700; margin-top: .25rem; }
+  .kpi .value.positive { color: var(--green); }
+  .kpi .value.negative { color: var(--red); }
+
+  /* 테이블 */
+  table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; font-size: .9rem; }
+  th { background: var(--bg); color: var(--text-muted); font-weight: 600; text-align: left; padding: .6rem .8rem; border-bottom: 2px solid var(--border); }
+  td { padding: .5rem .8rem; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(88,166,255,.04); }
+  .text-right { text-align: right; }
+  .text-center { text-align: center; }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+
+  /* 차트 영역 */
+  .chart-container { margin: 1rem 0; }
+  .chart-container img { width: 100%; border-radius: 6px; border: 1px solid var(--border); }
+
+  /* 리스크 지표 */
+  .risk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .8rem; }
+  .risk-item { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: .8rem; }
+  .risk-item .label { font-size: .7rem; color: var(--text-muted); text-transform: uppercase; }
+  .risk-item .value { font-size: 1.2rem; font-weight: 600; margin-top: .2rem; }
+
+  /* 알림 이력 */
+  .alert-item { padding: .6rem .8rem; border-left: 3px solid var(--border); margin-bottom: .5rem; background: var(--bg); border-radius: 0 4px 4px 0; }
+  .alert-item.critical { border-left-color: var(--red); }
+  .alert-item.warning { border-left-color: var(--yellow); }
+  .alert-item.info { border-left-color: var(--accent); }
+  .alert-item .time { font-size: .75rem; color: var(--text-muted); }
+  .alert-item .msg { margin-top: .2rem; }
+
+  footer { text-align: center; color: var(--text-muted); font-size: .8rem; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>{{ title | default("일일 리포트") }}</h1>
+  <div class="meta">{{ report_date }} | 생성: {{ generated_at }}</div>
+</header>
+
+<!-- KPI 대시보드 -->
+<section class="section">
+  <h2>포트폴리오 요약</h2>
+  <div class="kpi-grid">
+    <div class="kpi">
+      <div class="label">총 평가금액</div>
+      <div class="value">{{ "{:,.0f}".format(total_value) }}원</div>
+    </div>
+    <div class="kpi">
+      <div class="label">일일 수익률</div>
+      <div class="value {{ 'positive' if daily_return >= 0 else 'negative' }}">
+        {{ "%+.2f"|format(daily_return) }}%
+      </div>
+    </div>
+    <div class="kpi">
+      <div class="label">누적 수익률</div>
+      <div class="value {{ 'positive' if cumulative_return >= 0 else 'negative' }}">
+        {{ "%+.2f"|format(cumulative_return) }}%
+      </div>
+    </div>
+    <div class="kpi">
+      <div class="label">MDD</div>
+      <div class="value negative">{{ "%.2f"|format(mdd) }}%</div>
+    </div>
+    <div class="kpi">
+      <div class="label">보유 현금</div>
+      <div class="value">{{ "{:,.0f}".format(cash) }}원</div>
+    </div>
+    <div class="kpi">
+      <div class="label">보유 종목 수</div>
+      <div class="value">{{ num_holdings }}개</div>
+    </div>
+  </div>
+</section>
+
+<!-- 보유 종목 테이블 -->
+{% if holdings %}
+<section class="section">
+  <h2>보유 종목</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>종목코드</th>
+        <th>종목명</th>
+        <th class="text-right">수량</th>
+        <th class="text-right">현재가</th>
+        <th class="text-right">평가금액</th>
+        <th class="text-right">비중</th>
+        <th class="text-right">수익률</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for h in holdings %}
+      <tr>
+        <td>{{ h.ticker }}</td>
+        <td>{{ h.name }}</td>
+        <td class="text-right">{{ "{:,.0f}".format(h.quantity) }}</td>
+        <td class="text-right">{{ "{:,.0f}".format(h.price) }}원</td>
+        <td class="text-right">{{ "{:,.0f}".format(h.eval_amount) }}원</td>
+        <td class="text-right">{{ "%.1f"|format(h.weight) }}%</td>
+        <td class="text-right {{ 'positive' if h.return_pct >= 0 else 'negative' }}">
+          {{ "%+.2f"|format(h.return_pct) }}%
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<!-- 리스크 지표 -->
+{% if risk_metrics %}
+<section class="section">
+  <h2>리스크 지표</h2>
+  <div class="risk-grid">
+    {% if risk_metrics.var_95 is defined %}
+    <div class="risk-item">
+      <div class="label">VaR (95%)</div>
+      <div class="value negative">{{ "%.2f"|format(risk_metrics.var_95) }}%</div>
+    </div>
+    {% endif %}
+    {% if risk_metrics.cvar_95 is defined %}
+    <div class="risk-item">
+      <div class="label">CVaR (95%)</div>
+      <div class="value negative">{{ "%.2f"|format(risk_metrics.cvar_95) }}%</div>
+    </div>
+    {% endif %}
+    {% if risk_metrics.volatility is defined %}
+    <div class="risk-item">
+      <div class="label">변동성 (연율)</div>
+      <div class="value">{{ "%.2f"|format(risk_metrics.volatility) }}%</div>
+    </div>
+    {% endif %}
+    {% if risk_metrics.sharpe is defined %}
+    <div class="risk-item">
+      <div class="label">샤프 비율</div>
+      <div class="value">{{ "%.2f"|format(risk_metrics.sharpe) }}</div>
+    </div>
+    {% endif %}
+    {% if risk_metrics.beta is defined %}
+    <div class="risk-item">
+      <div class="label">베타</div>
+      <div class="value">{{ "%.2f"|format(risk_metrics.beta) }}</div>
+    </div>
+    {% endif %}
+    {% if risk_metrics.sortino is defined %}
+    <div class="risk-item">
+      <div class="label">소르티노 비율</div>
+      <div class="value">{{ "%.2f"|format(risk_metrics.sortino) }}</div>
+    </div>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+<!-- 차트 -->
+{% if charts %}
+<section class="section">
+  <h2>차트</h2>
+  {% for chart in charts %}
+  <div class="chart-container">
+    {% if chart.html %}
+      {{ chart.html | safe }}
+    {% elif chart.path %}
+      <img src="{{ chart.path }}" alt="{{ chart.title | default('차트') }}">
+    {% endif %}
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<!-- 알림 이력 -->
+{% if alert_history %}
+<section class="section">
+  <h2>알림 이력</h2>
+  {% for alert in alert_history %}
+  <div class="alert-item {{ alert.level | default('info') | lower }}">
+    <div class="time">{{ alert.timestamp }}</div>
+    <div class="msg">{{ alert.message }}</div>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<footer>
+  Generated by Quant Trading Bot
+</footer>
+
+</div>
+</body>
+</html>

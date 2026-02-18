@@ -213,3 +213,57 @@ def sample_daily_returns() -> pd.Series:
     np.random.seed(42)
     returns = np.random.randn(100) * 0.01 + 0.0003
     return pd.Series(returns, index=dates, name="daily_return")
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: 공분산/최적화 테스트용 fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sample_returns_matrix() -> pd.DataFrame:
+    """20개 종목 x 252일 수익률 행렬."""
+    np.random.seed(42)
+    n_stocks, n_days = 20, 252
+    tickers = [f"{i:06d}" for i in range(1, n_stocks + 1)]
+    dates = pd.bdate_range("2023-01-02", periods=n_days)
+    returns = np.random.randn(n_days, n_stocks) * 0.02
+    return pd.DataFrame(returns, index=dates, columns=tickers)
+
+
+@pytest.fixture
+def sample_covariance_matrix(sample_returns_matrix) -> pd.DataFrame:
+    """20x20 표본 공분산 행렬."""
+    return sample_returns_matrix.cov()
+
+
+@pytest.fixture
+def sample_ml_features() -> pd.DataFrame:
+    """30개 종목 x 12 피처 DataFrame."""
+    np.random.seed(42)
+    n = 30
+    tickers = [f"{i:06d}" for i in range(1, n + 1)]
+    features = {
+        "inv_pbr": np.random.rand(n),
+        "inv_per": np.random.rand(n),
+        "div_yield": np.random.rand(n) * 5,
+        "mom_12m": np.random.randn(n) * 0.3,
+        "mom_6m": np.random.randn(n) * 0.2,
+        "mom_3m": np.random.randn(n) * 0.15,
+        "roe": np.random.rand(n) * 30,
+        "gpa": np.random.rand(n) * 0.5,
+        "vol_20d": np.abs(np.random.randn(n) * 0.02) + 0.01,
+        "vol_60d": np.abs(np.random.randn(n) * 0.02) + 0.01,
+        "log_market_cap": np.random.randn(n) * 0.5 + 27,
+        "volume_ratio": np.random.rand(n) * 2 + 0.5,
+    }
+    return pd.DataFrame(features, index=tickers)
+
+
+@pytest.fixture
+def sample_ml_targets() -> pd.Series:
+    """30개 종목의 1개월 후 수익률."""
+    np.random.seed(42)
+    n = 30
+    tickers = [f"{i:06d}" for i in range(1, n + 1)]
+    returns = np.random.randn(n) * 0.1
+    return pd.Series(returns, index=tickers, name="forward_return")

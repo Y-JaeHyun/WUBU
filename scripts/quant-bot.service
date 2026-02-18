@@ -1,0 +1,23 @@
+[Unit]
+Description=Quant Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quant
+Group=quant
+WorkingDirectory=/mnt/data/quant
+Environment="PATH=/mnt/data/quant/.venv/bin"
+EnvironmentFile=/mnt/data/quant/.env
+ExecStart=/mnt/data/quant/.venv/bin/python -u src/scheduler/main.py
+Restart=on-failure
+RestartSec=30
+WatchdogSec=300
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=quant-bot
+
+[Install]
+WantedBy=multi-user.target
