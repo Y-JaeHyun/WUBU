@@ -3,6 +3,7 @@
 pykrx를 사용하여 KOSPI/KOSDAQ 종목의 OHLCV, 시가총액, 기본 지표 데이터를 수집한다.
 """
 
+import functools
 import time
 from typing import Optional
 
@@ -12,6 +13,33 @@ from pykrx import stock as pykrx_stock
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_MAX_RETRIES = 3
+_RETRY_DELAY = 2.0  # seconds
+
+
+def _retry_on_failure(func):
+    """pykrx API 호출 실패 시 재시도하는 데코레이터."""
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        last_exc = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_exc = e
+                if attempt < _MAX_RETRIES:
+                    delay = _RETRY_DELAY * attempt
+                    logger.warning(
+                        "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
+                        func.__name__, attempt, _MAX_RETRIES, e, delay,
+                    )
+                    time.sleep(delay)
+        logger.error("%s 최종 실패: %s", func.__name__, last_exc)
+        raise last_exc
+
+    return wrapper
 
 
 def _format_date(date) -> str:
@@ -24,6 +52,7 @@ def _format_date(date) -> str:
     return date.strftime("%Y%m%d")
 
 
+@_retry_on_failure
 def get_stock_list(market: str = "ALL") -> pd.DataFrame:
     """KOSPI/KOSDAQ 전체 종목 리스트를 반환한다.
 
@@ -59,6 +88,7 @@ def get_stock_list(market: str = "ALL") -> pd.DataFrame:
         raise
 
 
+@_retry_on_failure
 def get_price_data(
     ticker: str,
     start_date: str,
@@ -104,6 +134,7 @@ def get_price_data(
         raise
 
 
+@_retry_on_failure
 def get_market_cap(
     ticker: str,
     start_date: str,
@@ -147,6 +178,7 @@ def get_market_cap(
         raise
 
 
+@_retry_on_failure
 def get_fundamental(
     ticker: str,
     start_date: str,
@@ -192,6 +224,7 @@ def get_fundamental(
         raise
 
 
+@_retry_on_failure
 def get_all_fundamentals(
     date: str,
     market: str = "ALL",

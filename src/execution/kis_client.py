@@ -43,6 +43,7 @@ class KISClient:
     MAX_RETRIES = 3
     RETRY_DELAY = 1.0  # seconds
     RATE_LIMIT_DELAY = 0.1  # seconds between API calls
+    PRICE_CACHE_TTL = 30.0  # seconds - 현재가 캐시 유효 시간
 
     def __init__(
         self,
@@ -92,6 +93,7 @@ class KISClient:
         self._token_expires_at: Optional[datetime] = None
         self._last_request_time: float = 0.0
         self._token_cache_path = Path(__file__).resolve().parent.parent.parent / ".kis_token.json"
+        self._price_cache: dict[str, tuple[float, dict]] = {}  # ticker -> (timestamp, data)
 
         # 캐시된 토큰 로드 시도
         self._load_cached_token()
@@ -191,6 +193,25 @@ class KISClient:
             logger.info("액세스 토큰 갱신 필요. 재발급합니다.")
             self.get_access_token()
 
+    def _invalidate_and_refresh_token(self) -> bool:
+        """현재 토큰을 무효화하고 새로 발급받는다.
+
+        API 호출 중 인증 오류(401) 또는 서버 오류(500)가
+        토큰 문제로 의심될 때 호출한다.
+
+        Returns:
+            재발급 성공 시 True, 실패 시 False.
+        """
+        logger.warning("토큰 무효화 후 재발급을 시도합니다.")
+        self._access_token = ""
+        self._token_expires_at = None
+        try:
+            self.get_access_token()
+            return bool(self._access_token)
+        except RuntimeError:
+            logger.error("토큰 재발급 실패.")
+            return False
+
     def _save_cached_token(self) -> None:
         """발급받은 토큰을 파일에 캐싱한다."""
         try:
@@ -284,6 +305,7 @@ class KISClient:
             return {}
 
         url = f"{self.base_url}{path}"
+        token_refreshed = False
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             # 속도 제한
@@ -311,6 +333,21 @@ class KISClient:
                     return {}
 
                 self._last_request_time = time.time()
+
+                # 401/500 에러 시 토큰 재발급 후 재시도 (1회만)
+                if response.status_code in (401, 500) and not token_refreshed:
+                    token_refreshed = True
+                    logger.warning(
+                        "KIS API %d 응답 → 토큰 재발급 시도 (경로: %s)",
+                        response.status_code,
+                        path,
+                    )
+                    if self._invalidate_and_refresh_token():
+                        # 새 토큰으로 헤더 갱신
+                        if headers and "authorization" in headers:
+                            headers["authorization"] = f"Bearer {self._access_token}"
+                        continue
+
                 response.raise_for_status()
                 data = response.json()
 
@@ -772,6 +809,9 @@ class KISClient:
     def get_current_price(self, ticker: str) -> dict:
         """종목의 현재가를 조회한다.
 
+        동일 종목에 대해 PRICE_CACHE_TTL(30초) 이내 재조회 시
+        캐시된 결과를 반환하여 API 호출을 줄인다.
+
         Args:
             ticker: 종목코드 (6자리).
 
@@ -782,6 +822,13 @@ class KISClient:
             - change: 전일 대비
             - change_pct: 등락률 (%)
         """
+        # 캐시 확인
+        cached = self._price_cache.get(ticker)
+        if cached is not None:
+            cached_time, cached_data = cached
+            if time.time() - cached_time < self.PRICE_CACHE_TTL:
+                return cached_data
+
         tr_id = "FHKST01010100"
         path = "/uapi/domestic-stock/v1/quotations/inquire-price"
         headers = self._headers(tr_id=tr_id)
@@ -798,9 +845,15 @@ class KISClient:
 
         output = result.get("output", {})
 
-        return {
+        data = {
             "price": int(output.get("stck_prpr", "0")),
             "volume": int(output.get("acml_vol", "0")),
             "change": int(output.get("prdy_vrss", "0")),
             "change_pct": float(output.get("prdy_ctrt", "0")),
         }
+
+        # 성공 시 캐시 저장
+        if data["price"] > 0:
+            self._price_cache[ticker] = (time.time(), data)
+
+        return data

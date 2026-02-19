@@ -9,7 +9,7 @@ from typing import Optional
 import pandas as pd
 from pykrx import stock as pykrx_stock
 
-from src.data.collector import _format_date
+from src.data.collector import _format_date, _retry_on_failure
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,6 +21,7 @@ INDEX_TICKERS: dict[str, str] = {
 }
 
 
+@_retry_on_failure
 def get_index_data(
     index: str,
     start_date: str,

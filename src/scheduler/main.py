@@ -26,10 +26,16 @@ from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
 from src.alert.alert_manager import AlertManager
+from src.alert.conditions import (
+    DailyMoveCondition,
+    MddThresholdCondition,
+    RebalanceAlertCondition,
+)
 from src.alert.telegram_bot import TelegramNotifier
 from src.execution.executor import RebalanceExecutor
 from src.execution.kis_client import KISClient
 from src.execution.risk_guard import RiskGuard
+from src.report.portfolio_tracker import PortfolioTracker
 from src.scheduler.holidays import KRXHolidays
 from src.utils.logger import get_logger
 
@@ -75,10 +81,18 @@ class TradingBot:
             self.kis_client, self.risk_guard
         )
 
+        # 포트폴리오 추적
+        self.portfolio_tracker: PortfolioTracker = PortfolioTracker()
+
         # 알림
         self.notifier: TelegramNotifier = TelegramNotifier()
         self.alert_manager: AlertManager = AlertManager()
         self.alert_manager.add_notifier(self.notifier)
+
+        # 알림 조건 등록
+        self.alert_manager.add_condition(MddThresholdCondition(threshold=-0.15))
+        self.alert_manager.add_condition(DailyMoveCondition(threshold=0.05))
+        self.alert_manager.add_condition(RebalanceAlertCondition(days_before=3))
 
         # 전략 (외부에서 주입 가능)
         self._strategy = None
@@ -175,6 +189,8 @@ class TradingBot:
                     lines.append(f"  총 평가: {total_eval:,}원")
                     lines.append(f"  현금: {cash:,}원")
                     lines.append(f"  수익률: {profit_pct:+.2f}%")
+                    mdd = self.portfolio_tracker.get_mdd()
+                    lines.append(f"  MDD: {mdd:.2%}")
                     lines.append(f"  종목 수: {len(holdings)}개")
                 except Exception as e:
                     lines.append(f"\n[포트폴리오 조회 실패: {e}]")
@@ -369,7 +385,8 @@ class TradingBot:
     def hourly_monitor(self) -> None:
         """매시 정각 - 포트폴리오 모니터링.
 
-        보유 종목의 이상 변동을 감지하고 알림을 발송한다.
+        보유 종목의 이상 변동을 감지하고, MDD를 갱신하며,
+        알림 조건을 검사하여 필요 시 알림을 발송한다.
         """
         if not self._is_trading_day():
             return
@@ -379,27 +396,28 @@ class TradingBot:
                 return
 
             balance = self.kis_client.get_balance()
+            total_eval = balance.get("total_eval", 0)
             holdings = balance.get("holdings", [])
+
+            # MDD 갱신
+            if total_eval > 0:
+                self.portfolio_tracker.update(total_eval)
 
             if not holdings:
                 return
 
-            # 이상 변동 감지: 개별 종목 일일 수익률이 +-5% 이상
+            # 일일 변동률 수집
             alerts = []
             holdings_daily_returns: dict[str, float] = {}
 
             for h in holdings:
                 ticker = h.get("ticker", "")
                 name = h.get("name", ticker)
-                pnl_pct = h.get("pnl_pct", 0.0)
 
-                # pnl_pct는 매입 대비 수익률이므로 참고용
-                holdings_daily_returns[ticker] = pnl_pct / 100.0
-
-                # 현재가 조회하여 일일 변동 확인
                 try:
                     price_info = self.kis_client.get_current_price(ticker)
                     change_pct = price_info.get("change_pct", 0.0)
+                    holdings_daily_returns[ticker] = change_pct / 100.0
 
                     if abs(change_pct) >= 5.0:
                         direction = "급등" if change_pct > 0 else "급락"
@@ -409,10 +427,16 @@ class TradingBot:
                 except Exception:
                     pass
 
-            # AlertManager를 통한 조건 기반 알림
+            # 알림 조건용 상태 딕셔너리 구성
+            today = datetime.now(KST).date()
+            days_to_rebal = self.holidays.days_to_next_rebalance(
+                today, self.rebalance_freq
+            )
+
             state = {
                 "holdings_daily_returns": holdings_daily_returns,
-                "current_mdd": 0.0,  # 추후 계산 로직 추가
+                "current_mdd": self.portfolio_tracker.get_mdd(),
+                "days_to_rebalance": days_to_rebal,
             }
             self.alert_manager.check_and_alert(state)
 
@@ -427,9 +451,12 @@ class TradingBot:
 
             now = datetime.now(KST)
             logger.info(
-                "포트폴리오 모니터링 완료 (%s): %d개 보유, %d건 이상 변동",
+                "포트폴리오 모니터링 완료 (%s): %d개 보유, "
+                "평가 %s원, MDD %.2f%%, %d건 이상 변동",
                 now.strftime("%H:%M"),
                 len(holdings),
+                f"{total_eval:,}",
+                self.portfolio_tracker.get_mdd() * 100,
                 len(alerts),
             )
 
@@ -602,6 +629,57 @@ class TradingBot:
             logger.error("이브닝 리포트 실패: %s", e)
             logger.debug(traceback.format_exc())
 
+    def health_check(self) -> None:
+        """08:00 - 시스템 헬스 체크.
+
+        KIS API 연결, Telegram 연결을 확인하고 결과를 발송한다.
+        거래일이 아니어도 실행한다 (시스템 점검용).
+        """
+        try:
+            checks: list[str] = []
+            all_ok = True
+
+            # 1) KIS API 연결 확인
+            if self.kis_client.is_configured():
+                try:
+                    price = self.kis_client.get_current_price("005930")
+                    if price.get("price", 0) > 0:
+                        checks.append("KIS API: OK")
+                    else:
+                        checks.append("KIS API: 응답 이상 (price=0)")
+                        all_ok = False
+                except Exception as e:
+                    checks.append(f"KIS API: 실패 ({e})")
+                    all_ok = False
+            else:
+                checks.append("KIS API: 미설정")
+
+            # 2) Telegram 연결 확인 (이 메시지 자체가 테스트)
+            checks.append("Telegram: OK")
+
+            # 3) 봇 상태
+            today = datetime.now(KST).date()
+            is_trading = self.holidays.is_trading_day(today)
+            checks.append(
+                f"거래일: {'예' if is_trading else '아니오 (휴장)'}"
+            )
+
+            # 4) MDD 상태
+            mdd = self.portfolio_tracker.get_mdd()
+            checks.append(f"MDD: {mdd:.2%}")
+
+            level = "INFO" if all_ok else "CRITICAL"
+            message = (
+                f"[헬스 체크] {today.strftime('%Y-%m-%d')} 08:00\n"
+                + "\n".join(f"  {c}" for c in checks)
+            )
+            self._send_notification(message, level=level)
+            logger.info("헬스 체크 완료: %s", "정상" if all_ok else "이상 감지")
+
+        except Exception as e:
+            logger.error("헬스 체크 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
     # ──────────────────────────────────────────────────────────
     # 스케줄 설정 및 실행
     # ──────────────────────────────────────────────────────────
@@ -617,6 +695,14 @@ class TradingBot:
             CronTrigger(hour=7, minute=0, day_of_week="mon-fri"),
             id="morning_briefing",
             name="모닝 브리핑",
+            misfire_grace_time=300,
+        )
+
+        self.scheduler.add_job(
+            self.health_check,
+            CronTrigger(hour=8, minute=0, day_of_week="mon-fri"),
+            id="health_check",
+            name="헬스 체크",
             misfire_grace_time=300,
         )
 
@@ -730,7 +816,7 @@ def main() -> None:
             factors=["value", "momentum"],
             weights=[0.5, 0.5],
             combine_method="zscore",
-            num_stocks=20,
+            num_stocks=10,
             apply_market_timing=True,
         )
         bot.set_strategy(strategy)

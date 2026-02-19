@@ -598,3 +598,144 @@ class TestDualTradingMode:
         assert live_rg.max_order_pct < paper_rg.max_order_pct
         assert live_rg.max_daily_turnover < paper_rg.max_daily_turnover
         assert live_rg.max_single_stock_pct < paper_rg.max_single_stock_pct
+
+
+# ===================================================================
+# 토큰 자동 재발급 테스트
+# ===================================================================
+
+class TestTokenAutoRefresh:
+    """KIS API 500/401 에러 시 토큰 자동 재발급 검증."""
+
+    @patch("src.execution.kis_client.requests.post")
+    @patch("src.execution.kis_client.requests.get")
+    def test_refresh_on_500(self, mock_get, mock_post):
+        """500 에러 시 토큰 재발급 후 재시도한다."""
+        KISClient = _import_kis_client()
+
+        # 토큰 재발급 mock
+        mock_token_resp = MagicMock()
+        mock_token_resp.json.return_value = {
+            "access_token": "new_token_after_refresh",
+            "expires_in": 86400,
+        }
+        mock_token_resp.raise_for_status.return_value = None
+        mock_token_resp.status_code = 200
+        mock_post.return_value = mock_token_resp
+
+        # 첫 호출: 500 → 재발급 후 두 번째: 200 성공
+        resp_500 = MagicMock()
+        resp_500.status_code = 500
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.json.return_value = {
+            "rt_cd": "0",
+            "output": {"stck_prpr": "70000", "acml_vol": "1000",
+                       "prdy_vrss": "500", "prdy_ctrt": "0.72"},
+        }
+        resp_200.raise_for_status.return_value = None
+
+        mock_get.side_effect = [resp_500, resp_200]
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        client._access_token = "old_expired_token"
+
+        result = client.get_current_price("005930")
+
+        assert result["price"] == 70000, "재발급 후 정상 응답을 받아야 합니다."
+        mock_post.assert_called_once()  # 토큰 재발급 1회
+
+    @patch("src.execution.kis_client.requests.post")
+    @patch("src.execution.kis_client.requests.get")
+    def test_refresh_on_401(self, mock_get, mock_post):
+        """401 에러 시 토큰 재발급 후 재시도한다."""
+        KISClient = _import_kis_client()
+
+        mock_token_resp = MagicMock()
+        mock_token_resp.json.return_value = {
+            "access_token": "new_token_401",
+            "expires_in": 86400,
+        }
+        mock_token_resp.raise_for_status.return_value = None
+        mock_token_resp.status_code = 200
+        mock_post.return_value = mock_token_resp
+
+        resp_401 = MagicMock()
+        resp_401.status_code = 401
+
+        resp_200 = MagicMock()
+        resp_200.status_code = 200
+        resp_200.json.return_value = {
+            "rt_cd": "0",
+            "output": {"stck_prpr": "80000", "acml_vol": "2000",
+                       "prdy_vrss": "1000", "prdy_ctrt": "1.27"},
+        }
+        resp_200.raise_for_status.return_value = None
+
+        mock_get.side_effect = [resp_401, resp_200]
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        client._access_token = "old_token"
+
+        result = client.get_current_price("005930")
+
+        assert result["price"] == 80000
+        mock_post.assert_called_once()
+
+    @patch("src.execution.kis_client.requests.get")
+    def test_no_double_refresh(self, mock_get):
+        """토큰 재발급은 요청당 최대 1회만 시도한다."""
+        KISClient = _import_kis_client()
+
+        # 모든 호출이 500 → 재발급 실패해도 무한루프 없음
+        resp_500 = MagicMock()
+        resp_500.status_code = 500
+        resp_500.raise_for_status.side_effect = (
+            __import__("requests").exceptions.HTTPError(response=resp_500)
+        )
+        mock_get.return_value = resp_500
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        client._access_token = "old_token"
+
+        # _invalidate_and_refresh_token을 mock하여 실패하도록
+        with patch.object(client, "_invalidate_and_refresh_token", return_value=False) as mock_refresh:
+            result = client.get_current_price("005930")
+
+        # 재발급은 1회만 시도
+        assert mock_refresh.call_count == 1
+        # 최종적으로 빈 결과
+        assert result["price"] == 0
+
+    def test_invalidate_and_refresh(self):
+        """_invalidate_and_refresh_token이 토큰을 초기화하고 재발급한다."""
+        KISClient = _import_kis_client()
+
+        client = KISClient(
+            app_key="test_key",
+            app_secret="test_secret",
+            account_no="12345678-01",
+        )
+        client._access_token = "old_token"
+
+        with patch.object(client, "get_access_token") as mock_get_token:
+            mock_get_token.return_value = "brand_new_token"
+            client._access_token = ""  # get_access_token이 설정한다고 가정
+
+            # 재발급 시도 전 토큰 비우기 확인
+            result = client._invalidate_and_refresh_token()
+
+        mock_get_token.assert_called_once()

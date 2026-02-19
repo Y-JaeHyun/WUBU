@@ -2,15 +2,23 @@
 
 모든 알림 조건을 검사하고, 쿨다운을 관리하며,
 등록된 모든 알림 채널(notifier)로 메시지를 발송한다.
+알림 이력은 JSON 파일로 영속화하여 재시작 후에도 유지된다.
 """
 
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.alert.conditions import AlertCondition
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_DEFAULT_HISTORY_PATH = (
+    Path(__file__).resolve().parent.parent.parent / "data" / "alert_history.json"
+)
+_MAX_HISTORY = 200
 
 
 class AlertManager:
@@ -25,12 +33,40 @@ class AlertManager:
         conditions: 등록된 알림 조건 목록.
     """
 
-    def __init__(self) -> None:
-        """AlertManager를 초기화한다."""
+    def __init__(self, history_path: Optional[str] = None) -> None:
+        """AlertManager를 초기화한다.
+
+        Args:
+            history_path: 알림 이력 JSON 파일 경로. None이면 기본 경로 사용.
+        """
         self.notifiers: List[Any] = []
         self.conditions: List[AlertCondition] = []
         self._cooldown_tracker: Dict[str, datetime] = {}
-        self._alert_history: List[Dict[str, Any]] = []
+        self._history_path = Path(history_path) if history_path else _DEFAULT_HISTORY_PATH
+        self._alert_history: List[Dict[str, Any]] = self._load_history()
+
+    def _load_history(self) -> List[Dict[str, Any]]:
+        """저장된 알림 이력을 로드한다."""
+        try:
+            if self._history_path.exists():
+                data = json.loads(self._history_path.read_text(encoding="utf-8"))
+                return data if isinstance(data, list) else []
+        except (json.JSONDecodeError, OSError):
+            pass
+        return []
+
+    def _save_history(self) -> None:
+        """알림 이력을 파일에 저장한다."""
+        try:
+            self._history_path.parent.mkdir(parents=True, exist_ok=True)
+            # 최근 _MAX_HISTORY건만 유지
+            trimmed = self._alert_history[-_MAX_HISTORY:]
+            self._history_path.write_text(
+                json.dumps(trimmed, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            logger.warning("알림 이력 저장 실패: %s", e)
 
     def add_notifier(self, notifier: Any) -> None:
         """알림 채널을 추가한다.
@@ -128,6 +164,9 @@ class AlertManager:
                 logger.error(
                     "조건 '%s' 검사 중 오류 발생: %s", condition.name, e
                 )
+
+        if triggered_messages:
+            self._save_history()
 
         return triggered_messages
 
