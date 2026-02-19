@@ -440,23 +440,32 @@ class TradingBot:
             }
             self.alert_manager.check_and_alert(state)
 
-            # 급등락 직접 알림
-            if alerts:
-                message = (
-                    f"[포트폴리오 모니터링] {datetime.now(KST).strftime('%H:%M')}\n"
-                    "─" * 30 + "\n"
-                    "이상 변동 감지:\n" + "\n".join(alerts)
-                )
-                self._send_notification(message, level="WARNING")
-
+            # 매시 정각 상태 보고 (항상 발송)
             now = datetime.now(KST)
+            profit_pct = balance.get("total_profit_pct", 0.0)
+            mdd_pct = self.portfolio_tracker.get_mdd()
+
+            lines = [
+                f"[포트폴리오 모니터링] {now.strftime('%H:%M')}",
+                f"  평가: {total_eval:,}원 ({profit_pct:+.2f}%)",
+                f"  종목: {len(holdings)}개 | MDD: {mdd_pct:.2%}",
+            ]
+
+            if alerts:
+                lines.append("")
+                lines.append("이상 변동 감지:")
+                lines.extend(alerts)
+
+            level = "WARNING" if alerts else "INFO"
+            self._send_notification("\n".join(lines), level=level)
+
             logger.info(
                 "포트폴리오 모니터링 완료 (%s): %d개 보유, "
                 "평가 %s원, MDD %.2f%%, %d건 이상 변동",
                 now.strftime("%H:%M"),
                 len(holdings),
                 f"{total_eval:,}",
-                self.portfolio_tracker.get_mdd() * 100,
+                mdd_pct * 100,
                 len(alerts),
             )
 
