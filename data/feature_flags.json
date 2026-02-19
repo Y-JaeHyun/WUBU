@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "updated_at": "2026-02-19T14:15:35",
+  "features": {
+    "data_cache": {
+      "enabled": true,
+      "description": "데이터 캐싱 (pykrx 응답 로컬 저장)",
+      "config": {
+        "cache_ttl_hours": 24,
+        "max_cache_size_mb": 500
+      }
+    },
+    "global_monitor": {
+      "enabled": false,
+      "description": "글로벌 시장 모니터 (S&P500, NASDAQ, VIX 등)",
+      "config": {}
+    },
+    "stock_review": {
+      "enabled": true,
+      "description": "보유 종목 일일 리뷰",
+      "config": {
+        "max_stocks": 10
+      }
+    },
+    "auto_backtest": {
+      "enabled": false,
+      "description": "주간 자동 백테스트",
+      "config": {
+        "lookback_months": 6,
+        "strategies": [
+          "value",
+          "momentum",
+          "multi_factor"
+        ]
+      }
+    },
+    "night_research": {
+      "enabled": false,
+      "description": "야간 리서치 (글로벌 동향 + 시사점)",
+      "config": {
+        "include_global": true
+      }
+    }
+  }
+}

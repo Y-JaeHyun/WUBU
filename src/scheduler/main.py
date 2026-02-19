@@ -5,11 +5,16 @@ systemd 서비스로 등록하여 무인 운영할 수 있다.
 
 스케줄:
     07:00 - 모닝 브리핑 (마켓 요약 + 포트폴리오 현황)
+    08:00 - 헬스 체크
     08:50 - 장 전 시그널 체크 (리밸런싱 대상일 판별)
     09:05 - 리밸런싱 실행 (해당일에만)
     매시 정각(09~15) - 포트폴리오 모니터링
     15:35 - 장 마감 후 일일 리뷰
+    16:00 - 종목 리뷰 [stock_review]
     19:00 - 이브닝 종합 리포트
+    22:00 - 야간 리서치 [night_research]
+    매시(22~06) - 글로벌 시장 모니터 [global_monitor]
+    일요일 10:00 - 자동 백테스트 [auto_backtest]
 """
 
 from __future__ import annotations
@@ -32,11 +37,18 @@ from src.alert.conditions import (
     RebalanceAlertCondition,
 )
 from src.alert.telegram_bot import TelegramNotifier
+from src.alert.telegram_commander import TelegramCommander
+from src.backtest.auto_runner import AutoBacktester
+from src.data.cache import DataCache
+from src.data.global_collector import get_global_snapshot, format_global_snapshot
 from src.execution.executor import RebalanceExecutor
 from src.execution.kis_client import KISClient
 from src.execution.risk_guard import RiskGuard
+from src.report.night_research import NightResearcher
 from src.report.portfolio_tracker import PortfolioTracker
+from src.report.stock_reviewer import StockReviewer
 from src.scheduler.holidays import KRXHolidays
+from src.utils.feature_flags import FeatureFlags
 from src.utils.logger import get_logger
 
 load_dotenv()
@@ -93,6 +105,16 @@ class TradingBot:
         self.alert_manager.add_condition(MddThresholdCondition(threshold=-0.15))
         self.alert_manager.add_condition(DailyMoveCondition(threshold=0.05))
         self.alert_manager.add_condition(RebalanceAlertCondition(days_before=3))
+
+        # Phase 5-A: Feature Flags + 24시간 기능 확장
+        self.feature_flags: FeatureFlags = FeatureFlags()
+        self.data_cache: DataCache = DataCache()
+        self.commander: TelegramCommander = TelegramCommander(
+            self.notifier, self.feature_flags
+        )
+        self.commander.register_command("/portfolio", self._cmd_portfolio)
+        self.stock_reviewer: StockReviewer = StockReviewer()
+        self.night_researcher: NightResearcher = NightResearcher()
 
         # 전략 (외부에서 주입 가능)
         self._strategy = None
@@ -690,6 +712,165 @@ class TradingBot:
             logger.debug(traceback.format_exc())
 
     # ──────────────────────────────────────────────────────────
+    # Phase 5-A: 피처 플래그 기반 확장 작업
+    # ──────────────────────────────────────────────────────────
+
+    def global_market_check(self) -> None:
+        """매시(22~06) - 글로벌 시장 모니터링.
+
+        yfinance를 통해 S&P500, NASDAQ, VIX, 환율 등을 수집하고
+        요약을 텔레그램으로 발송한다. Feature Flag 'global_monitor'로 제어.
+        """
+        if not self.feature_flags.is_enabled("global_monitor"):
+            return
+
+        try:
+            snapshot = get_global_snapshot()
+            if snapshot.empty:
+                logger.warning("글로벌 스냅샷 수집 실패 (빈 결과)")
+                return
+
+            text = format_global_snapshot(snapshot)
+            self._send_notification(text)
+            logger.info("글로벌 시장 모니터링 발송 완료")
+        except Exception as e:
+            logger.error("글로벌 시장 모니터링 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
+    def stock_review_job(self) -> None:
+        """16:00 평일 - 보유 종목 리뷰.
+
+        52주 고저 비교, 시그널 분석을 수행하고 결과를 발송한다.
+        Feature Flag 'stock_review'로 제어.
+        """
+        if not self.feature_flags.is_enabled("stock_review"):
+            return
+        if not self._is_trading_day():
+            return
+
+        try:
+            if not self.kis_client.is_configured():
+                return
+
+            balance = self.kis_client.get_balance()
+            holdings = balance.get("holdings", [])
+            config = self.feature_flags.get_config("stock_review")
+            self.stock_reviewer.max_stocks = config.get("max_stocks", 10)
+
+            text = self.stock_reviewer.review_holdings(holdings)
+            self._send_notification(text)
+            logger.info("종목 리뷰 발송 완료")
+        except Exception as e:
+            logger.error("종목 리뷰 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
+    def auto_backtest_job(self) -> None:
+        """일요일 10:00 - 자동 백테스트.
+
+        등록된 전략들의 백테스트를 실행하고 결과를 비교하여 발송한다.
+        Feature Flag 'auto_backtest'로 제어.
+        """
+        if not self.feature_flags.is_enabled("auto_backtest"):
+            return
+
+        try:
+            config = self.feature_flags.get_config("auto_backtest")
+            backtester = AutoBacktester(
+                lookback_months=config.get("lookback_months", 6),
+                strategies=config.get("strategies"),
+            )
+            text = backtester.run_all()
+            self._send_notification(text)
+            logger.info("자동 백테스트 완료")
+        except Exception as e:
+            logger.error("자동 백테스트 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
+    def night_research_job(self) -> None:
+        """22:00 평일 - 야간 리서치 리포트.
+
+        글로벌 시장 동향 + 포트폴리오 상태 기반 시사점을 생성하여 발송한다.
+        Feature Flag 'night_research'로 제어.
+        """
+        if not self.feature_flags.is_enabled("night_research"):
+            return
+
+        try:
+            config = self.feature_flags.get_config("night_research")
+            self.night_researcher.include_global = config.get(
+                "include_global", True
+            )
+
+            # 글로벌 데이터 수집
+            global_snapshot = None
+            if self.night_researcher.include_global:
+                global_snapshot = get_global_snapshot()
+
+            # 포트폴리오 상태
+            portfolio_state = None
+            if self.kis_client.is_configured():
+                try:
+                    balance = self.kis_client.get_balance()
+                    total_eval = balance.get("total_eval", 0)
+                    cash = balance.get("cash", 0)
+                    cash_pct = (cash / total_eval * 100) if total_eval > 0 else 0
+                    mdd = self.portfolio_tracker.get_mdd()
+                    portfolio_state = {
+                        "total_eval": total_eval,
+                        "cash_pct": cash_pct,
+                        "mdd": mdd,
+                    }
+                except Exception as e:
+                    logger.warning("야간 리서치: 포트폴리오 조회 실패: %s", e)
+
+            text = self.night_researcher.generate_report(
+                global_snapshot=global_snapshot,
+                portfolio_state=portfolio_state,
+            )
+            self._send_notification(text)
+            logger.info("야간 리서치 발송 완료")
+        except Exception as e:
+            logger.error("야간 리서치 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
+    def _cmd_portfolio(self, args: str) -> str:
+        """Telegram /portfolio 커맨드 핸들러."""
+        if not self.kis_client.is_configured():
+            return "KIS API 미설정 상태입니다."
+        try:
+            balance = self.kis_client.get_balance()
+            total_eval = balance.get("total_eval", 0)
+            cash = balance.get("cash", 0)
+            profit_pct = balance.get("total_profit_pct", 0.0)
+            holdings = balance.get("holdings", [])
+            mdd = self.portfolio_tracker.get_mdd()
+
+            lines = [
+                "[포트폴리오 현황]",
+                f"  총 평가: {total_eval:,}원",
+                f"  현금: {cash:,}원",
+                f"  수익률: {profit_pct:+.2f}%",
+                f"  MDD: {mdd:.2%}",
+                f"  종목 수: {len(holdings)}개",
+            ]
+            if holdings:
+                lines.append("")
+                sorted_h = sorted(
+                    holdings,
+                    key=lambda x: x.get("eval_amount", 0),
+                    reverse=True,
+                )
+                for h in sorted_h[:10]:
+                    lines.append(
+                        f"  {h['name'][:8]:8s} "
+                        f"{h['eval_amount']:>10,}원 "
+                        f"{h['pnl_pct']:>+6.1f}%"
+                    )
+            return "\n".join(lines)
+        except Exception as e:
+            return f"포트폴리오 조회 오류: {e}"
+
+    # ──────────────────────────────────────────────────────────
     # 스케줄 설정 및 실행
     # ──────────────────────────────────────────────────────────
 
@@ -755,6 +936,39 @@ class TradingBot:
             misfire_grace_time=300,
         )
 
+        # Phase 5-A: 피처 플래그 기반 확장 스케줄
+        self.scheduler.add_job(
+            self.stock_review_job,
+            CronTrigger(hour=16, minute=0, day_of_week="mon-fri"),
+            id="stock_review",
+            name="종목 리뷰",
+            misfire_grace_time=300,
+        )
+
+        self.scheduler.add_job(
+            self.night_research_job,
+            CronTrigger(hour=22, minute=0, day_of_week="mon-fri"),
+            id="night_research",
+            name="야간 리서치",
+            misfire_grace_time=300,
+        )
+
+        self.scheduler.add_job(
+            self.global_market_check,
+            CronTrigger(minute=30, hour="22-23,0-6"),
+            id="global_monitor",
+            name="글로벌 시장 모니터",
+            misfire_grace_time=300,
+        )
+
+        self.scheduler.add_job(
+            self.auto_backtest_job,
+            CronTrigger(hour=10, minute=0, day_of_week="sun"),
+            id="auto_backtest",
+            name="자동 백테스트",
+            misfire_grace_time=600,
+        )
+
         logger.info(
             "스케줄 등록 완료: %d개 작업", len(self.scheduler.get_jobs())
         )
@@ -791,14 +1005,19 @@ class TradingBot:
         logger.info("  KIS API: %s", "설정됨" if self.kis_client.is_configured() else "미설정")
         logger.info("  텔레그램: %s", "설정됨" if self.notifier.is_configured() else "미설정")
         logger.info("  전략: %s", strategy_name)
+        logger.info("  피처 플래그: %s", self.feature_flags.get_all_status())
         logger.info("=" * 60)
 
         self._send_notification(
             f"[봇 시작] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"모드: {self.kis_client.trading_mode}\n"
             f"전략: {strategy_name}\n"
-            f"리밸런싱 주기: {self.rebalance_freq}"
+            f"리밸런싱 주기: {self.rebalance_freq}\n"
+            f"\n{self.feature_flags.get_summary()}"
         )
+
+        # Telegram 양방향 커맨드 폴링 시작
+        self.commander.start_polling()
 
         try:
             self.scheduler.start()
@@ -808,6 +1027,7 @@ class TradingBot:
             logger.error("트레이딩 봇 예외 종료: %s", e)
             logger.debug(traceback.format_exc())
         finally:
+            self.commander.stop_polling()
             self._send_notification(
                 f"[봇 종료] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}"
             )
