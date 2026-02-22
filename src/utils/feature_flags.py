@@ -4,6 +4,7 @@ JSON 파일 기반 런타임 토글을 지원한다.
 Telegram 커맨드로 제어 가능, 재시작 없이 즉시 반영.
 """
 
+import copy
 import json
 import threading
 from datetime import datetime
@@ -58,6 +59,21 @@ class FeatureFlags:
             "description": "야간 리서치 (글로벌 동향 + 시사점)",
             "config": {"include_global": True},
         },
+        "short_term_trading": {
+            "enabled": False,
+            "description": "단기 트레이딩 (스윙 + 데이트레이딩)",
+            "config": {
+                "long_term_pct": 0.90,
+                "short_term_pct": 0.10,
+                "stop_loss_pct": -0.05,
+                "take_profit_pct": 0.10,
+                "max_concurrent_positions": 3,
+                "max_daily_loss_pct": -0.03,
+                "confirm_timeout_minutes": 30,
+                "mode": "swing",
+                "strategy": "bb_squeeze",
+            },
+        },
     }
 
     def __init__(self, flags_path: Optional[str] = None) -> None:
@@ -81,15 +97,15 @@ class FeatureFlags:
                     # 누락된 신규 플래그는 기본값으로 보충
                     for key, default in self.DEFAULT_FLAGS.items():
                         if key not in self._data:
-                            self._data[key] = dict(default)
+                            self._data[key] = copy.deepcopy(default)
                     logger.info("Feature flags 로드 완료: %d개", len(self._data))
                 else:
-                    self._data = {k: dict(v) for k, v in self.DEFAULT_FLAGS.items()}
+                    self._data = copy.deepcopy(self.DEFAULT_FLAGS)
                     self._save()
                     logger.info("Feature flags 기본값으로 초기화")
             except (json.JSONDecodeError, OSError) as e:
                 logger.warning("Feature flags 로드 실패: %s. 기본값 사용.", e)
-                self._data = {k: dict(v) for k, v in self.DEFAULT_FLAGS.items()}
+                self._data = copy.deepcopy(self.DEFAULT_FLAGS)
 
     def _save(self) -> None:
         """현재 플래그 상태를 JSON 파일에 저장한다."""

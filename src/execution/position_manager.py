@@ -199,6 +199,7 @@ class PositionManager:
     def calculate_rebalance_orders(
         self,
         target_weights: dict[str, float],
+        allocator=None,
     ) -> tuple[list[dict], list[dict]]:
         """현재 포지션과 목표 비중을 비교하여 리밸런싱 주문을 생성한다.
 
@@ -207,6 +208,8 @@ class PositionManager:
 
         Args:
             target_weights: {ticker: weight} 형태. weight는 0~1 사이 비율.
+            allocator: PortfolioAllocator 인스턴스 (선택).
+                있으면 단기 풀 포지션을 리밸런싱 대상에서 제외한다.
 
         Returns:
             (sell_orders, buy_orders) 튜플.
@@ -219,6 +222,26 @@ class PositionManager:
         if portfolio_value <= 0:
             logger.error("포트폴리오 가치가 0원입니다. 리밸런싱을 중단합니다.")
             return [], []
+
+        # 1-1. allocator가 있으면 단기 포지션을 현재 포지션에서 제외
+        if allocator is not None:
+            short_tickers = {
+                p["ticker"] for p in allocator.get_positions_by_pool("short_term")
+            }
+            if short_tickers:
+                excluded = {
+                    t for t in current_positions if t in short_tickers
+                }
+                current_positions = {
+                    t: q for t, q in current_positions.items()
+                    if t not in short_tickers
+                }
+                if excluded:
+                    logger.info(
+                        "allocator: 단기 포지션 %d개 제외: %s",
+                        len(excluded),
+                        ", ".join(sorted(excluded)),
+                    )
 
         # 2. 목표 수량 계산
         target_quantities = self.calculate_target_quantities(

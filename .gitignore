@@ -43,6 +43,7 @@ htmlcov/
 # 런타임 데이터
 data/alert_history.json
 data/portfolio_history.json
+data/short_term_signals.json
 docs_cache/
 
 # 산출물

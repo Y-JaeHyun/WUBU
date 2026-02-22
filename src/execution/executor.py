@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import pytz
 
@@ -18,6 +18,9 @@ from src.execution.order_manager import OrderManager
 from src.execution.position_manager import PositionManager
 from src.execution.risk_guard import RiskGuard
 from src.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from src.execution.portfolio_allocator import PortfolioAllocator
 
 logger = get_logger(__name__)
 
@@ -44,17 +47,20 @@ class RebalanceExecutor:
         self,
         kis_client: KISClient,
         risk_guard: Optional[RiskGuard] = None,
+        allocator: Optional[PortfolioAllocator] = None,
     ) -> None:
         """RebalanceExecutor를 초기화한다.
 
         Args:
             kis_client: 한국투자증권 API 클라이언트.
             risk_guard: 사전 리스크 체크 객체. None이면 기본값으로 생성.
+            allocator: 포트폴리오 할당 관리자. None이면 기존 동작 (전체 포트폴리오).
         """
         self.kis_client: KISClient = kis_client
         self.order_manager: OrderManager = OrderManager(kis_client)
         self.position_manager: PositionManager = PositionManager(kis_client)
         self.risk_guard: RiskGuard = risk_guard or RiskGuard()
+        self.allocator = allocator
 
         logger.info("RebalanceExecutor 초기화 완료")
 
@@ -136,9 +142,18 @@ class RebalanceExecutor:
             for w in risk_warnings:
                 logger.warning("리스크 경고: %s", w)
 
-        # 2. 리밸런싱 주문 계산
+        # 2. 리밸런싱 주문 계산 (allocator가 있으면 장기 비중으로 스케일링)
+        effective_weights = target_weights
+        if self.allocator is not None:
+            effective_weights = self.allocator.filter_long_term_weights(target_weights)
+            logger.info(
+                "allocator 적용: 원래 비중 합=%.4f -> 장기 스케일 비중 합=%.4f",
+                sum(target_weights.values()),
+                sum(effective_weights.values()),
+            )
+
         sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
-            target_weights
+            effective_weights, allocator=self.allocator
         )
 
         if not sell_orders and not buy_orders:
@@ -324,9 +339,18 @@ class RebalanceExecutor:
             "warnings": risk_warnings,
         }
 
-        # 리밸런싱 주문 계산
+        # 리밸런싱 주문 계산 (allocator가 있으면 장기 비중으로 스케일링)
+        effective_weights = target_weights
+        if self.allocator is not None:
+            effective_weights = self.allocator.filter_long_term_weights(target_weights)
+            logger.info(
+                "DRY RUN allocator 적용: 원래 비중 합=%.4f -> 장기 스케일 비중 합=%.4f",
+                sum(target_weights.values()),
+                sum(effective_weights.values()),
+            )
+
         sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
-            target_weights
+            effective_weights, allocator=self.allocator
         )
 
         result["sell_orders"] = sell_orders

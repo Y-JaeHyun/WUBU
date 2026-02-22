@@ -739,3 +739,285 @@ class TestTokenAutoRefresh:
             result = client._invalidate_and_refresh_token()
 
         mock_get_token.assert_called_once()
+
+
+# ===================================================================
+# RebalanceExecutor + PortfolioAllocator 통합 테스트
+# ===================================================================
+
+class TestExecutorWithAllocator:
+    """RebalanceExecutor에 allocator가 주입되었을 때의 동작을 검증한다."""
+
+    def test_init_with_allocator(self):
+        """allocator를 주입하면 속성에 저장된다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor가 아직 구현되지 않았습니다.")
+
+        mock_client = MagicMock()
+        mock_allocator = MagicMock()
+
+        executor = RebalanceExecutor(
+            kis_client=mock_client, allocator=mock_allocator
+        )
+
+        assert executor.allocator is mock_allocator
+
+    def test_init_without_allocator(self):
+        """allocator를 주입하지 않으면 None이다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor가 아직 구현되지 않았습니다.")
+
+        mock_client = MagicMock()
+
+        executor = RebalanceExecutor(kis_client=mock_client)
+
+        assert executor.allocator is None
+
+    def test_dry_run_calls_filter_long_term_weights(self):
+        """dry_run 시 allocator가 있으면 filter_long_term_weights가 호출된다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor가 아직 구현되지 않았습니다.")
+
+        mock_client = MagicMock()
+        mock_client.is_configured.return_value = True
+        mock_client.get_balance.return_value = {
+            "total_eval": 10_000_000,
+            "cash": 10_000_000,
+        }
+        mock_client.get_positions.return_value = pd.DataFrame()
+        mock_client.get_current_price.return_value = {"price": 50000}
+
+        mock_allocator = MagicMock()
+        mock_allocator.filter_long_term_weights.return_value = {
+            "005930": 0.45,
+            "000660": 0.45,
+        }
+        mock_allocator.get_positions_by_pool.return_value = []
+
+        executor = RebalanceExecutor(
+            kis_client=mock_client, allocator=mock_allocator
+        )
+
+        target_weights = {"005930": 0.5, "000660": 0.5}
+        result = executor.dry_run(target_weights)
+
+        mock_allocator.filter_long_term_weights.assert_called_once_with(
+            target_weights
+        )
+        assert isinstance(result, dict)
+
+    def test_dry_run_without_allocator_no_filter(self):
+        """dry_run 시 allocator가 없으면 filter_long_term_weights가 호출되지 않는다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor가 아직 구현되지 않았습니다.")
+
+        mock_client = MagicMock()
+        mock_client.is_configured.return_value = True
+        mock_client.get_balance.return_value = {
+            "total_eval": 10_000_000,
+            "cash": 10_000_000,
+        }
+        mock_client.get_positions.return_value = pd.DataFrame()
+
+        executor = RebalanceExecutor(kis_client=mock_client)
+
+        target_weights = {"005930": 0.5, "000660": 0.5}
+        result = executor.dry_run(target_weights)
+
+        # allocator가 None이므로 filter 호출 없음
+        assert executor.allocator is None
+        assert isinstance(result, dict)
+
+    @patch.dict(os.environ, {"KIS_LIVE_CONFIRMED": "true"}, clear=False)
+    def test_execute_rebalance_calls_filter_long_term_weights(self):
+        """execute_rebalance 시 allocator가 있으면 filter_long_term_weights가 호출된다."""
+        RebalanceExecutor = _try_import_rebalance_executor()
+        if RebalanceExecutor is None:
+            pytest.skip("RebalanceExecutor가 아직 구현되지 않았습니다.")
+
+        mock_client = MagicMock()
+        mock_client.is_configured.return_value = True
+        mock_client.is_paper = True
+        mock_client.mode_tag = "[모의]"
+        mock_client.get_balance.return_value = {
+            "total_eval": 10_000_000,
+            "cash": 10_000_000,
+        }
+        mock_client.get_positions.return_value = pd.DataFrame()
+        mock_client.get_current_price.return_value = {"price": 50000}
+
+        mock_allocator = MagicMock()
+        mock_allocator.filter_long_term_weights.return_value = {
+            "005930": 0.45,
+        }
+        mock_allocator.get_positions_by_pool.return_value = []
+
+        mock_risk_guard = MagicMock()
+        mock_risk_guard.check_rebalance.return_value = (True, [])
+        mock_risk_guard.check_turnover.return_value = (True, "")
+        mock_risk_guard.check_order.return_value = (True, "")
+
+        executor = RebalanceExecutor(
+            kis_client=mock_client,
+            risk_guard=mock_risk_guard,
+            allocator=mock_allocator,
+        )
+
+        target_weights = {"005930": 0.5}
+        executor.execute_rebalance(target_weights)
+
+        mock_allocator.filter_long_term_weights.assert_called_once_with(
+            target_weights
+        )
+
+
+# ===================================================================
+# PositionManager + PortfolioAllocator 통합 테스트
+# ===================================================================
+
+class TestPositionManagerWithAllocator:
+    """PositionManager.calculate_rebalance_orders에 allocator가 전달될 때 검증한다."""
+
+    def _make_position_manager(self, current_positions, portfolio_value, prices):
+        """테스트용 PositionManager를 생성한다.
+
+        Args:
+            current_positions: {ticker: qty} 딕셔너리.
+            portfolio_value: 총 포트폴리오 가치.
+            prices: {ticker: price} 딕셔너리.
+        """
+        from src.execution.position_manager import PositionManager
+
+        mock_client = MagicMock()
+        # get_positions -> DataFrame
+        if current_positions:
+            rows = [
+                {"ticker": t, "qty": q}
+                for t, q in current_positions.items()
+            ]
+            mock_client.get_positions.return_value = pd.DataFrame(rows)
+        else:
+            mock_client.get_positions.return_value = pd.DataFrame()
+
+        mock_client.get_balance.return_value = {
+            "total_eval": portfolio_value,
+            "cash": portfolio_value,
+        }
+
+        def _get_price(ticker):
+            p = prices.get(ticker, 0)
+            return {"price": p}
+
+        mock_client.get_current_price.side_effect = _get_price
+
+        pm = PositionManager(mock_client)
+        return pm
+
+    def test_allocator_excludes_short_term_positions(self):
+        """allocator가 있으면 단기 포지션이 리밸런싱에서 제외된다."""
+        # 현재 보유: A=10주, B=5주 (B는 단기)
+        # 목표: A=100%
+        # allocator 없이: B 5주 매도 발생
+        # allocator 있으면: B는 제외, A만 조정
+        current = {"005930": 10, "000660": 5}
+        prices = {"005930": 100_000, "000660": 200_000}
+        portfolio_value = 2_000_000
+
+        pm = self._make_position_manager(current, portfolio_value, prices)
+
+        # allocator mock: 000660이 단기
+        mock_allocator = MagicMock()
+        mock_allocator.get_positions_by_pool.return_value = [
+            {"ticker": "000660", "pool": "short_term"},
+        ]
+
+        sell_orders, buy_orders = pm.calculate_rebalance_orders(
+            {"005930": 1.0},
+            allocator=mock_allocator,
+        )
+
+        mock_allocator.get_positions_by_pool.assert_called_once_with("short_term")
+
+        # 000660에 대한 매도 주문이 없어야 함
+        sell_tickers = {o["ticker"] for o in sell_orders}
+        assert "000660" not in sell_tickers, (
+            "단기 포지션 000660은 리밸런싱에서 제외되어야 합니다."
+        )
+
+    def test_without_allocator_includes_all_positions(self):
+        """allocator가 없으면 모든 포지션이 리밸런싱 대상이다."""
+        current = {"005930": 10, "000660": 5}
+        prices = {"005930": 100_000, "000660": 200_000}
+        portfolio_value = 2_000_000
+
+        pm = self._make_position_manager(current, portfolio_value, prices)
+
+        sell_orders, buy_orders = pm.calculate_rebalance_orders(
+            {"005930": 1.0},
+        )
+
+        # 000660은 목표에 없으므로 전량 매도 대상
+        sell_tickers = {o["ticker"] for o in sell_orders}
+        assert "000660" in sell_tickers, (
+            "allocator가 없으면 000660은 매도 대상이어야 합니다."
+        )
+
+    def test_allocator_no_short_term_positions(self):
+        """allocator가 있지만 단기 포지션이 없으면 기존과 동일하게 동작한다."""
+        current = {"005930": 10}
+        prices = {"005930": 100_000}
+        portfolio_value = 1_000_000
+
+        pm = self._make_position_manager(current, portfolio_value, prices)
+
+        mock_allocator = MagicMock()
+        mock_allocator.get_positions_by_pool.return_value = []
+
+        sell_orders, buy_orders = pm.calculate_rebalance_orders(
+            {"005930": 1.0},
+            allocator=mock_allocator,
+        )
+
+        # 단기 포지션이 없으므로 정상적으로 리밸런싱
+        mock_allocator.get_positions_by_pool.assert_called_once_with("short_term")
+
+    def test_allocator_excludes_multiple_short_term(self):
+        """allocator가 여러 단기 종목을 제외한다."""
+        # 현재 보유: A, B, C, D (C, D가 단기)
+        current = {"A": 10, "B": 20, "C": 5, "D": 3}
+        prices = {"A": 10_000, "B": 10_000, "C": 10_000, "D": 10_000}
+        portfolio_value = 1_000_000
+
+        pm = self._make_position_manager(current, portfolio_value, prices)
+
+        mock_allocator = MagicMock()
+        mock_allocator.get_positions_by_pool.return_value = [
+            {"ticker": "C", "pool": "short_term"},
+            {"ticker": "D", "pool": "short_term"},
+        ]
+
+        # 목표: A=50%, B=50% -> C, D 매도 X
+        sell_orders, buy_orders = pm.calculate_rebalance_orders(
+            {"A": 0.50, "B": 0.50},
+            allocator=mock_allocator,
+        )
+
+        sell_tickers = {o["ticker"] for o in sell_orders}
+        buy_tickers = {o["ticker"] for o in buy_orders}
+
+        assert "C" not in sell_tickers, "단기 포지션 C는 매도 대상에서 제외되어야 합니다."
+        assert "D" not in sell_tickers, "단기 포지션 D는 매도 대상에서 제외되어야 합니다."
+        assert "C" not in buy_tickers, "단기 포지션 C는 매수 대상에도 포함되지 않아야 합니다."
+        assert "D" not in buy_tickers, "단기 포지션 D는 매수 대상에도 포함되지 않아야 합니다."
+
+    def test_allocator_none_default_parameter(self):
+        """allocator 파라미터의 기본값이 None이다."""
+        from src.execution.position_manager import PositionManager
+        import inspect
+
+        sig = inspect.signature(PositionManager.calculate_rebalance_orders)
+        assert sig.parameters["allocator"].default is None

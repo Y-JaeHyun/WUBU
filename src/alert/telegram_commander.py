@@ -36,6 +36,8 @@ class TelegramCommander:
         notifier: TelegramNotifier,
         feature_flags: FeatureFlags,
         polling_interval: float = DEFAULT_POLLING_INTERVAL,
+        short_term_trader=None,
+        short_term_risk=None,
     ) -> None:
         """TelegramCommander를 초기화한다.
 
@@ -43,6 +45,8 @@ class TelegramCommander:
             notifier: 메시지 발송용 TelegramNotifier.
             feature_flags: FeatureFlags 인스턴스.
             polling_interval: 폴링 간격 (초).
+            short_term_trader: Optional ShortTermTrader 인스턴스.
+            short_term_risk: Optional ShortTermRiskManager 인스턴스.
         """
         self.notifier = notifier
         self.feature_flags = feature_flags
@@ -51,6 +55,8 @@ class TelegramCommander:
         self._running: bool = False
         self._thread: Optional[threading.Thread] = None
         self._commands: dict[str, Callable] = {}
+        self._short_term_trader = short_term_trader
+        self._short_term_risk = short_term_risk
         self._register_default_commands()
 
     def _register_default_commands(self) -> None:
@@ -62,6 +68,11 @@ class TelegramCommander:
         self._commands["/status"] = self._cmd_status
         self._commands["/portfolio"] = self._cmd_portfolio
         self._commands["/reload"] = self._cmd_reload
+        self._commands["/signals"] = self._cmd_signals
+        self._commands["/confirm"] = self._cmd_confirm
+        self._commands["/reject"] = self._cmd_reject
+        self._commands["/short_status"] = self._cmd_short_status
+        self._commands["/short_config"] = self._cmd_short_config
 
     def register_command(
         self, command: str, handler: Callable[[str], str]
@@ -147,6 +158,11 @@ class TelegramCommander:
             "/status - 봇 상태 요약",
             "/portfolio - 포트폴리오 현황",
             "/reload - 설정 파일 리로드",
+            "/signals - 대기 시그널 목록",
+            "/confirm <id> - 시그널 승인",
+            "/reject <id> - 시그널 거절",
+            "/short_status - 단기 트레이딩 현황",
+            "/short_config [key=val] - 단기 설정",
             "/help - 이 도움말",
         ]
         return "\n".join(lines)
@@ -217,6 +233,85 @@ class TelegramCommander:
         """설정 파일 리로드."""
         self.feature_flags.reload()
         return "설정 리로드 완료.\n" + self.feature_flags.get_summary()
+
+    def _cmd_signals(self, args: str) -> str:
+        """대기 중인 단기 시그널 목록."""
+        if self._short_term_trader is None:
+            return "단기 트레이딩이 비활성화 상태입니다."
+
+        pending = self._short_term_trader.get_pending_signals()
+        if not pending:
+            return "대기 중인 시그널이 없습니다."
+
+        lines = [f"[대기 시그널: {len(pending)}개]"]
+        for s in pending:
+            lines.append(
+                f"  {s['id']}: {s['side']} {s['ticker']} "
+                f"({s['strategy']}, 신뢰도={s['confidence']:.0%})"
+            )
+            lines.append(f"    만료: {s.get('expires_at', 'N/A')}")
+        lines.append("")
+        lines.append("/confirm <id> 로 승인, /reject <id> 로 거절")
+        return "\n".join(lines)
+
+    def _cmd_confirm(self, args: str) -> str:
+        """시그널 승인."""
+        signal_id = args.strip()
+        if not signal_id:
+            return "사용법: /confirm <signal_id>"
+
+        if self._short_term_trader is None:
+            return "단기 트레이딩이 비활성화 상태입니다."
+
+        success, msg = self._short_term_trader.confirm_signal(signal_id)
+        return msg
+
+    def _cmd_reject(self, args: str) -> str:
+        """시그널 거절."""
+        signal_id = args.strip()
+        if not signal_id:
+            return "사용법: /reject <signal_id>"
+
+        if self._short_term_trader is None:
+            return "단기 트레이딩이 비활성화 상태입니다."
+
+        success, msg = self._short_term_trader.reject_signal(signal_id)
+        return msg
+
+    def _cmd_short_status(self, args: str) -> str:
+        """단기 포트폴리오 현황."""
+        if self._short_term_trader is None:
+            return "단기 트레이딩이 비활성화 상태입니다."
+
+        active = self._short_term_trader.get_active_signals()
+        all_signals = self._short_term_trader.get_all_signals()
+
+        lines = ["[단기 트레이딩 현황]"]
+        lines.append(f"  전체 시그널: {len(all_signals)}개")
+        lines.append(f"  활성 시그널: {len(active)}개")
+
+        # 상태별 카운트
+        state_counts: dict[str, int] = {}
+        for s in all_signals:
+            state = s.get("state", "unknown")
+            state_counts[state] = state_counts.get(state, 0) + 1
+        for state, count in state_counts.items():
+            lines.append(f"    {state}: {count}개")
+
+        # 리스크 요약
+        if self._short_term_risk is not None:
+            summary = self._short_term_risk.get_daily_summary()
+            lines.append("")
+            lines.append("[일일 리스크]")
+            lines.append(f"  당일 손익: {summary['daily_pnl_pct']:.2%}")
+            lines.append(f"  거래 횟수: {summary['trade_count']}")
+            lines.append(f"  거래 가능: {'예' if summary['can_trade'] else '아니오'}")
+
+        return "\n".join(lines)
+
+    def _cmd_short_config(self, args: str) -> str:
+        """단기 트레이딩 설정."""
+        return self._cmd_config("short_term_trading " + args)
 
     @staticmethod
     def _parse_value(value_str: str) -> Any:

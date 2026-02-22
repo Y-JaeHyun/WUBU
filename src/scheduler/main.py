@@ -43,8 +43,15 @@ from src.data.cache import DataCache
 from src.data.global_collector import get_global_snapshot, format_global_snapshot
 from src.execution.executor import RebalanceExecutor
 from src.execution.kis_client import KISClient
+from src.execution.portfolio_allocator import PortfolioAllocator
 from src.execution.risk_guard import RiskGuard
+from src.execution.short_term_risk import ShortTermRiskConfig, ShortTermRiskManager
+from src.execution.short_term_trader import ShortTermTrader
 from src.report.night_research import NightResearcher
+from src.strategy.swing_reversion import SwingReversionStrategy
+from src.strategy.orb_daytrading import ORBDaytradingStrategy
+from src.strategy.high_breakout import HighBreakoutStrategy
+from src.strategy.bb_squeeze import BBSqueezeStrategy
 from src.report.portfolio_tracker import PortfolioTracker
 from src.report.stock_reviewer import StockReviewer
 from src.scheduler.holidays import KRXHolidays
@@ -119,6 +126,9 @@ class TradingBot:
         # 전략 (외부에서 주입 가능)
         self._strategy = None
 
+        # Phase 5-B: 단기 트레이딩 모듈 초기화
+        self._init_short_term_modules()
+
         logger.info(
             "TradingBot 초기화 완료 (리밸런싱 주기: %s)", rebalance_freq
         )
@@ -132,6 +142,105 @@ class TradingBot:
         self._strategy = strategy
         strategy_name = getattr(strategy, "name", type(strategy).__name__)
         logger.info("전략 설정: %s", strategy_name)
+
+    def _init_short_term_modules(self) -> None:
+        """단기 트레이딩 모듈을 초기화한다 (feature flag 기반)."""
+        self.allocator = None
+        self.short_term_trader = None
+        self.short_term_risk = None
+
+        if not self.feature_flags.is_enabled("short_term_trading"):
+            logger.info("단기 트레이딩 비활성화 (feature flag off)")
+            return
+
+        try:
+            config = self.feature_flags.get_config("short_term_trading")
+
+            # PortfolioAllocator
+            self.allocator = PortfolioAllocator(
+                kis_client=self.kis_client,
+                long_term_pct=config.get("long_term_pct", 0.90),
+                short_term_pct=config.get("short_term_pct", 0.10),
+            )
+
+            # Executor에 allocator 주입
+            self.executor = RebalanceExecutor(
+                self.kis_client, self.risk_guard, allocator=self.allocator
+            )
+
+            # ShortTermRiskManager
+            risk_config = ShortTermRiskConfig(
+                stop_loss_pct=config.get("stop_loss_pct", -0.05),
+                take_profit_pct=config.get("take_profit_pct", 0.10),
+                max_concurrent_positions=config.get("max_concurrent_positions", 3),
+                max_daily_loss_pct=config.get("max_daily_loss_pct", -0.03),
+            )
+            self.short_term_risk = ShortTermRiskManager(config=risk_config)
+
+            # ShortTermTrader
+            mode = config.get("mode", "swing")
+            self.short_term_trader = ShortTermTrader(
+                allocator=self.allocator,
+                risk_manager=self.short_term_risk,
+                order_manager=self.executor.order_manager,
+                confirm_timeout_minutes=config.get("confirm_timeout_minutes", 30),
+                mode=mode,
+            )
+
+            # 스윙 전략 선택 (config 기반)
+            strategy_name = config.get("strategy", "bb_squeeze")
+            swing_strategy = self._create_swing_strategy(strategy_name)
+            self.short_term_trader.register_strategy(swing_strategy)
+
+            # ORB 데이트레이딩은 항상 등록 (모드 필터링으로 제어)
+            orb = ORBDaytradingStrategy()
+            self.short_term_trader.register_strategy(orb)
+
+            # TelegramCommander에 단기 모듈 주입
+            self.commander = TelegramCommander(
+                self.notifier, self.feature_flags,
+                short_term_trader=self.short_term_trader,
+                short_term_risk=self.short_term_risk,
+            )
+            self.commander.register_command("/portfolio", self._cmd_portfolio)
+
+            logger.info(
+                "단기 트레이딩 모듈 초기화 완료: 장기=%.0f%%, 단기=%.0f%%",
+                config.get("long_term_pct", 0.90) * 100,
+                config.get("short_term_pct", 0.10) * 100,
+            )
+        except Exception as e:
+            logger.error("단기 트레이딩 모듈 초기화 실패: %s", e)
+            self.allocator = None
+            self.short_term_trader = None
+            self.short_term_risk = None
+
+    @staticmethod
+    def _create_swing_strategy(name: str):
+        """전략 이름으로 스윙 전략 인스턴스를 생성한다.
+
+        Args:
+            name: 전략 이름 (swing_reversion, swing_reversion_obv,
+                  high_breakout, bb_squeeze).
+
+        Returns:
+            ShortTermStrategy 인스턴스.
+        """
+        strategies = {
+            "swing_reversion": lambda: SwingReversionStrategy(),
+            "swing_reversion_obv": lambda: SwingReversionStrategy(
+                params={"use_obv_filter": True}
+            ),
+            "high_breakout": lambda: HighBreakoutStrategy(),
+            "bb_squeeze": lambda: BBSqueezeStrategy(),
+        }
+        factory = strategies.get(name)
+        if factory is None:
+            logger.warning(
+                "알 수 없는 전략: %s. 기본값(bb_squeeze) 사용.", name
+            )
+            return BBSqueezeStrategy()
+        return factory()
 
     def _is_trading_day(self) -> bool:
         """오늘이 거래일인지 확인한다.
@@ -363,6 +472,12 @@ class TradingBot:
                 return
 
             # 리밸런싱 실행
+            if self.allocator:
+                logger.info(
+                    "장기 풀 리밸런싱: allocator 활성 (장기=%.0f%%)",
+                    self.allocator._long_term_pct * 100,
+                )
+
             self._send_notification(
                 f"[리밸런싱 시작] {today.strftime('%Y-%m-%d')}\n"
                 f"종목 수: {len(signals)}개"
@@ -833,6 +948,148 @@ class TradingBot:
             logger.error("야간 리서치 실패: %s", e)
             logger.debug(traceback.format_exc())
 
+    # ──────────────────────────────────────────────────────────
+    # Phase 5-B: 단기 트레이딩 스케줄 작업
+    # ──────────────────────────────────────────────────────────
+
+    def short_term_scan(self) -> None:
+        """08:50, 13:00 - 단기 시그널 스캔.
+
+        등록된 단기 전략으로 시그널을 스캔하고 텔레그램으로 알린다.
+        Feature Flag 'short_term_trading'로 제어.
+        """
+        if not self.feature_flags.is_enabled("short_term_trading"):
+            return
+        if not self._is_trading_day():
+            return
+        if self.short_term_trader is None:
+            return
+
+        try:
+            signals = self.short_term_trader.scan_for_signals()
+
+            if not signals:
+                logger.info("단기 시그널 스캔: 시그널 없음")
+                return
+
+            lines = [f"[단기 시그널] {len(signals)}개 발견"]
+            for sig in signals:
+                lines.append(
+                    f"  {sig.side.upper()} {sig.ticker} "
+                    f"({sig.strategy}, 신뢰도={sig.confidence:.0%})"
+                )
+                lines.append(f"  사유: {sig.reason}")
+                lines.append(f"  ID: {sig.id}")
+                lines.append("")
+            lines.append("/confirm <id> 로 승인, /reject <id> 로 거절")
+
+            self._send_notification("\n".join(lines))
+            logger.info("단기 시그널 %d개 발송", len(signals))
+        except Exception as e:
+            logger.error("단기 시그널 스캔 실패: %s", e)
+
+    def short_term_monitor(self) -> None:
+        """장중 30분마다 - 단기 포지션 모니터링.
+
+        보유 단기 포지션의 손절/익절/데이터헬스를 체크한다.
+        Feature Flag 'short_term_trading'로 제어.
+        """
+        if not self.feature_flags.is_enabled("short_term_trading"):
+            return
+        if not self._is_trading_day():
+            return
+        if self.short_term_trader is None or self.allocator is None:
+            return
+
+        try:
+            positions = self.allocator.get_positions_by_pool("short_term")
+            if not positions:
+                return
+
+            alerts = []
+            for pos in positions:
+                entry_price = pos.get(
+                    "entry_price",
+                    pos.get("metadata", {}).get("entry_price", 0),
+                )
+                current_price = pos.get("current_price", 0)
+                entry_date = pos.get("entry_date", "")
+                mode = pos.get(
+                    "mode", pos.get("metadata", {}).get("mode", "swing")
+                )
+
+                if self.short_term_risk:
+                    result = self.short_term_risk.check_position(
+                        entry_price=float(entry_price),
+                        current_price=float(current_price),
+                        entry_date=entry_date,
+                        mode=mode,
+                    )
+
+                    if result["should_close"]:
+                        alerts.append({
+                            "ticker": pos.get("ticker", ""),
+                            "reasons": result["reasons"],
+                            "pnl_pct": result["pnl_pct"],
+                        })
+
+            if alerts:
+                lines = ["[단기 포지션 알림]"]
+                for alert in alerts:
+                    lines.append(f"  {alert['ticker']}: {alert['pnl_pct']:.2%}")
+                    for r in alert["reasons"]:
+                        lines.append(f"    -> {r}")
+                self._send_notification("\n".join(lines), level="WARNING")
+
+            # 확인된 시그널 실행
+            confirmed = self.short_term_trader.execute_confirmed_signals()
+            if confirmed:
+                logger.info("확인 시그널 %d개 실행", len(confirmed))
+
+        except Exception as e:
+            logger.error("단기 포지션 모니터링 실패: %s", e)
+
+    def daytrading_close(self) -> None:
+        """15:20 - 데이트레이딩 포지션 강제 청산.
+
+        Feature Flag 'short_term_trading'으로 제어.
+        daytrading 모드인 포지션만 청산한다.
+        """
+        if not self.feature_flags.is_enabled("short_term_trading"):
+            return
+        if not self._is_trading_day():
+            return
+        if self.short_term_trader is None or self.allocator is None:
+            return
+
+        config = self.feature_flags.get_config("short_term_trading")
+        mode = config.get("mode", "swing")
+        if mode not in ("daytrading", "multi"):
+            return
+
+        try:
+            positions = self.allocator.get_positions_by_pool("short_term")
+            daytrading_positions = [
+                p for p in positions
+                if p.get("mode", p.get("metadata", {}).get("mode", "")) == "daytrading"
+            ]
+
+            if not daytrading_positions:
+                logger.info("데이트레이딩 청산: 대상 없음")
+                return
+
+            lines = [f"[데이트레이딩 청산] {len(daytrading_positions)}개"]
+            for pos in daytrading_positions:
+                ticker = pos.get("ticker", "")
+                pnl_pct = pos.get("pnl_pct", 0)
+                lines.append(f"  {ticker}: {pnl_pct:.2%}")
+
+            self._send_notification("\n".join(lines))
+            logger.info("데이트레이딩 %d개 청산 알림", len(daytrading_positions))
+
+        except Exception as e:
+            logger.error("데이트레이딩 청산 실패: %s", e)
+
     def _cmd_portfolio(self, args: str) -> str:
         """Telegram /portfolio 커맨드 핸들러."""
         if not self.kis_client.is_configured():
@@ -969,6 +1226,31 @@ class TradingBot:
             misfire_grace_time=600,
         )
 
+        # Phase 5-B: 단기 트레이딩 스케줄
+        self.scheduler.add_job(
+            self.short_term_scan,
+            CronTrigger(hour="8,13", minute=50, day_of_week="mon-fri"),
+            id="short_term_scan",
+            name="단기 시그널 스캔",
+            misfire_grace_time=300,
+        )
+
+        self.scheduler.add_job(
+            self.short_term_monitor,
+            CronTrigger(minute="*/30", hour="9-15", day_of_week="mon-fri"),
+            id="short_term_monitor",
+            name="단기 포지션 모니터링",
+            misfire_grace_time=300,
+        )
+
+        self.scheduler.add_job(
+            self.daytrading_close,
+            CronTrigger(hour=15, minute=20, day_of_week="mon-fri"),
+            id="daytrading_close",
+            name="데이트레이딩 청산",
+            misfire_grace_time=300,
+        )
+
         logger.info(
             "스케줄 등록 완료: %d개 작업", len(self.scheduler.get_jobs())
         )
@@ -1006,6 +1288,15 @@ class TradingBot:
         logger.info("  텔레그램: %s", "설정됨" if self.notifier.is_configured() else "미설정")
         logger.info("  전략: %s", strategy_name)
         logger.info("  피처 플래그: %s", self.feature_flags.get_all_status())
+        if self.allocator:
+            mode = self.feature_flags.get_config("short_term_trading").get("mode", "swing")
+            logger.info(
+                "  단기 트레이딩: 활성 (단기=%.0f%%, 모드=%s)",
+                self.allocator._short_term_pct * 100,
+                mode,
+            )
+        else:
+            logger.info("  단기 트레이딩: 비활성")
         logger.info("=" * 60)
 
         self._send_notification(

@@ -82,15 +82,14 @@ class TestInitialization:
     """TelegramCommander 초기화 검증."""
 
     def test_default_commands_registered(self, commander):
-        """초기화 시 기본 커맨드 7개가 등록되어야 한다."""
+        """초기화 시 기본 커맨드 12개가 등록되어야 한다."""
         expected_commands = {
             "/help", "/features", "/toggle",
             "/config", "/status", "/portfolio", "/reload",
+            "/signals", "/confirm", "/reject",
+            "/short_status", "/short_config",
         }
-        assert set(commander._commands.keys()) == expected_commands, (
-            "초기화 시 /help, /features, /toggle, /config, "
-            "/status, /portfolio, /reload 커맨드가 등록되어야 합니다."
-        )
+        assert set(commander._commands.keys()) == expected_commands
 
     def test_default_attributes(self, commander, mock_notifier, mock_feature_flags):
         """초기화 시 속성이 올바르게 설정되어야 한다."""
@@ -885,3 +884,381 @@ class TestMultipleUpdates:
 
         assert mock_notifier.send_message.call_count == 2
         assert commander._last_update_id == 3
+
+
+# ===================================================================
+# 단기 트레이딩 커맨드: 초기화 테스트
+# ===================================================================
+
+
+class TestShortTermInit:
+    """short_term_trader/short_term_risk 주입 검증."""
+
+    def test_init_with_short_term_modules(self, mock_notifier, mock_feature_flags):
+        """short_term_trader, short_term_risk가 주입되면 속성에 저장되어야 한다."""
+        trader = MagicMock()
+        risk = MagicMock()
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+            short_term_risk=risk,
+        )
+        assert cmd._short_term_trader is trader
+        assert cmd._short_term_risk is risk
+
+    def test_init_without_short_term_modules(self, mock_notifier, mock_feature_flags):
+        """short_term_trader, short_term_risk 미지정 시 None이어야 한다."""
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+        )
+        assert cmd._short_term_trader is None
+        assert cmd._short_term_risk is None
+
+
+# ===================================================================
+# /signals 커맨드 테스트
+# ===================================================================
+
+
+class TestSignalsCommand:
+    """/signals 커맨드 검증."""
+
+    def test_signals_no_trader(self, commander):
+        """trader가 None이면 비활성화 메시지를 반환해야 한다."""
+        result = commander._cmd_signals("")
+        assert "비활성화" in result
+
+    def test_signals_empty_list(self, mock_notifier, mock_feature_flags):
+        """대기 시그널이 없으면 안내 메시지를 반환해야 한다."""
+        trader = MagicMock()
+        trader.get_pending_signals.return_value = []
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        result = cmd._cmd_signals("")
+        assert "대기 중인 시그널이 없습니다" in result
+
+    def test_signals_with_pending(self, mock_notifier, mock_feature_flags):
+        """대기 시그널이 있으면 목록을 반환해야 한다."""
+        trader = MagicMock()
+        trader.get_pending_signals.return_value = [
+            {
+                "id": "SIG001",
+                "side": "BUY",
+                "ticker": "005930",
+                "strategy": "momentum",
+                "confidence": 0.85,
+                "expires_at": "2026-02-22 15:00",
+            },
+            {
+                "id": "SIG002",
+                "side": "SELL",
+                "ticker": "000660",
+                "strategy": "mean_revert",
+                "confidence": 0.72,
+            },
+        ]
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        result = cmd._cmd_signals("")
+        assert "[대기 시그널: 2개]" in result
+        assert "SIG001" in result
+        assert "BUY" in result
+        assert "005930" in result
+        assert "85%" in result
+        assert "SIG002" in result
+        assert "SELL" in result
+        assert "N/A" in result  # SIG002에 expires_at 없음
+        assert "/confirm" in result
+        assert "/reject" in result
+
+    def test_signals_via_process_update(self, mock_notifier, mock_feature_flags):
+        """/signals 메시지 처리 시 응답이 전송되어야 한다."""
+        trader = MagicMock()
+        trader.get_pending_signals.return_value = []
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        update = _make_update(1, "12345", "/signals")
+        cmd._process_update(update)
+        mock_notifier.send_message.assert_called_once()
+
+
+# ===================================================================
+# /confirm 커맨드 테스트
+# ===================================================================
+
+
+class TestConfirmCommand:
+    """/confirm 커맨드 검증."""
+
+    def test_confirm_no_args(self, commander):
+        """인자 없으면 사용법을 반환해야 한다."""
+        result = commander._cmd_confirm("")
+        assert "사용법" in result
+
+    def test_confirm_no_trader(self, commander):
+        """trader가 None이면 비활성화 메시지를 반환해야 한다."""
+        result = commander._cmd_confirm("SIG001")
+        assert "비활성화" in result
+
+    def test_confirm_success(self, mock_notifier, mock_feature_flags):
+        """승인 성공 시 성공 메시지를 반환해야 한다."""
+        trader = MagicMock()
+        trader.confirm_signal.return_value = (True, "SIG001 승인 완료")
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        result = cmd._cmd_confirm("SIG001")
+        trader.confirm_signal.assert_called_once_with("SIG001")
+        assert "승인 완료" in result
+
+    def test_confirm_via_process_update(self, mock_notifier, mock_feature_flags):
+        """/confirm SIG001 메시지 처리 검증."""
+        trader = MagicMock()
+        trader.confirm_signal.return_value = (True, "SIG001 승인됨")
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        update = _make_update(1, "12345", "/confirm SIG001")
+        cmd._process_update(update)
+        trader.confirm_signal.assert_called_once_with("SIG001")
+        mock_notifier.send_message.assert_called_once()
+
+
+# ===================================================================
+# /reject 커맨드 테스트
+# ===================================================================
+
+
+class TestRejectCommand:
+    """/reject 커맨드 검증."""
+
+    def test_reject_no_args(self, commander):
+        """인자 없으면 사용법을 반환해야 한다."""
+        result = commander._cmd_reject("")
+        assert "사용법" in result
+
+    def test_reject_no_trader(self, commander):
+        """trader가 None이면 비활성화 메시지를 반환해야 한다."""
+        result = commander._cmd_reject("SIG001")
+        assert "비활성화" in result
+
+    def test_reject_success(self, mock_notifier, mock_feature_flags):
+        """거절 성공 시 메시지를 반환해야 한다."""
+        trader = MagicMock()
+        trader.reject_signal.return_value = (True, "SIG001 거절 완료")
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        result = cmd._cmd_reject("SIG001")
+        trader.reject_signal.assert_called_once_with("SIG001")
+        assert "거절 완료" in result
+
+    def test_reject_via_process_update(self, mock_notifier, mock_feature_flags):
+        """/reject SIG002 메시지 처리 검증."""
+        trader = MagicMock()
+        trader.reject_signal.return_value = (True, "SIG002 거절됨")
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        update = _make_update(1, "12345", "/reject SIG002")
+        cmd._process_update(update)
+        trader.reject_signal.assert_called_once_with("SIG002")
+        mock_notifier.send_message.assert_called_once()
+
+
+# ===================================================================
+# /short_status 커맨드 테스트
+# ===================================================================
+
+
+class TestShortStatusCommand:
+    """/short_status 커맨드 검증."""
+
+    def test_short_status_no_trader(self, commander):
+        """trader가 None이면 비활성화 메시지를 반환해야 한다."""
+        result = commander._cmd_short_status("")
+        assert "비활성화" in result
+
+    def test_short_status_with_trader(self, mock_notifier, mock_feature_flags):
+        """trader가 있으면 현황을 반환해야 한다."""
+        trader = MagicMock()
+        trader.get_active_signals.return_value = [
+            {"id": "SIG001", "state": "active"},
+        ]
+        trader.get_all_signals.return_value = [
+            {"id": "SIG001", "state": "active"},
+            {"id": "SIG002", "state": "pending"},
+            {"id": "SIG003", "state": "completed"},
+        ]
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        result = cmd._cmd_short_status("")
+        assert "[단기 트레이딩 현황]" in result
+        assert "전체 시그널: 3개" in result
+        assert "활성 시그널: 1개" in result
+        assert "active: 1개" in result
+        assert "pending: 1개" in result
+        assert "completed: 1개" in result
+
+    def test_short_status_with_risk(self, mock_notifier, mock_feature_flags):
+        """risk manager가 있으면 리스크 요약도 포함되어야 한다."""
+        trader = MagicMock()
+        trader.get_active_signals.return_value = []
+        trader.get_all_signals.return_value = []
+        risk = MagicMock()
+        risk.get_daily_summary.return_value = {
+            "daily_pnl_pct": 0.0125,
+            "trade_count": 3,
+            "can_trade": True,
+        }
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+            short_term_risk=risk,
+        )
+        result = cmd._cmd_short_status("")
+        assert "[일일 리스크]" in result
+        assert "1.25%" in result
+        assert "거래 횟수: 3" in result
+        assert "거래 가능: 예" in result
+
+    def test_short_status_risk_cannot_trade(self, mock_notifier, mock_feature_flags):
+        """거래 불가 상태일 때 '아니오'가 표시되어야 한다."""
+        trader = MagicMock()
+        trader.get_active_signals.return_value = []
+        trader.get_all_signals.return_value = []
+        risk = MagicMock()
+        risk.get_daily_summary.return_value = {
+            "daily_pnl_pct": -0.05,
+            "trade_count": 10,
+            "can_trade": False,
+        }
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+            short_term_risk=risk,
+        )
+        result = cmd._cmd_short_status("")
+        assert "거래 가능: 아니오" in result
+
+    def test_short_status_via_process_update(self, mock_notifier, mock_feature_flags):
+        """/short_status 메시지 처리 시 응답이 전송되어야 한다."""
+        trader = MagicMock()
+        trader.get_active_signals.return_value = []
+        trader.get_all_signals.return_value = []
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+            short_term_trader=trader,
+        )
+        update = _make_update(1, "12345", "/short_status")
+        cmd._process_update(update)
+        mock_notifier.send_message.assert_called_once()
+
+
+# ===================================================================
+# /short_config 커맨드 테스트
+# ===================================================================
+
+
+class TestShortConfigCommand:
+    """/short_config 커맨드 검증."""
+
+    def test_short_config_delegates_to_config(self, commander, mock_feature_flags):
+        """/short_config는 /config short_term_trading으로 위임해야 한다."""
+        mock_feature_flags.get_all_status.return_value = {
+            "data_cache": True,
+            "short_term_trading": True,
+        }
+        mock_feature_flags.get_config.return_value = {"max_position": 5}
+
+        result = commander._cmd_short_config("")
+        mock_feature_flags.get_config.assert_called_with("short_term_trading")
+        assert "short_term_trading" in result
+
+    def test_short_config_set_value(self, commander, mock_feature_flags):
+        """/short_config key=val로 설정 변경이 위임되어야 한다."""
+        mock_feature_flags.get_all_status.return_value = {
+            "data_cache": True,
+            "short_term_trading": True,
+        }
+
+        commander._cmd_short_config("max_position=10")
+        mock_feature_flags.set_config.assert_called_once_with(
+            "short_term_trading", "max_position", 10
+        )
+
+    def test_short_config_via_process_update(
+        self, mock_notifier, mock_feature_flags
+    ):
+        """/short_config 메시지 처리 검증."""
+        mock_feature_flags.get_all_status.return_value = {
+            "short_term_trading": True,
+        }
+        mock_feature_flags.get_config.return_value = {"max_position": 5}
+
+        cmd = TelegramCommander(
+            notifier=mock_notifier,
+            feature_flags=mock_feature_flags,
+        )
+        update = _make_update(1, "12345", "/short_config")
+        cmd._process_update(update)
+        mock_notifier.send_message.assert_called_once()
+
+
+# ===================================================================
+# /help 업데이트 검증
+# ===================================================================
+
+
+class TestHelpIncludesNewCommands:
+    """/help에 새 커맨드가 포함되는지 검증."""
+
+    def test_help_includes_signals(self, commander):
+        """/help 출력에 /signals가 포함되어야 한다."""
+        result = commander._cmd_help("")
+        assert "/signals" in result
+
+    def test_help_includes_confirm(self, commander):
+        """/help 출력에 /confirm가 포함되어야 한다."""
+        result = commander._cmd_help("")
+        assert "/confirm" in result
+
+    def test_help_includes_reject(self, commander):
+        """/help 출력에 /reject가 포함되어야 한다."""
+        result = commander._cmd_help("")
+        assert "/reject" in result
+
+    def test_help_includes_short_status(self, commander):
+        """/help 출력에 /short_status가 포함되어야 한다."""
+        result = commander._cmd_help("")
+        assert "/short_status" in result
+
+    def test_help_includes_short_config(self, commander):
+        """/help 출력에 /short_config가 포함되어야 한다."""
+        result = commander._cmd_help("")
+        assert "/short_config" in result
