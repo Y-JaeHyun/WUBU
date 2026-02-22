@@ -44,6 +44,9 @@ htmlcov/
 data/alert_history.json
 data/portfolio_history.json
 data/short_term_signals.json
+data/feature_flags.json
+data/short_term_backtest_results.json
+data/backtest_cache/
 docs_cache/
 
 # 산출물
