@@ -40,6 +40,11 @@ models/
 htmlcov/
 .coverage
 
+# 런타임 데이터
+data/alert_history.json
+data/portfolio_history.json
+docs_cache/
+
 # 산출물
 output/
 reports/

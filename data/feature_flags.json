@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-02-19T14:15:35",
+  "updated_at": "2026-02-19T17:09:55",
   "features": {
     "data_cache": {
       "enabled": true,
@@ -11,7 +11,7 @@
       }
     },
     "global_monitor": {
-      "enabled": false,
+      "enabled": true,
       "description": "글로벌 시장 모니터 (S&P500, NASDAQ, VIX 등)",
       "config": {}
     },
@@ -35,7 +35,7 @@
       }
     },
     "night_research": {
-      "enabled": false,
+      "enabled": true,
       "description": "야간 리서치 (글로벌 동향 + 시사점)",
       "config": {
         "include_global": true
