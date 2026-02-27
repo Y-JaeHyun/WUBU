@@ -385,3 +385,40 @@ class TestETFRotationSignals:
 
         assert isinstance(signals, dict)
         assert len(signals) > 0
+
+
+# ===================================================================
+# Feature Flag config 주입 검증
+# ===================================================================
+
+
+class TestETFRotationConfigInjection:
+    """Feature flag config에서 ETF 전략 파라미터가 올바르게 주입되는지 검증."""
+
+    def test_config_lookback_months_to_days(self):
+        """lookback_months=12는 252 거래일로 변환된다."""
+        lookback_months = 12
+        lookback_days = lookback_months * 21
+        s = ETFRotationStrategy(lookback=lookback_days, num_etfs=2)
+        assert s.lookback == 252
+        assert s.num_etfs == 2
+
+    def test_config_n_select(self):
+        """n_select=2로 생성하면 num_etfs=2."""
+        s = ETFRotationStrategy(num_etfs=2)
+        assert s.num_etfs == 2
+
+    def test_default_flag_has_etf_rotation_pct(self):
+        """etf_rotation flag config에 etf_rotation_pct가 포함된다."""
+        from src.utils.feature_flags import FeatureFlags
+
+        defaults = FeatureFlags.DEFAULT_FLAGS["etf_rotation"]
+        assert "etf_rotation_pct" in defaults["config"]
+        assert defaults["config"]["etf_rotation_pct"] == 0.30
+
+    def test_daily_simulation_includes_etf_rotation(self):
+        """daily_simulation 기본 전략에 etf_rotation이 포함된다."""
+        from src.utils.feature_flags import FeatureFlags
+
+        strategies = FeatureFlags.DEFAULT_FLAGS["daily_simulation"]["config"]["strategies"]
+        assert "etf_rotation" in strategies

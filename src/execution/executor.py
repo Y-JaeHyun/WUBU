@@ -64,7 +64,11 @@ class RebalanceExecutor:
 
         logger.info("RebalanceExecutor 초기화 완료")
 
-    def execute_rebalance(self, target_weights: dict[str, float]) -> dict:
+    def execute_rebalance(
+        self,
+        target_weights: dict[str, float],
+        pool: str | None = None,
+    ) -> dict:
         """리밸런싱을 실행한다.
 
         1. 현재 포지션 조회
@@ -77,19 +81,11 @@ class RebalanceExecutor:
         Args:
             target_weights: {ticker: weight} 형태의 목표 비중.
                 weight는 0~1 사이 비율.
+            pool: 리밸런싱 대상 풀 ("long_term", "etf_rotation" 등).
+                None이면 "long_term"으로 동작.
 
         Returns:
-            실행 결과 딕셔너리:
-            {
-                "success": bool,
-                "timestamp": str,
-                "sells": [Order.to_dict(), ...],
-                "buys": [Order.to_dict(), ...],
-                "total_sell_amount": int,
-                "total_buy_amount": int,
-                "errors": [str, ...],
-                "skipped": [str, ...],
-            }
+            실행 결과 딕셔너리.
         """
         start_time = datetime.now(KST)
         result = {
@@ -142,18 +138,26 @@ class RebalanceExecutor:
             for w in risk_warnings:
                 logger.warning("리스크 경고: %s", w)
 
-        # 2. 리밸런싱 주문 계산 (allocator가 있으면 장기 비중으로 스케일링)
+        # 2. 리밸런싱 주문 계산 (allocator가 있으면 풀 비중으로 스케일링)
         effective_weights = target_weights
         if self.allocator is not None:
-            effective_weights = self.allocator.filter_long_term_weights(target_weights)
+            if pool == "etf_rotation":
+                effective_weights = self.allocator.filter_etf_rotation_weights(
+                    target_weights
+                )
+            else:
+                effective_weights = self.allocator.filter_long_term_weights(
+                    target_weights
+                )
             logger.info(
-                "allocator 적용: 원래 비중 합=%.4f -> 장기 스케일 비중 합=%.4f",
+                "allocator 적용 (pool=%s): 원래 비중 합=%.4f -> 스케일 비중 합=%.4f",
+                pool or "long_term",
                 sum(target_weights.values()),
                 sum(effective_weights.values()),
             )
 
         sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
-            effective_weights, allocator=self.allocator
+            effective_weights, allocator=self.allocator, pool=pool
         )
 
         if not sell_orders and not buy_orders:
@@ -278,7 +282,11 @@ class RebalanceExecutor:
 
         return result
 
-    def dry_run(self, target_weights: dict[str, float]) -> dict:
+    def dry_run(
+        self,
+        target_weights: dict[str, float],
+        pool: str | None = None,
+    ) -> dict:
         """리밸런싱 시뮬레이션을 실행한다 (실제 주문 없음).
 
         실제 주문을 실행하지 않고 예상 매매 내역만 반환한다.
@@ -286,6 +294,7 @@ class RebalanceExecutor:
 
         Args:
             target_weights: {ticker: weight} 형태의 목표 비중.
+            pool: 리밸런싱 대상 풀. None이면 "long_term".
 
         Returns:
             시뮬레이션 결과 딕셔너리:
@@ -339,18 +348,26 @@ class RebalanceExecutor:
             "warnings": risk_warnings,
         }
 
-        # 리밸런싱 주문 계산 (allocator가 있으면 장기 비중으로 스케일링)
+        # 리밸런싱 주문 계산 (allocator가 있으면 풀 비중으로 스케일링)
         effective_weights = target_weights
         if self.allocator is not None:
-            effective_weights = self.allocator.filter_long_term_weights(target_weights)
+            if pool == "etf_rotation":
+                effective_weights = self.allocator.filter_etf_rotation_weights(
+                    target_weights
+                )
+            else:
+                effective_weights = self.allocator.filter_long_term_weights(
+                    target_weights
+                )
             logger.info(
-                "DRY RUN allocator 적용: 원래 비중 합=%.4f -> 장기 스케일 비중 합=%.4f",
+                "DRY RUN allocator 적용 (pool=%s): 원래 비중 합=%.4f -> 스케일 비중 합=%.4f",
+                pool or "long_term",
                 sum(target_weights.values()),
                 sum(effective_weights.values()),
             )
 
         sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
-            effective_weights, allocator=self.allocator
+            effective_weights, allocator=self.allocator, pool=pool
         )
 
         result["sell_orders"] = sell_orders

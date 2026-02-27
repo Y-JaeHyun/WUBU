@@ -931,16 +931,25 @@ class TestPositionManagerWithAllocator:
 
         # allocator mock: 000660이 단기
         mock_allocator = MagicMock()
-        mock_allocator.get_positions_by_pool.return_value = [
-            {"ticker": "000660", "pool": "short_term"},
-        ]
+
+        def _get_by_pool(pool):
+            if pool == "short_term":
+                return [{"ticker": "000660", "pool": "short_term"}]
+            return []
+
+        mock_allocator.get_positions_by_pool.side_effect = _get_by_pool
 
         sell_orders, buy_orders = pm.calculate_rebalance_orders(
             {"005930": 1.0},
             allocator=mock_allocator,
         )
 
-        mock_allocator.get_positions_by_pool.assert_called_once_with("short_term")
+        # short_term과 etf_rotation 2개 풀이 제외 대상으로 조회됨
+        call_args = [
+            c[0][0] for c in mock_allocator.get_positions_by_pool.call_args_list
+        ]
+        assert "short_term" in call_args
+        assert "etf_rotation" in call_args
 
         # 000660에 대한 매도 주문이 없어야 함
         sell_tickers = {o["ticker"] for o in sell_orders}
@@ -982,8 +991,10 @@ class TestPositionManagerWithAllocator:
             allocator=mock_allocator,
         )
 
-        # 단기 포지션이 없으므로 정상적으로 리밸런싱
-        mock_allocator.get_positions_by_pool.assert_called_once_with("short_term")
+        # 단기/ETF 포지션이 없으므로 정상적으로 리밸런싱
+        called_pools = {c.args[0] for c in mock_allocator.get_positions_by_pool.call_args_list}
+        assert "short_term" in called_pools
+        assert "etf_rotation" in called_pools
 
     def test_allocator_excludes_multiple_short_term(self):
         """allocator가 여러 단기 종목을 제외한다."""

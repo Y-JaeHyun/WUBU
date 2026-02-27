@@ -22,7 +22,7 @@ from __future__ import annotations
 import signal
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pytz
@@ -40,7 +40,9 @@ from src.alert.telegram_bot import TelegramNotifier
 from src.alert.telegram_commander import TelegramCommander
 from src.backtest.auto_runner import AutoBacktester
 from src.data.cache import DataCache
+from src.data.collector import get_all_fundamentals, get_price_data
 from src.data.global_collector import get_global_snapshot, format_global_snapshot
+from src.data.index_collector import get_index_data
 from src.execution.executor import RebalanceExecutor
 from src.execution.kis_client import KISClient
 from src.execution.portfolio_allocator import PortfolioAllocator
@@ -143,24 +145,230 @@ class TradingBot:
         strategy_name = getattr(strategy, "name", type(strategy).__name__)
         logger.info("전략 설정: %s", strategy_name)
 
+    # ──────────────────────────────────────────────────────────
+    # 전략 데이터 수집
+    # ──────────────────────────────────────────────────────────
+
+    def _collect_strategy_data(self, date_str: str) -> dict:
+        """전략 시그널 생성에 필요한 데이터를 수집한다.
+
+        백테스트 엔진(engine.py:178-193)과 동일한 구조를 반환한다.
+        DataCache를 통해 동일 기준일 재호출 시 pykrx API를 생략한다.
+
+        Args:
+            date_str: 데이터 기준일 ('YYYYMMDD').
+
+        Returns:
+            {"fundamentals": DataFrame, "prices": dict, "index_prices": Series}
+        """
+        import pandas as pd
+
+        data: dict = {
+            "fundamentals": pd.DataFrame(),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        }
+
+        use_cache = self.feature_flags.is_enabled("data_cache")
+
+        # 1. Fundamentals ─────────────────────────────────
+        cache_key_fund = DataCache.make_key("fundamentals", date_str)
+        fundamentals = None
+        if use_cache:
+            fundamentals = self.data_cache.get(cache_key_fund)
+
+        if fundamentals is not None:
+            logger.info("펀더멘탈 캐시 히트: %d종목 (%s)", len(fundamentals), date_str)
+        else:
+            try:
+                fundamentals = get_all_fundamentals(date_str)
+                logger.info(
+                    "펀더멘탈 수집 완료: %d종목 (%s)", len(fundamentals), date_str
+                )
+                if use_cache and not fundamentals.empty:
+                    self.data_cache.put(cache_key_fund, fundamentals)
+            except Exception as e:
+                logger.error("펀더멘탈 수집 실패 (%s): %s", date_str, e)
+                fundamentals = pd.DataFrame()
+
+        data["fundamentals"] = fundamentals
+
+        # 2. Price data (시총 상위 종목) ───────────────────
+        if not fundamentals.empty:
+            top_tickers = self._get_price_universe(fundamentals)
+            start_dt = datetime.strptime(date_str, "%Y%m%d") - timedelta(days=400)
+            start_date = start_dt.strftime("%Y%m%d")
+
+            prices: dict = {}
+            for ticker in top_tickers:
+                cache_key_p = DataCache.make_key("price", ticker, start_date, date_str)
+                price_df = None
+                if use_cache:
+                    price_df = self.data_cache.get(cache_key_p)
+
+                if price_df is not None:
+                    prices[ticker] = price_df
+                    continue
+
+                try:
+                    price_df = get_price_data(ticker, start_date, date_str)
+                    if not price_df.empty:
+                        prices[ticker] = price_df
+                        if use_cache:
+                            self.data_cache.put(cache_key_p, price_df)
+                except Exception:
+                    pass  # 개별 종목 실패는 무시
+
+            data["prices"] = prices
+            logger.info("가격 데이터 수집: %d/%d종목", len(prices), len(top_tickers))
+
+        # 3. KOSPI 지수 ────────────────────────────────────
+        try:
+            cache_key_idx = DataCache.make_key("kospi_index", date_str)
+            index_series = None
+            if use_cache:
+                idx_df = self.data_cache.get(cache_key_idx)
+                if idx_df is not None and "close" in idx_df.columns:
+                    index_series = idx_df["close"]
+
+            if index_series is None:
+                start_dt = datetime.strptime(date_str, "%Y%m%d") - timedelta(days=400)
+                index_df = get_index_data(
+                    "KOSPI", start_dt.strftime("%Y%m%d"), date_str
+                )
+                if not index_df.empty and "close" in index_df.columns:
+                    index_series = index_df["close"]
+                    if use_cache:
+                        self.data_cache.put(cache_key_idx, index_df)
+                else:
+                    index_series = pd.Series(dtype=float)
+
+            data["index_prices"] = index_series
+            logger.info("KOSPI 지수 수집 완료: %d일", len(index_series))
+        except Exception as e:
+            logger.warning("KOSPI 지수 수집 실패: %s", e)
+
+        return data
+
+    @staticmethod
+    def _get_price_universe(
+        fundamentals, max_stocks: int = 200,
+    ) -> list[str]:
+        """시가총액 상위 종목을 가격 수집 대상으로 선정한다."""
+        if fundamentals.empty or "market_cap" not in fundamentals.columns:
+            return []
+        df = fundamentals[fundamentals["market_cap"] > 0].copy()
+        df = df.sort_values("market_cap", ascending=False).head(max_stocks)
+        return df["ticker"].tolist()
+
+    def _collect_short_term_data(self, date_str: str) -> dict:
+        """단기 전략 시그널 스캔에 필요한 데이터를 수집한다.
+
+        장기 전략용 _collect_strategy_data()와 분리된 경량 버전.
+        시총 상위 100종목의 260일 OHLCV만 수집한다.
+
+        Args:
+            date_str: 데이터 기준일 ('YYYYMMDD').
+
+        Returns:
+            {"daily_data": {ticker: DataFrame}, "date": date_str}
+        """
+        import pandas as pd
+
+        use_cache = self.feature_flags.is_enabled("data_cache")
+
+        # 1. Fundamentals (시총 순위용)
+        cache_key_fund = DataCache.make_key("fundamentals", date_str)
+        fundamentals = None
+        if use_cache:
+            fundamentals = self.data_cache.get(cache_key_fund)
+
+        if fundamentals is None:
+            try:
+                fundamentals = get_all_fundamentals(date_str)
+                if use_cache and not fundamentals.empty:
+                    self.data_cache.put(cache_key_fund, fundamentals)
+            except Exception as e:
+                logger.error("단기 펀더멘탈 수집 실패 (%s): %s", date_str, e)
+                fundamentals = pd.DataFrame()
+
+        if fundamentals.empty:
+            return {"daily_data": {}, "date": date_str}
+
+        # 2. 시총 상위 100종목 260일 OHLCV
+        top_tickers = self._get_price_universe(fundamentals, max_stocks=100)
+        start_dt = datetime.strptime(date_str, "%Y%m%d") - timedelta(days=260)
+        start_date = start_dt.strftime("%Y%m%d")
+
+        daily_data: dict = {}
+        for ticker in top_tickers:
+            cache_key_p = DataCache.make_key("price", ticker, start_date, date_str)
+            price_df = None
+            if use_cache:
+                price_df = self.data_cache.get(cache_key_p)
+
+            if price_df is not None:
+                daily_data[ticker] = price_df
+                continue
+
+            try:
+                price_df = get_price_data(ticker, start_date, date_str)
+                if not price_df.empty:
+                    daily_data[ticker] = price_df
+                    if use_cache:
+                        self.data_cache.put(cache_key_p, price_df)
+            except Exception:
+                pass
+
+        logger.info("단기 데이터 수집: %d/%d종목 (%s)", len(daily_data), len(top_tickers), date_str)
+        return {"daily_data": daily_data, "date": date_str}
+
     def _init_short_term_modules(self) -> None:
-        """단기 트레이딩 모듈을 초기화한다 (feature flag 기반)."""
+        """포트폴리오 할당 및 단기 트레이딩 모듈을 초기화한다.
+
+        etf_rotation 또는 short_term_trading 중 하나라도 활성화되면
+        PortfolioAllocator를 생성하여 풀 비율을 관리한다.
+        """
         self.allocator = None
         self.short_term_trader = None
         self.short_term_risk = None
 
-        if not self.feature_flags.is_enabled("short_term_trading"):
-            logger.info("단기 트레이딩 비활성화 (feature flag off)")
+        etf_enabled = self.feature_flags.is_enabled("etf_rotation")
+        short_enabled = self.feature_flags.is_enabled("short_term_trading")
+
+        if not etf_enabled and not short_enabled:
+            logger.info("ETF 로테이션/단기 트레이딩 모두 비활성화")
             return
 
         try:
-            config = self.feature_flags.get_config("short_term_trading")
+            # 풀 비율 동적 계산
+            etf_pct = 0.0
+            short_pct = 0.0
+
+            if etf_enabled:
+                etf_config = self.feature_flags.get_config("etf_rotation")
+                etf_pct = etf_config.get("etf_rotation_pct", 0.30)
+
+            if short_enabled:
+                short_config = self.feature_flags.get_config("short_term_trading")
+                short_pct = short_config.get("short_term_pct", 0.05)
+
+            long_pct = 1.0 - etf_pct - short_pct
+
+            if long_pct < 0:
+                logger.error(
+                    "풀 비율 합이 100%%를 초과합니다: "
+                    "장기=%.0f%%, ETF=%.0f%%, 단기=%.0f%%",
+                    long_pct * 100, etf_pct * 100, short_pct * 100,
+                )
+                return
 
             # PortfolioAllocator
             self.allocator = PortfolioAllocator(
                 kis_client=self.kis_client,
-                long_term_pct=config.get("long_term_pct", 0.90),
-                short_term_pct=config.get("short_term_pct", 0.10),
+                long_term_pct=long_pct,
+                short_term_pct=short_pct,
+                etf_rotation_pct=etf_pct,
             )
 
             # Executor에 allocator 주입
@@ -168,49 +376,54 @@ class TradingBot:
                 self.kis_client, self.risk_guard, allocator=self.allocator
             )
 
-            # ShortTermRiskManager
-            risk_config = ShortTermRiskConfig(
-                stop_loss_pct=config.get("stop_loss_pct", -0.05),
-                take_profit_pct=config.get("take_profit_pct", 0.10),
-                max_concurrent_positions=config.get("max_concurrent_positions", 3),
-                max_daily_loss_pct=config.get("max_daily_loss_pct", -0.03),
-            )
-            self.short_term_risk = ShortTermRiskManager(config=risk_config)
-
-            # ShortTermTrader
-            mode = config.get("mode", "swing")
-            self.short_term_trader = ShortTermTrader(
-                allocator=self.allocator,
-                risk_manager=self.short_term_risk,
-                order_manager=self.executor.order_manager,
-                confirm_timeout_minutes=config.get("confirm_timeout_minutes", 30),
-                mode=mode,
-            )
-
-            # 스윙 전략 선택 (config 기반)
-            strategy_name = config.get("strategy", "bb_squeeze")
-            swing_strategy = self._create_swing_strategy(strategy_name)
-            self.short_term_trader.register_strategy(swing_strategy)
-
-            # ORB 데이트레이딩은 항상 등록 (모드 필터링으로 제어)
-            orb = ORBDaytradingStrategy()
-            self.short_term_trader.register_strategy(orb)
-
-            # TelegramCommander에 단기 모듈 주입
-            self.commander = TelegramCommander(
-                self.notifier, self.feature_flags,
-                short_term_trader=self.short_term_trader,
-                short_term_risk=self.short_term_risk,
-            )
-            self.commander.register_command("/portfolio", self._cmd_portfolio)
-
             logger.info(
-                "단기 트레이딩 모듈 초기화 완료: 장기=%.0f%%, 단기=%.0f%%",
-                config.get("long_term_pct", 0.90) * 100,
-                config.get("short_term_pct", 0.10) * 100,
+                "포트폴리오 할당 초기화: 장기=%.0f%%, ETF=%.0f%%, 단기=%.0f%%",
+                long_pct * 100, etf_pct * 100, short_pct * 100,
             )
+
+            # 단기 트레이딩 모듈 (기존 로직 유지)
+            if short_enabled:
+                config = self.feature_flags.get_config("short_term_trading")
+
+                risk_config = ShortTermRiskConfig(
+                    stop_loss_pct=config.get("stop_loss_pct", -0.05),
+                    take_profit_pct=config.get("take_profit_pct", 0.10),
+                    max_concurrent_positions=config.get(
+                        "max_concurrent_positions", 3
+                    ),
+                    max_daily_loss_pct=config.get("max_daily_loss_pct", -0.03),
+                )
+                self.short_term_risk = ShortTermRiskManager(config=risk_config)
+
+                mode = config.get("mode", "swing")
+                self.short_term_trader = ShortTermTrader(
+                    allocator=self.allocator,
+                    risk_manager=self.short_term_risk,
+                    order_manager=self.executor.order_manager,
+                    confirm_timeout_minutes=config.get(
+                        "confirm_timeout_minutes", 30
+                    ),
+                    mode=mode,
+                )
+
+                strategy_name = config.get("strategy", "bb_squeeze")
+                swing_strategy = self._create_swing_strategy(strategy_name)
+                self.short_term_trader.register_strategy(swing_strategy)
+
+                orb = ORBDaytradingStrategy()
+                self.short_term_trader.register_strategy(orb)
+
+                self.commander = TelegramCommander(
+                    self.notifier, self.feature_flags,
+                    short_term_trader=self.short_term_trader,
+                    short_term_risk=self.short_term_risk,
+                )
+                self.commander.register_command("/portfolio", self._cmd_portfolio)
+
+                logger.info("단기 트레이딩 모듈 초기화 완료 (모드=%s)", mode)
+
         except Exception as e:
-            logger.error("단기 트레이딩 모듈 초기화 실패: %s", e)
+            logger.error("포트폴리오 할당 초기화 실패: %s", e)
             self.allocator = None
             self.short_term_trader = None
             self.short_term_risk = None
@@ -362,10 +575,23 @@ class TradingBot:
             # 전략 시그널 미리보기 (dry run)
             logger.info("리밸런싱 사전 시그널 체크 시작")
 
-            # 전략에 필요한 데이터를 수집하여 시그널 생성
+            # T-1 기준 데이터 수집 (08:50에는 당일 데이터 미완성)
+            prev_day = self.holidays.prev_trading_day(today)
+            data_date = prev_day.strftime("%Y%m%d")
+            logger.info("전략 데이터 수집 (기준일: %s)", data_date)
+            strategy_data = self._collect_strategy_data(data_date)
+
+            if strategy_data["fundamentals"].empty:
+                self._send_notification(
+                    f"[장 전 체크] {today.strftime('%Y-%m-%d')}\n"
+                    "펀더멘탈 데이터 수집 실패. 시그널 생성 불가.",
+                    level="WARNING",
+                )
+                return
+
             date_str = today.strftime("%Y%m%d")
             try:
-                signals = self._strategy.generate_signals(date_str, {})
+                signals = self._strategy.generate_signals(date_str, strategy_data)
             except Exception as e:
                 logger.warning("시그널 생성 중 오류: %s", e)
                 signals = {}
@@ -418,6 +644,147 @@ class TradingBot:
                 f"[장 전 체크 오류] {e}", level="CRITICAL"
             )
 
+    def _fetch_etf_prices(
+        self,
+        etf_universe: dict[str, str],
+        lookback_days: int = 252,
+    ) -> dict:
+        """ETF 유니버스의 가격 데이터를 수집한다.
+
+        Args:
+            etf_universe: {ticker: name} 딕셔너리.
+            lookback_days: 모멘텀 계산에 필요한 거래일 수.
+
+        Returns:
+            {ticker: DataFrame} 딕셔너리.
+        """
+        from src.data.etf_collector import get_etf_price
+
+        end_date = datetime.now(KST).strftime("%Y%m%d")
+        start_dt = datetime.now(KST) - timedelta(days=int(lookback_days * 1.4))
+        start_date = start_dt.strftime("%Y%m%d")
+
+        etf_prices: dict = {}
+        for ticker in etf_universe:
+            try:
+                df = get_etf_price(ticker, start_date, end_date)
+                if not df.empty:
+                    etf_prices[ticker] = df
+            except Exception as e:
+                logger.warning("ETF 가격 수집 실패: %s - %s", ticker, e)
+
+        logger.info(
+            "ETF 가격 수집 완료: %d/%d종목", len(etf_prices), len(etf_universe)
+        )
+        return etf_prices
+
+    def execute_etf_rotation_rebalance(self) -> None:
+        """09:10 - ETF 로테이션 리밸런싱 (월간).
+
+        Feature Flag 'etf_rotation'으로 제어한다.
+        MultiFactor와 독립적으로 실행되며, etf_rotation 풀만 대상으로 한다.
+        """
+        if not self.feature_flags.is_enabled("etf_rotation"):
+            return
+        if not self._is_trading_day():
+            return
+        if self.allocator is None:
+            return
+
+        try:
+            today = datetime.now(KST).date()
+            config = self.feature_flags.get_config("etf_rotation")
+            rebalance_freq = config.get("rebalance_freq", "monthly")
+
+            if not self.holidays.is_rebalance_day(today, rebalance_freq):
+                logger.info("ETF 로테이션: 리밸런싱일 아님. 스킵.")
+                return
+
+            if not self.kis_client.is_configured():
+                logger.error("ETF 로테이션: KIS API 미설정")
+                return
+
+            # 전략 생성 (config 주입)
+            from src.strategy.etf_rotation import ETFRotationStrategy
+
+            lookback_months = config.get("lookback_months", 12)
+            lookback_days = lookback_months * 21
+            n_select = config.get("n_select", 2)
+
+            strategy = ETFRotationStrategy(
+                lookback=lookback_days,
+                num_etfs=n_select,
+            )
+
+            # ETF 가격 수집
+            etf_prices = self._fetch_etf_prices(
+                strategy.etf_universe, lookback_days
+            )
+
+            if not etf_prices:
+                logger.warning("ETF 가격 데이터 없음. 리밸런싱 스킵.")
+                self._send_notification(
+                    "[ETF 로테이션] 가격 데이터 수집 실패. 스킵.",
+                    level="WARNING",
+                )
+                return
+
+            # 시그널 생성
+            date_str = today.strftime("%Y%m%d")
+            signals = strategy.generate_signals(
+                date_str, {"etf_prices": etf_prices}
+            )
+
+            if not signals:
+                logger.warning("ETF 로테이션 시그널 없음.")
+                self._send_notification("[ETF 로테이션] 시그널 없음. 스킵.")
+                return
+
+            # 리밸런싱 실행 (pool="etf_rotation")
+            self._send_notification(
+                f"[ETF 로테이션 시작] {today.strftime('%Y-%m-%d')}\n"
+                f"종목: {len(signals)}개"
+            )
+
+            result = self.executor.execute_rebalance(
+                signals, pool="etf_rotation"
+            )
+
+            # 포지션 태깅
+            for ticker in signals:
+                self.allocator.tag_position(
+                    ticker, "etf_rotation",
+                    metadata={"strategy": "etf_rotation"},
+                )
+
+            # 결과 알림
+            lines = [
+                f"[ETF 로테이션 완료] {today.strftime('%Y-%m-%d')}",
+                "─" * 30,
+                f"성공: {'예' if result.get('success') else '아니오'}",
+                f"매도: {len(result.get('sells', []))}건 "
+                f"({result.get('total_sell_amount', 0):,}원)",
+                f"매수: {len(result.get('buys', []))}건 "
+                f"({result.get('total_buy_amount', 0):,}원)",
+            ]
+
+            errors = result.get("errors", [])
+            if errors:
+                lines.append(f"오류 {len(errors)}건:")
+                for err in errors[:5]:
+                    lines.append(f"  - {err}")
+
+            level = "INFO" if result.get("success") else "CRITICAL"
+            self._send_notification("\n".join(lines), level=level)
+            logger.info("ETF 로테이션 리밸런싱 완료")
+
+        except Exception as e:
+            logger.error("ETF 로테이션 리밸런싱 실패: %s", e)
+            logger.debug(traceback.format_exc())
+            self._send_notification(
+                f"[ETF 로테이션 오류] {e}", level="CRITICAL"
+            )
+
     def execute_rebalance(self) -> None:
         """09:05 - 리밸런싱 실행 (해당일만).
 
@@ -450,12 +817,26 @@ class TradingBot:
                 )
                 return
 
+            # T-1 데이터 수집 (08:50 캐시 히트 기대)
+            prev_day = self.holidays.prev_trading_day(today)
+            data_date = prev_day.strftime("%Y%m%d")
+            logger.info("리밸런싱 데이터 수집 (기준일: %s)", data_date)
+            strategy_data = self._collect_strategy_data(data_date)
+
+            if strategy_data["fundamentals"].empty:
+                logger.error("펀더멘탈 데이터 수집 실패. 리밸런싱을 중단합니다.")
+                self._send_notification(
+                    "[리밸런싱 오류] 펀더멘탈 데이터 수집 실패.",
+                    level="CRITICAL",
+                )
+                return
+
             # 시그널 생성
             date_str = today.strftime("%Y%m%d")
             logger.info("리밸런싱 시그널 생성 중: %s", date_str)
 
             try:
-                signals = self._strategy.generate_signals(date_str, {})
+                signals = self._strategy.generate_signals(date_str, strategy_data)
             except Exception as e:
                 logger.error("시그널 생성 실패: %s", e)
                 self._send_notification(
@@ -978,7 +1359,15 @@ class TradingBot:
             return
 
         try:
-            signals = self.short_term_trader.scan_for_signals()
+            # 단기 전략용 데이터 수집 (시총 상위 100종목, 260일 OHLCV)
+            today_str = datetime.now(KST).strftime("%Y%m%d")
+            market_data = self._collect_short_term_data(today_str)
+
+            if not market_data.get("daily_data"):
+                logger.warning("단기 시그널 스캔: 데이터 수집 실패")
+                return
+
+            signals = self.short_term_trader.scan_for_signals(market_data)
 
             if not signals:
                 logger.info("단기 시그널 스캔: 시그널 없음")
@@ -1211,9 +1600,10 @@ class TradingBot:
             logger.debug(traceback.format_exc())
 
     def daily_simulation_batch(self) -> None:
-        """16:00 - 일일 리밸런싱 시뮬레이션.
+        """16:05 - 일일 리밸런싱 시뮬레이션.
 
-        모든 등록 전략으로 가상 리밸런싱을 실행하고 결과를 저장/발송한다.
+        매일 장 마감 후 모든 등록 전략의 시그널을 생성하고,
+        현재 보유 대비 매수/매도 예상을 텔레그램으로 발송한다.
         Feature Flag 'daily_simulation'로 제어.
         """
         if not self.feature_flags.is_enabled("daily_simulation"):
@@ -1244,19 +1634,37 @@ class TradingBot:
                 return
 
             simulator.strategies = strategies
+
+            # 장 마감 후이므로 당일(T) 데이터 사용 가능
+            today_str = datetime.now(KST).strftime("%Y%m%d")
+            strategy_data = self._collect_strategy_data(today_str)
+            simulator.strategy_data = strategy_data
+
+            # ETF 전략이 포함되어 있으면 가격 데이터 수집하여 주입
+            if "etf_rotation" in strategies:
+                etf_strategy = strategies["etf_rotation"]
+                lookback = getattr(etf_strategy, "lookback", 252)
+                simulator.etf_prices = self._fetch_etf_prices(
+                    etf_strategy.etf_universe, lookback
+                )
+
             result = simulator.run_daily_simulation()
 
-            # Drift 분석 (실제 보유 포트폴리오와 비교)
+            # Dry-run: 현재 포트폴리오 대비 매수/매도 예상
             if self.kis_client.is_configured():
-                try:
-                    balance = self.kis_client.get_balance()
-                    holdings = balance.get("holdings", [])
-                    actual = {
-                        h["ticker"]: h.get("eval_amount", 0) for h in holdings
-                    }
-                    simulator.analyze_drift(actual)
-                except Exception:
-                    pass
+                dry_run_results: dict = {}
+                for name, sim_data in result.items():
+                    try:
+                        signals = {
+                            item["ticker"]: item["weight"]
+                            for item in sim_data.get("selected", [])
+                        }
+                        if signals:
+                            dry = self.executor.dry_run(signals)
+                            dry_run_results[name] = dry
+                    except Exception as e:
+                        logger.debug("dry_run 실패 (%s): %s", name, e)
+                simulator.dry_run_results = dry_run_results
 
             text = simulator.format_telegram_report()
             self._send_notification(text)
@@ -1312,9 +1720,10 @@ class TradingBot:
             logger.error("성과 DB 기록 실패: %s", e)
             logger.debug(traceback.format_exc())
 
-    @staticmethod
-    def _create_long_term_strategy(name: str):
+    def _create_long_term_strategy(self, name: str):
         """전략 이름으로 장기 전략 인스턴스를 생성한다.
+
+        feature flag config 값을 전략 생성 시 주입한다.
 
         Args:
             name: 전략 이름.
@@ -1342,7 +1751,12 @@ class TradingBot:
                 return LowVolQualityStrategy(num_stocks=10)
             elif name == "etf_rotation":
                 from src.strategy.etf_rotation import ETFRotationStrategy
-                return ETFRotationStrategy()
+                config = self.feature_flags.get_config("etf_rotation")
+                lookback_months = config.get("lookback_months", 12)
+                return ETFRotationStrategy(
+                    lookback=lookback_months * 21,
+                    num_etfs=config.get("n_select", 2),
+                )
             elif name == "accrual":
                 from src.strategy.accrual import AccrualStrategy
                 return AccrualStrategy(num_stocks=10)
@@ -1401,6 +1815,15 @@ class TradingBot:
             CronTrigger(hour=9, minute=5, day_of_week="mon-fri"),
             id="execute_rebalance",
             name="리밸런싱 실행",
+            misfire_grace_time=600,
+        )
+
+        # ETF 로테이션 리밸런싱 (월간, 장기 리밸런싱 5분 후)
+        self.scheduler.add_job(
+            self.execute_etf_rotation_rebalance,
+            CronTrigger(hour=9, minute=10, day_of_week="mon-fri"),
+            id="etf_rotation_rebalance",
+            name="ETF 로테이션 리밸런싱",
             misfire_grace_time=600,
         )
 
@@ -1557,14 +1980,14 @@ class TradingBot:
         logger.info("  전략: %s", strategy_name)
         logger.info("  피처 플래그: %s", self.feature_flags.get_all_status())
         if self.allocator:
-            mode = self.feature_flags.get_config("short_term_trading").get("mode", "swing")
             logger.info(
-                "  단기 트레이딩: 활성 (단기=%.0f%%, 모드=%s)",
+                "  풀 할당: 장기=%.0f%%, ETF=%.0f%%, 단기=%.0f%%",
+                self.allocator._long_term_pct * 100,
+                self.allocator._etf_rotation_pct * 100,
                 self.allocator._short_term_pct * 100,
-                mode,
             )
         else:
-            logger.info("  단기 트레이딩: 비활성")
+            logger.info("  풀 할당: 100%% 장기 (분할 없음)")
         logger.info("=" * 60)
 
         self._send_notification(

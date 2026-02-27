@@ -82,13 +82,14 @@ class FeatureFlags:
                 "n_select": 2,
                 "rebalance_freq": "monthly",
                 "volatility_target": 0.0,
+                "etf_rotation_pct": 0.30,
             },
         },
         "daily_simulation": {
             "enabled": True,
             "description": "일일 리밸런싱 시뮬레이션 (가상 포트폴리오 히스토리)",
             "config": {
-                "strategies": ["multi_factor", "three_factor"],
+                "strategies": ["multi_factor", "three_factor", "etf_rotation"],
                 "report_time": "16:00",
             },
         },
