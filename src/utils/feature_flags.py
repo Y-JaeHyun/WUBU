@@ -71,7 +71,7 @@ class FeatureFlags:
                 "max_daily_loss_pct": -0.03,
                 "confirm_timeout_minutes": 30,
                 "mode": "swing",
-                "strategy": "bb_squeeze",
+                "strategy": "high_breakout",
             },
         },
         "etf_rotation": {
