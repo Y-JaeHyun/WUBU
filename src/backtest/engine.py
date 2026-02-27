@@ -231,25 +231,8 @@ class Backtest:
                             if price_on_date is not None:
                                 portfolio_value += qty * price_on_date
 
-                    # 기존 보유 종목 매도
-                    for ticker, qty in list(holdings.items()):
-                        if qty > 0:
-                            if ticker in price_cache and not price_cache[ticker].empty:
-                                price = self._get_price_on_date(price_cache[ticker], date)
-                                if price is not None:
-                                    proceeds = qty * price * (1 - self.sell_cost)
-                                    cash += proceeds
-                                    self._trades.append({
-                                        "date": date,
-                                        "ticker": ticker,
-                                        "action": "sell",
-                                        "quantity": qty,
-                                        "price": price,
-                                        "cost": qty * price * self.sell_cost,
-                                    })
-                    holdings.clear()
-
-                    # 신규 매수
+                    # 목표 수량 계산
+                    target_quantities: dict[str, int] = {}
                     for ticker, weight in signals.items():
                         if weight <= 0 or ticker not in price_cache:
                             continue
@@ -259,10 +242,51 @@ class Backtest:
                         price = self._get_price_on_date(price_df, date)
                         if price is None or price <= 0:
                             continue
+                        target_qty = int(
+                            portfolio_value * weight / (price * (1 + self.buy_cost))
+                        )
+                        if target_qty > 0:
+                            target_quantities[ticker] = target_qty
 
-                        target_amount = portfolio_value * weight
-                        buy_qty = int(target_amount / (price * (1 + self.buy_cost)))
+                    # 매도: 대상이 아닌 종목 전량 + 초과분 부분 매도
+                    for ticker, qty in list(holdings.items()):
+                        if qty <= 0:
+                            continue
+                        target_qty = target_quantities.get(ticker, 0)
+                        sell_qty = qty - target_qty
+                        if sell_qty <= 0:
+                            continue
+                        if ticker in price_cache and not price_cache[ticker].empty:
+                            price = self._get_price_on_date(price_cache[ticker], date)
+                            if price is not None:
+                                proceeds = sell_qty * price * (1 - self.sell_cost)
+                                cash += proceeds
+                                self._trades.append({
+                                    "date": date,
+                                    "ticker": ticker,
+                                    "action": "sell",
+                                    "quantity": sell_qty,
+                                    "price": price,
+                                    "cost": sell_qty * price * self.sell_cost,
+                                })
+                                if target_qty == 0:
+                                    del holdings[ticker]
+                                else:
+                                    holdings[ticker] = target_qty
+
+                    # 매수: 신규 종목 + 부족분 추가 매수
+                    for ticker, target_qty in target_quantities.items():
+                        current_qty = holdings.get(ticker, 0)
+                        buy_qty = target_qty - current_qty
                         if buy_qty <= 0:
+                            continue
+                        if ticker not in price_cache:
+                            continue
+                        price_df = price_cache[ticker]
+                        if price_df.empty:
+                            continue
+                        price = self._get_price_on_date(price_df, date)
+                        if price is None or price <= 0:
                             continue
 
                         cost = buy_qty * price * (1 + self.buy_cost)

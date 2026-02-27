@@ -504,3 +504,187 @@ class TestGetPriceOnDate:
         price = bt._get_price_on_date(price_df, "20240102")
 
         assert price is None
+
+
+# ===================================================================
+# Diff-based 리밸런싱 테스트
+# ===================================================================
+
+class _RotatingStrategy(Strategy):
+    """리밸런싱 시점마다 다른 시그널을 반환하는 전략 (diff-based 검증용)."""
+
+    def __init__(self, signals_by_call: list[dict]):
+        self._signals_by_call = signals_by_call
+        self._call_count = 0
+
+    @property
+    def name(self) -> str:
+        return "RotatingStrategy"
+
+    def generate_signals(self, date: str, data: dict) -> dict:
+        idx = min(self._call_count, len(self._signals_by_call) - 1)
+        self._call_count += 1
+        return self._signals_by_call[idx]
+
+
+class TestDiffBasedRebalancing:
+    """리밸런싱이 diff-based로 동작하여 유지 종목을 불필요하게 매매하지 않는지 검증."""
+
+    @staticmethod
+    def _make_constant_price(ticker: str, price: int, start: str, periods: int):
+        """고정가 DataFrame을 만든다."""
+        dates = pd.bdate_range(start, periods=periods)
+        df = pd.DataFrame(
+            {
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "volume": 100_000,
+            },
+            index=dates,
+        )
+        df.index.name = "date"
+        return df
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_retained_stock_not_sold_and_rebought(self, mock_price, mock_fund):
+        """유지 종목(A)은 매도+재매수 없이 그대로 보유된다.
+
+        1회차: A=50%, B=50%
+        2회차: A=50%, C=50% (B→C 교체, A는 유지)
+        → A에 대한 매도 거래가 없어야 함
+        """
+        mock_fund.return_value = pd.DataFrame()
+        period = 45  # ~2개월
+
+        strategy = _RotatingStrategy([
+            {"A": 0.5, "B": 0.5},
+            {"A": 0.5, "C": 0.5},
+        ])
+
+        def price_side_effect(ticker, start, end):
+            return self._make_constant_price(ticker, 10_000, "2024-01-02", period)
+
+        mock_price.side_effect = price_side_effect
+
+        bt = Backtest(
+            strategy=strategy,
+            start_date="20240102",
+            end_date="20240229",
+            initial_capital=1_000_000,
+            buy_cost=0.0,
+            sell_cost=0.0,
+        )
+        bt.run()
+
+        trades = bt.get_trades()
+        a_sells = trades[(trades["ticker"] == "A") & (trades["action"] == "sell")]
+        assert len(a_sells) == 0, (
+            f"유지 종목 A가 매도되었습니다: {len(a_sells)}건. "
+            "diff-based 리밸런싱이라면 A는 매도되지 않아야 합니다."
+        )
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_diff_based_reduces_trade_count(self, mock_price, mock_fund):
+        """동일 시그널이 반복되면 첫 매수 이후 거래가 발생하지 않는다."""
+        mock_fund.return_value = pd.DataFrame()
+        period = 65
+
+        # 매번 동일한 시그널
+        strategy = DummyStrategy({"X": 0.5, "Y": 0.5})
+
+        def price_side_effect(ticker, start, end):
+            return self._make_constant_price(ticker, 20_000, "2024-01-02", period)
+
+        mock_price.side_effect = price_side_effect
+
+        bt = Backtest(
+            strategy=strategy,
+            start_date="20240102",
+            end_date="20240331",
+            initial_capital=1_000_000,
+            buy_cost=0.0,
+            sell_cost=0.0,
+        )
+        bt.run()
+
+        trades = bt.get_trades()
+        # 첫 리밸런싱에서 2건 매수, 이후 동일 시그널이므로 추가 거래 없음
+        assert len(trades) == 2, (
+            f"동일 시그널 반복 시 첫 매수 2건만 있어야 하는데 {len(trades)}건 발생. "
+            "diff-based에서는 유지 종목을 재매매하지 않습니다."
+        )
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_removed_stock_is_sold(self, mock_price, mock_fund):
+        """대상에서 제외된 종목은 매도된다.
+
+        1회차: A=50%, B=50%
+        2회차: C=50%, D=50% (A, B 모두 제외)
+        → A, B 매도 거래가 있어야 함
+        """
+        mock_fund.return_value = pd.DataFrame()
+        period = 45
+
+        strategy = _RotatingStrategy([
+            {"A": 0.5, "B": 0.5},
+            {"C": 0.5, "D": 0.5},
+        ])
+
+        def price_side_effect(ticker, start, end):
+            return self._make_constant_price(ticker, 10_000, "2024-01-02", period)
+
+        mock_price.side_effect = price_side_effect
+
+        bt = Backtest(
+            strategy=strategy,
+            start_date="20240102",
+            end_date="20240229",
+            initial_capital=1_000_000,
+            buy_cost=0.0,
+            sell_cost=0.0,
+        )
+        bt.run()
+
+        trades = bt.get_trades()
+        a_sells = trades[(trades["ticker"] == "A") & (trades["action"] == "sell")]
+        b_sells = trades[(trades["ticker"] == "B") & (trades["action"] == "sell")]
+        assert len(a_sells) > 0, "제외된 종목 A가 매도되지 않았습니다."
+        assert len(b_sells) > 0, "제외된 종목 B가 매도되지 않았습니다."
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_no_cost_for_retained_stock(self, mock_price, mock_fund):
+        """유지 종목은 거래비용이 발생하지 않는다."""
+        mock_fund.return_value = pd.DataFrame()
+        period = 45
+
+        strategy = _RotatingStrategy([
+            {"A": 0.5, "B": 0.5},
+            {"A": 0.5, "C": 0.5},
+        ])
+
+        def price_side_effect(ticker, start, end):
+            return self._make_constant_price(ticker, 10_000, "2024-01-02", period)
+
+        mock_price.side_effect = price_side_effect
+
+        bt = Backtest(
+            strategy=strategy,
+            start_date="20240102",
+            end_date="20240229",
+            initial_capital=1_000_000,
+            buy_cost=0.001,
+            sell_cost=0.003,
+        )
+        bt.run()
+
+        trades = bt.get_trades()
+        # A에 대한 매도 거래가 없어야 함 (유지)
+        a_trades = trades[trades["ticker"] == "A"]
+        a_sells = a_trades[a_trades["action"] == "sell"]
+        assert len(a_sells) == 0, "유지 종목 A가 불필요하게 매도되어 비용 발생"
