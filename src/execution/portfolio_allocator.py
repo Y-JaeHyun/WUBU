@@ -22,7 +22,8 @@ _DEFAULT_ALLOCATION_PATH = (
 class PortfolioAllocator:
     """포트폴리오 풀 할당 관리자.
 
-    하나의 KIS 계좌를 장기(long_term)와 단기(short_term)로 논리 분리한다.
+    하나의 KIS 계좌를 장기(long_term), 단기(short_term),
+    ETF 로테이션(etf_rotation)으로 논리 분리한다.
     포지션 태깅 정보를 JSON 파일에 영속화하며, thread-safe 하게 동작한다.
 
     Attributes:
@@ -31,24 +32,29 @@ class PortfolioAllocator:
 
     ALLOCATION_PATH = "data/portfolio_allocation.json"
 
+    _VALID_POOLS = ("long_term", "short_term", "etf_rotation")
+
     def __init__(
         self,
         kis_client,
-        long_term_pct: float = 0.90,
-        short_term_pct: float = 0.10,
+        long_term_pct: float = 0.95,
+        short_term_pct: float = 0.05,
+        etf_rotation_pct: float = 0.0,
         allocation_path: Optional[str] = None,
     ) -> None:
         """PortfolioAllocator를 초기화한다.
 
         Args:
             kis_client: KIS OpenAPI 클라이언트 (get_balance, get_current_price 지원).
-            long_term_pct: 장기 풀 비율 (0~1). 기본 0.90.
-            short_term_pct: 단기 풀 비율 (0~1). 기본 0.10.
+            long_term_pct: 장기 풀 비율 (0~1). 기본 0.95.
+            short_term_pct: 단기 풀 비율 (0~1). 기본 0.05.
+            etf_rotation_pct: ETF 로테이션 풀 비율 (0~1). 기본 0.0.
             allocation_path: JSON 파일 경로. None이면 기본 경로 사용.
         """
         self._kis_client = kis_client
         self._long_term_pct = long_term_pct
         self._short_term_pct = short_term_pct
+        self._etf_rotation_pct = etf_rotation_pct
         self._path = Path(allocation_path) if allocation_path else _DEFAULT_ALLOCATION_PATH
         self._lock = threading.RLock()
         self._data: dict = {}
@@ -95,6 +101,14 @@ class PortfolioAllocator:
         """
         return int(self.get_total_portfolio_value() * self._short_term_pct)
 
+    def get_etf_rotation_budget(self) -> int:
+        """ETF 로테이션 풀 예산을 반환한다.
+
+        Returns:
+            총 포트폴리오 가치 * ETF 로테이션 비율 (원).
+        """
+        return int(self.get_total_portfolio_value() * self._etf_rotation_pct)
+
     def get_short_term_cash(self) -> int:
         """단기 풀의 사용 가능 현금을 반환한다.
 
@@ -121,6 +135,19 @@ class PortfolioAllocator:
         used = sum(p.get("eval_amount", 0) for p in positions)
         return max(budget - used, 0)
 
+    def get_etf_rotation_cash(self) -> int:
+        """ETF 로테이션 풀의 사용 가능 현금을 반환한다.
+
+        ETF 로테이션 예산에서 해당 포지션들의 평가금액 합계를 뺀 값.
+
+        Returns:
+            ETF 로테이션 풀 가용 현금 (원). 음수면 0.
+        """
+        budget = self.get_etf_rotation_budget()
+        positions = self.get_positions_by_pool("etf_rotation")
+        used = sum(p.get("eval_amount", 0) for p in positions)
+        return max(budget - used, 0)
+
     # ──────────────────────────────────────────────────────────
     # 포지션 태깅
     # ──────────────────────────────────────────────────────────
@@ -141,8 +168,10 @@ class PortfolioAllocator:
         Raises:
             ValueError: pool이 'long_term' 또는 'short_term'이 아닌 경우.
         """
-        if pool not in ("long_term", "short_term"):
-            raise ValueError(f"pool은 'long_term' 또는 'short_term'이어야 합니다: {pool}")
+        if pool not in self._VALID_POOLS:
+            raise ValueError(
+                f"pool은 {self._VALID_POOLS} 중 하나여야 합니다: {pool}"
+            )
 
         with self._lock:
             positions = self._data.get("positions", {})
@@ -237,7 +266,7 @@ class PortfolioAllocator:
     ) -> dict[str, float]:
         """장기 전략 weights를 장기 풀 비율에 맞게 스케일링한다.
 
-        예: 10개 종목 각 10% -> 장기 90%이면 각 9%로 조정.
+        예: 10개 종목 각 10% -> 장기 70%이면 각 7%로 조정.
 
         Args:
             target_weights: {ticker: weight} 형태의 원래 목표 비중 (합계 ~1.0).
@@ -253,34 +282,47 @@ class PortfolioAllocator:
             scaled[ticker] = round(weight * self._long_term_pct, 6)
         return scaled
 
+    def filter_etf_rotation_weights(
+        self, target_weights: dict[str, float]
+    ) -> dict[str, float]:
+        """ETF 로테이션 weights를 ETF 풀 비율에 맞게 스케일링한다.
+
+        예: 2개 ETF 각 50% -> ETF 풀 30%이면 각 15%로 조정.
+
+        Args:
+            target_weights: {ticker: weight} 형태의 원래 목표 비중 (합계 ~1.0).
+
+        Returns:
+            ETF 로테이션 풀 비율로 스케일된 {ticker: weight} 딕셔너리.
+        """
+        if not target_weights:
+            return {}
+
+        scaled = {}
+        for ticker, weight in target_weights.items():
+            scaled[ticker] = round(weight * self._etf_rotation_pct, 6)
+        return scaled
+
     def rebalance_allocation(self) -> dict:
         """월간 리밸런싱 시 풀 비율을 재조정한다.
 
         soft cap 모드: 초과 성장은 허용하되, 신규 투자 시 목표 비율을 적용.
 
         Returns:
-            재조정 결과 딕셔너리:
-            {
-                "long_term_target": float,
-                "short_term_target": float,
-                "long_term_actual": float,
-                "short_term_actual": float,
-                "long_term_eval": int,
-                "short_term_eval": int,
-                "total_eval": int,
-                "rebalance_needed": bool,
-                "drift_pct": float,
-            }
+            재조정 결과 딕셔너리 (3-pool 지원).
         """
         total = self.get_total_portfolio_value()
         if total <= 0:
             return {
                 "long_term_target": self._long_term_pct,
                 "short_term_target": self._short_term_pct,
+                "etf_rotation_target": self._etf_rotation_pct,
                 "long_term_actual": 0.0,
                 "short_term_actual": 0.0,
+                "etf_rotation_actual": 0.0,
                 "long_term_eval": 0,
                 "short_term_eval": 0,
+                "etf_rotation_eval": 0,
                 "total_eval": 0,
                 "rebalance_needed": False,
                 "drift_pct": 0.0,
@@ -288,15 +330,22 @@ class PortfolioAllocator:
 
         long_positions = self.get_positions_by_pool("long_term")
         short_positions = self.get_positions_by_pool("short_term")
+        etf_positions = self.get_positions_by_pool("etf_rotation")
 
         long_eval = sum(p.get("eval_amount", 0) for p in long_positions)
         short_eval = sum(p.get("eval_amount", 0) for p in short_positions)
+        etf_eval = sum(p.get("eval_amount", 0) for p in etf_positions)
 
         long_actual = long_eval / total if total > 0 else 0.0
         short_actual = short_eval / total if total > 0 else 0.0
+        etf_actual = etf_eval / total if total > 0 else 0.0
 
-        # drift: 실제 비율과 목표 비율의 차이 (절대값)
-        drift = abs(long_actual - self._long_term_pct)
+        # drift: 모든 풀 중 최대 drift
+        drift = max(
+            abs(long_actual - self._long_term_pct),
+            abs(etf_actual - self._etf_rotation_pct),
+            abs(short_actual - self._short_term_pct),
+        )
 
         # 5%p 이상 drift면 리밸런싱 필요
         rebalance_needed = drift >= 0.05
@@ -304,19 +353,26 @@ class PortfolioAllocator:
         result = {
             "long_term_target": self._long_term_pct,
             "short_term_target": self._short_term_pct,
+            "etf_rotation_target": self._etf_rotation_pct,
             "long_term_actual": round(long_actual, 4),
             "short_term_actual": round(short_actual, 4),
+            "etf_rotation_actual": round(etf_actual, 4),
             "long_term_eval": long_eval,
             "short_term_eval": short_eval,
+            "etf_rotation_eval": etf_eval,
             "total_eval": total,
             "rebalance_needed": rebalance_needed,
             "drift_pct": round(drift * 100, 2),
         }
 
         logger.info(
-            "풀 할당 현황: 장기=%.1f%% (목표 %.0f%%), 단기=%.1f%% (목표 %.0f%%), drift=%.2f%%p",
+            "풀 할당 현황: 장기=%.1f%% (목표 %.0f%%), "
+            "ETF=%.1f%% (목표 %.0f%%), "
+            "단기=%.1f%% (목표 %.0f%%), drift=%.2f%%p",
             long_actual * 100,
             self._long_term_pct * 100,
+            etf_actual * 100,
+            self._etf_rotation_pct * 100,
             short_actual * 100,
             self._short_term_pct * 100,
             drift * 100,
@@ -341,6 +397,8 @@ class PortfolioAllocator:
                         self._long_term_pct = config["long_term_pct"]
                     if "short_term_pct" in config:
                         self._short_term_pct = config["short_term_pct"]
+                    if "etf_rotation_pct" in config:
+                        self._etf_rotation_pct = config["etf_rotation_pct"]
                     logger.info(
                         "포트폴리오 할당 로드: %d개 포지션",
                         len(self._data.get("positions", {})),
@@ -352,6 +410,7 @@ class PortfolioAllocator:
                         "config": {
                             "long_term_pct": self._long_term_pct,
                             "short_term_pct": self._short_term_pct,
+                            "etf_rotation_pct": self._etf_rotation_pct,
                             "soft_cap_mode": True,
                         },
                         "positions": {},
@@ -366,6 +425,7 @@ class PortfolioAllocator:
                     "config": {
                         "long_term_pct": self._long_term_pct,
                         "short_term_pct": self._short_term_pct,
+                        "etf_rotation_pct": self._etf_rotation_pct,
                         "soft_cap_mode": True,
                     },
                     "positions": {},
@@ -381,6 +441,7 @@ class PortfolioAllocator:
                 self._data["config"] = {
                     "long_term_pct": self._long_term_pct,
                     "short_term_pct": self._short_term_pct,
+                    "etf_rotation_pct": self._etf_rotation_pct,
                     "soft_cap_mode": True,
                 }
                 self._path.write_text(

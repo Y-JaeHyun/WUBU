@@ -2,6 +2,7 @@
 
 주문 생성, 상태 추적, 이력 관리 기능을 제공한다.
 KISClient를 통해 실제 주문을 실행하고 상태를 동기화한다.
+소규모 자본 최적화(SmallCapitalConfig)를 지원한다.
 """
 
 from __future__ import annotations
@@ -18,6 +19,25 @@ from src.utils.logger import get_logger
 logger = get_logger(__name__)
 
 KST = pytz.timezone("Asia/Seoul")
+
+
+@dataclass
+class SmallCapitalConfig:
+    """소규모 자본 최적화 설정.
+
+    Attributes:
+        min_order_amount: 최소 주문 금액 (원). 이 미만의 주문은 스킵.
+        max_stocks: 최대 보유 종목 수. 집중 투자.
+        rebalance_band: 리밸런싱 밴드 (0~1). 목표 비중 대비 이 범위 이내면 리밸런싱 스킵.
+        min_alpha_cost_ratio: 최소 알파/비용 비율. 예상 알파 > 왕복 비용 × 이 비율이어야 매매.
+        round_trip_cost_pct: 왕복 거래비용 비율 (매수+매도). KIS 기본 0.25%.
+    """
+
+    min_order_amount: int = 70_000
+    max_stocks: int = 10
+    rebalance_band: float = 0.20
+    min_alpha_cost_ratio: float = 2.0
+    round_trip_cost_pct: float = 0.0025
 
 
 @dataclass
@@ -107,21 +127,135 @@ class OrderManager:
 
     KISClient를 통해 실제 주문을 실행하고,
     각 주문의 상태를 추적하며, 이력을 보관한다.
+    SmallCapitalConfig를 통해 소규모 자본 최적화를 지원한다.
 
     Attributes:
         client: KISClient 인스턴스.
         orders: 현재 세션의 전체 주문 리스트.
+        capital_config: 소규모 자본 최적화 설정.
     """
 
-    def __init__(self, kis_client: KISClient) -> None:
+    def __init__(
+        self,
+        kis_client: KISClient,
+        capital_config: Optional[SmallCapitalConfig] = None,
+    ) -> None:
         """OrderManager를 초기화한다.
 
         Args:
             kis_client: 한국투자증권 API 클라이언트.
+            capital_config: 소규모 자본 최적화 설정. None이면 기본값 사용.
         """
         self.client: KISClient = kis_client
         self.orders: list[Order] = []
-        logger.info("OrderManager 초기화 완료")
+        self.capital_config: SmallCapitalConfig = capital_config or SmallCapitalConfig()
+        logger.info("OrderManager 초기화 완료 (min_order=%d원)", self.capital_config.min_order_amount)
+
+    def validate_order_amount(self, qty: int, price: int) -> bool:
+        """주문 금액이 최소 금액 이상인지 검증한다.
+
+        Args:
+            qty: 주문 수량.
+            price: 주문 가격 (시장가인 경우 예상 가격).
+
+        Returns:
+            최소 금액 이상이면 True.
+        """
+        if price <= 0:
+            return True  # 시장가는 사전 검증 불가
+        amount = qty * price
+        if amount < self.capital_config.min_order_amount:
+            logger.warning(
+                "최소 주문 금액 미달: %d원 < %d원 (수량=%d, 가격=%d)",
+                amount,
+                self.capital_config.min_order_amount,
+                qty,
+                price,
+            )
+            return False
+        return True
+
+    def check_rebalance_needed(
+        self, current_weight: float, target_weight: float
+    ) -> bool:
+        """리밸런싱이 필요한지 밴드 기준으로 확인한다.
+
+        현재 비중과 목표 비중의 차이가 리밸런싱 밴드를 초과하면 True.
+
+        Args:
+            current_weight: 현재 비중 (0~1).
+            target_weight: 목표 비중 (0~1).
+
+        Returns:
+            리밸런싱이 필요하면 True.
+        """
+        if target_weight <= 0:
+            return current_weight > 0  # 목표 0인데 보유 중이면 매도 필요
+        drift = abs(current_weight - target_weight) / target_weight
+        needed = drift > self.capital_config.rebalance_band
+        if not needed:
+            logger.debug(
+                "리밸런싱 스킵: drift=%.1f%% <= band=%.0f%%",
+                drift * 100,
+                self.capital_config.rebalance_band * 100,
+            )
+        return needed
+
+    def check_alpha_exceeds_cost(self, expected_alpha: float) -> bool:
+        """예상 알파가 왕복 거래비용의 N배를 초과하는지 확인한다.
+
+        Args:
+            expected_alpha: 예상 초과수익률 (0.01 = 1%).
+
+        Returns:
+            알파가 충분하면 True.
+        """
+        threshold = self.capital_config.round_trip_cost_pct * self.capital_config.min_alpha_cost_ratio
+        if expected_alpha < threshold:
+            logger.debug(
+                "알파 부족: %.4f < %.4f (비용 %.4f × %.1f배)",
+                expected_alpha,
+                threshold,
+                self.capital_config.round_trip_cost_pct,
+                self.capital_config.min_alpha_cost_ratio,
+            )
+            return False
+        return True
+
+    def filter_weights_by_max_stocks(
+        self, target_weights: dict[str, float]
+    ) -> dict[str, float]:
+        """최대 종목 수를 초과하는 경우 비중 상위 종목만 유지한다.
+
+        Args:
+            target_weights: {ticker: weight} 원래 목표 비중.
+
+        Returns:
+            최대 종목 수로 제한된 {ticker: weight} (비중 재정규화).
+        """
+        max_stocks = self.capital_config.max_stocks
+        if len(target_weights) <= max_stocks:
+            return dict(target_weights)
+
+        # 비중 상위 max_stocks개 선택
+        sorted_items = sorted(target_weights.items(), key=lambda x: x[1], reverse=True)
+        top = sorted_items[:max_stocks]
+
+        # 비중 재정규화
+        total = sum(w for _, w in top)
+        if total > 0:
+            result = {t: w / total for t, w in top}
+        else:
+            result = {t: 1.0 / max_stocks for t, _ in top}
+
+        dropped = len(target_weights) - max_stocks
+        logger.info(
+            "종목 수 제한: %d → %d종목 (하위 %d종목 제외)",
+            len(target_weights),
+            max_stocks,
+            dropped,
+        )
+        return result
 
     def submit_order(
         self,

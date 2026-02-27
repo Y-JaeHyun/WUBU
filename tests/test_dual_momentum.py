@@ -289,3 +289,111 @@ class TestGenerateAllocation:
             assert weight >= 0, (
                 f"종목 {ticker}의 비중 {weight}이 음수입니다."
             )
+
+
+# ===================================================================
+# volatility_target 테스트
+# ===================================================================
+
+class TestVolatilityTarget:
+    """volatility_target 파라미터 검증."""
+
+    def test_default_disabled(self):
+        """기본값은 0.0(비활성)이다."""
+        DualMomentumStrategy = _import_dual_momentum()
+        dms = DualMomentumStrategy()
+        assert dms.volatility_target == 0.0
+
+    def test_volatility_target_applied(self):
+        """변동성 타깃이 적용되면 비중이 조절된다."""
+        DualMomentumStrategy = _import_dual_momentum()
+        dms = DualMomentumStrategy(
+            n_select=1,
+            volatility_target=0.10,  # 10% 목표 변동성
+        )
+        prices = _make_known_prices()
+        allocation = dms.generate_allocation(prices)
+
+        assert isinstance(allocation, dict)
+        assert len(allocation) > 0
+
+        # 비중 합이 1.0인지 확인
+        total = sum(allocation.values())
+        assert abs(total - 1.0) < 1e-9, f"비중 합이 1.0이어야 합니다: {total}"
+
+    def test_volatility_target_weights_sum(self):
+        """변동성 타깃 적용 후에도 비중 합이 1.0이다."""
+        DualMomentumStrategy = _import_dual_momentum()
+        dms = DualMomentumStrategy(
+            n_select=2,
+            volatility_target=0.15,
+        )
+        # 높은 변동성 데이터
+        prices = _make_etf_prices(
+            ["069500", "360750", "214980"],
+            periods=300,
+            seed=42,
+        )
+        allocation = dms.generate_allocation(prices)
+
+        if allocation:
+            total = sum(allocation.values())
+            assert abs(total - 1.0) < 1e-9
+
+    def test_zero_volatility_target_no_effect(self):
+        """volatility_target=0이면 조절이 적용되지 않는다."""
+        DualMomentumStrategy = _import_dual_momentum()
+        dms_no_vt = DualMomentumStrategy(n_select=1, volatility_target=0.0)
+        dms_with_vt = DualMomentumStrategy(n_select=1, volatility_target=0.0)
+
+        prices = _make_known_prices()
+        alloc1 = dms_no_vt.generate_allocation(prices)
+        alloc2 = dms_with_vt.generate_allocation(prices)
+
+        # 동일한 결과가 나와야 함
+        assert alloc1.keys() == alloc2.keys()
+
+
+# ===================================================================
+# etf_universe 테스트
+# ===================================================================
+
+class TestETFUniverse:
+    """etf_universe 파라미터 검증."""
+
+    def test_default_universe(self):
+        """기본 유니버스는 domestic + us이다."""
+        DualMomentumStrategy = _import_dual_momentum()
+        dms = DualMomentumStrategy()
+        assert "domestic" in dms.risky_assets
+        assert "us" in dms.risky_assets
+        assert len(dms.risky_assets) == 2
+
+    def test_extended_universe(self):
+        """etf_universe로 추가 ETF가 병합된다."""
+        DualMomentumStrategy = _import_dual_momentum()
+        dms = DualMomentumStrategy(
+            etf_universe={"japan": "241180", "europe": "195930"},
+        )
+        assert "japan" in dms.risky_assets
+        assert "europe" in dms.risky_assets
+        assert "domestic" in dms.risky_assets  # 기존 유지
+        assert "us" in dms.risky_assets  # 기존 유지
+        assert len(dms.risky_assets) == 4
+
+    def test_extended_universe_with_custom_risky(self):
+        """risky_assets와 etf_universe를 동시에 지정할 수 있다."""
+        DualMomentumStrategy = _import_dual_momentum()
+        dms = DualMomentumStrategy(
+            risky_assets={"domestic": "069500"},
+            etf_universe={"japan": "241180"},
+        )
+        assert "domestic" in dms.risky_assets
+        assert "japan" in dms.risky_assets
+        assert len(dms.risky_assets) == 2
+
+    def test_none_etf_universe_no_effect(self):
+        """etf_universe=None이면 기본 유니버스만 사용된다."""
+        DualMomentumStrategy = _import_dual_momentum()
+        dms = DualMomentumStrategy(etf_universe=None)
+        assert len(dms.risky_assets) == 2

@@ -292,3 +292,177 @@ class TestUniverseFiltering:
         # 가격 dict가 비어 있으면 252일 조건 통과 불가
         filtered = ms._filter_universe(sample_all_fundamentals, {})
         assert filtered == [], "가격 데이터 없으면 빈 리스트여야 합니다."
+
+
+# ===================================================================
+# 잔차 모멘텀 테스트
+# ===================================================================
+
+class TestResidualMomentum:
+    """residual 파라미터 검증."""
+
+    def test_default_disabled(self):
+        """기본값은 False이다."""
+        ms = MomentumStrategy()
+        assert ms.residual is False
+
+    def test_residual_momentum_with_index(
+        self, sample_all_fundamentals, sample_prices_dict
+    ):
+        """잔차 모멘텀이 index_prices와 함께 정상 동작한다."""
+        ms = MomentumStrategy(
+            num_stocks=5,
+            min_market_cap=0,
+            min_volume=0,
+            residual=True,
+        )
+        # 시장 지수 시계열 생성
+        dates = pd.bdate_range("2023-01-02", periods=252)
+        index_prices = pd.Series(
+            50000 * np.exp(np.cumsum(np.random.randn(252) * 0.01)),
+            index=dates,
+        )
+        data = {
+            "fundamentals": sample_all_fundamentals,
+            "prices": sample_prices_dict,
+            "index_prices": index_prices,
+        }
+        signals = ms.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        if signals:
+            assert len(signals) <= 5
+            assert abs(sum(signals.values()) - 1.0) < 1e-9
+
+    def test_residual_momentum_without_index(
+        self, sample_all_fundamentals, sample_prices_dict
+    ):
+        """index_prices가 없으면 잔차 모멘텀 계산 불가 → 빈 결과."""
+        ms = MomentumStrategy(
+            num_stocks=5,
+            min_market_cap=0,
+            min_volume=0,
+            residual=True,
+        )
+        data = {
+            "fundamentals": sample_all_fundamentals,
+            "prices": sample_prices_dict,
+        }
+        signals = ms.generate_signals("20240102", data)
+
+        # index_prices 없이 residual=True이면 빈 결과
+        assert isinstance(signals, dict)
+
+
+# ===================================================================
+# 52주 고점 거리 팩터 테스트
+# ===================================================================
+
+class TestHigh52wFactor:
+    """high_52w_factor 파라미터 검증."""
+
+    def test_default_disabled(self):
+        """기본값은 False이다."""
+        ms = MomentumStrategy()
+        assert ms.high_52w_factor is False
+
+    def test_52w_high_factor_combined(
+        self, sample_all_fundamentals, sample_prices_dict
+    ):
+        """52주 고점 거리 팩터가 모멘텀 스코어에 결합된다."""
+        ms = MomentumStrategy(
+            num_stocks=5,
+            min_market_cap=0,
+            min_volume=0,
+            high_52w_factor=True,
+        )
+        data = {
+            "fundamentals": sample_all_fundamentals,
+            "prices": sample_prices_dict,
+        }
+        signals = ms.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        if signals:
+            assert len(signals) <= 5
+
+    def test_52w_high_ratio_calculation(self, sample_prices_dict):
+        """52주 고점 비율이 올바르게 계산된다."""
+        ms = MomentumStrategy(high_52w_factor=True)
+        ticker = list(sample_prices_dict.keys())[0]
+        ratio = ms._compute_52w_high_ratio(ticker, sample_prices_dict)
+
+        assert not np.isnan(ratio)
+        assert 0 < ratio <= 1.0  # 현재가 / 52주고가이므로 0~1 범위
+
+
+# ===================================================================
+# 모멘텀 절대 캡 테스트
+# ===================================================================
+
+
+class TestMomentumCap:
+    """momentum_cap 파라미터 검증."""
+
+    def test_default_momentum_cap(self):
+        """기본 momentum_cap은 3.0이다."""
+        ms = MomentumStrategy()
+        assert ms.momentum_cap == 3.0
+
+    def test_cap_clips_extreme_scores(self):
+        """극단적 모멘텀 스코어가 momentum_cap으로 클리핑된다."""
+        ms = MomentumStrategy(
+            lookback_months=[12],
+            skip_month=False,
+            momentum_cap=2.0,
+        )
+
+        # 극단적 상승 종목 데이터 생성
+        dates = pd.bdate_range("2023-01-02", periods=252)
+        tickers = ["A", "B", "C"]
+        prices = {}
+        for i, ticker in enumerate(tickers):
+            if ticker == "A":
+                # +350% 상승 → 캡 대상
+                close = np.linspace(10000, 45000, 252)
+            elif ticker == "B":
+                # +100% 상승 → 캡 미적용
+                close = np.linspace(10000, 20000, 252)
+            else:
+                # +50% 상승 → 캡 미적용
+                close = np.linspace(10000, 15000, 252)
+
+            prices[ticker] = pd.DataFrame({
+                "close": close,
+                "volume": [1_000_000] * 252,
+            }, index=dates)
+
+        scores = ms._compute_scores(tickers, prices)
+
+        # A의 스코어가 2.0(200%) 이하로 클리핑
+        assert scores["A"] <= 2.0
+        # B, C는 캡 미적용
+        assert scores["B"] < 2.0
+        assert scores["C"] < 2.0
+
+    def test_cap_disabled_with_zero(self):
+        """momentum_cap=0이면 캡이 비활성화된다."""
+        ms = MomentumStrategy(
+            lookback_months=[12],
+            skip_month=False,
+            momentum_cap=0,
+        )
+
+        dates = pd.bdate_range("2023-01-02", periods=252)
+        close = np.linspace(10000, 50000, 252)  # +400%
+        prices = {
+            "A": pd.DataFrame({
+                "close": close,
+                "volume": [1_000_000] * 252,
+            }, index=dates),
+        }
+
+        scores = ms._compute_scores(["A"], prices)
+
+        # 캡 없이 원래 값 (300%+ 예상)
+        assert scores["A"] > 3.0

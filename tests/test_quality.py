@@ -286,3 +286,76 @@ class TestQualityGenerateSignals:
             assert weight > 0, (
                 f"종목 {ticker}의 비중 {weight}이 양수여야 합니다."
             )
+
+
+# ===================================================================
+# strict_accrual 파라미터 검증
+# ===================================================================
+
+class TestStrictAccrual:
+    """strict_accrual 옵션 검증."""
+
+    def test_default_disabled(self):
+        """기본값은 False이다."""
+        QualityStrategy = _import_quality_strategy()
+        qs = QualityStrategy()
+        assert qs.strict_accrual is False
+
+    def test_strict_accrual_with_data(self):
+        """순이익, 영업CF, 총자산 데이터로 엄격한 발생액이 계산된다."""
+        QualityStrategy = _import_quality_strategy()
+        qs = QualityStrategy(strict_accrual=True)
+
+        fundamentals = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "roe": [15.0, 20.0, 10.0],
+            "gp_over_assets": [0.2, 0.3, 0.1],
+            "debt_ratio": [50.0, 80.0, 30.0],
+            "net_income": [1000, 2000, 500],
+            "cfo": [800, 1800, 600],
+            "total_assets": [10000, 10000, 10000],
+        })
+
+        scores = qs.calculate_quality_scores(fundamentals)
+
+        assert isinstance(scores, pd.Series)
+        assert len(scores) == 3
+
+    def test_strict_accrual_without_data_fallback(self):
+        """필요한 컬럼이 없으면 기존 발생액 계산으로 대체한다."""
+        QualityStrategy = _import_quality_strategy()
+        qs = QualityStrategy(strict_accrual=True)
+
+        fundamentals = _make_quality_fundamentals(n=10)
+
+        scores = qs.calculate_quality_scores(fundamentals)
+
+        assert isinstance(scores, pd.Series)
+        assert len(scores) > 0
+
+    def test_strict_accrual_ranking_effect(self):
+        """엄격한 발생액 계산이 스코어에 영향을 미친다."""
+        QualityStrategy = _import_quality_strategy()
+        # 발생액 가중치를 100%로
+        qs = QualityStrategy(
+            strict_accrual=True,
+            weights={"roe": 0.0, "gpa": 0.0, "debt": 0.0, "accrual": 1.0},
+        )
+
+        # A: 발생액 = (1000-800)/10000 = 0.02
+        # B: 발생액 = (2000-1800)/10000 = 0.02
+        # C: 발생액 = (500-600)/10000 = -0.01 (음수 = 좋은 품질)
+        fundamentals = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "roe": [15.0, 15.0, 15.0],
+            "gp_over_assets": [0.2, 0.2, 0.2],
+            "debt_ratio": [50.0, 50.0, 50.0],
+            "net_income": [1000, 2000, 500],
+            "cfo": [800, 1800, 600],
+            "total_assets": [10000, 10000, 10000],
+        })
+
+        scores = qs.calculate_quality_scores(fundamentals)
+
+        # 발생액이 낮을수록 좋으므로 C가 최고 스코어여야 함
+        assert scores.idxmax() == "C", "발생액이 가장 낮은 C가 최고 스코어여야 합니다."

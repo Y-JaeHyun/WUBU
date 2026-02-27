@@ -63,8 +63,8 @@ class FeatureFlags:
             "enabled": False,
             "description": "단기 트레이딩 (스윙 + 데이트레이딩)",
             "config": {
-                "long_term_pct": 0.90,
-                "short_term_pct": 0.10,
+                "long_term_pct": 0.95,
+                "short_term_pct": 0.05,
                 "stop_loss_pct": -0.05,
                 "take_profit_pct": 0.10,
                 "max_concurrent_positions": 3,
@@ -72,6 +72,40 @@ class FeatureFlags:
                 "confirm_timeout_minutes": 30,
                 "mode": "swing",
                 "strategy": "bb_squeeze",
+            },
+        },
+        "etf_rotation": {
+            "enabled": True,
+            "description": "ETF 로테이션 전략 (확장 유니버스)",
+            "config": {
+                "lookback_months": 12,
+                "n_select": 2,
+                "rebalance_freq": "monthly",
+                "volatility_target": 0.0,
+            },
+        },
+        "daily_simulation": {
+            "enabled": True,
+            "description": "일일 리밸런싱 시뮬레이션 (가상 포트폴리오 히스토리)",
+            "config": {
+                "strategies": ["multi_factor", "three_factor"],
+                "report_time": "16:00",
+            },
+        },
+        "news_collector": {
+            "enabled": True,
+            "description": "DART 공시/뉴스 자동 수집 + 뉴스레터",
+            "config": {
+                "check_interval_hours": 1,
+                "important_only": True,
+            },
+        },
+        "macro_monitor": {
+            "enabled": True,
+            "description": "매크로 데이터 수집 (ECOS, FRED, VIX 등)",
+            "config": {
+                "include_us_treasury": True,
+                "include_vix": True,
             },
         },
     }

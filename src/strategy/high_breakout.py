@@ -39,6 +39,12 @@ class HighBreakoutStrategy(ShortTermStrategy):
         "max_holding_days": 10,             # 최대 보유일
         "max_signals": 3,
         "min_market_cap": 300_000_000_000,  # 3000억
+        "confirm_close": False,             # 종가확인형 돌파 (True: 종가 확인 후 다음날 진입)
+        # ATR 동적 손절/익절
+        "use_atr_stops": True,
+        "atr_period": 14,
+        "atr_stop_mult": 2.0,              # 손절: 진입가 - ATR * mult
+        "atr_profit_mult": 3.0,            # 익절: 진입가 + ATR * mult
     }
 
     def __init__(self, params: dict = None):
@@ -107,6 +113,7 @@ class HighBreakoutStrategy(ShortTermStrategy):
                     "volume_ratio": c.get("volume_ratio", 0),
                     "prev_52w_high": c.get("prev_52w_high", 0),
                     "market_cap": c.get("market_cap", 0),
+                    "confirm_close": self._params.get("confirm_close", False),
                 },
             )
             signals.append(sig)
@@ -247,22 +254,27 @@ class HighBreakoutStrategy(ShortTermStrategy):
         pnl_pct = (current_price - entry_price) / entry_price
         reasons = []
 
-        # 1. 손절
-        if pnl_pct <= self._params["stop_loss_pct"]:
-            reasons.append(f"손절: {pnl_pct:.2%}")
+        # 1. ATR 또는 고정 % 손절/익절
+        use_atr = self._params.get("use_atr_stops", False)
+        atr_applied = False
+        if use_atr:
+            atr_reasons, atr_applied = self._check_atr_exit(position, market_data)
+            reasons.extend(atr_reasons)
+        if not atr_applied:
+            # 고정 % fallback
+            if pnl_pct <= self._params["stop_loss_pct"]:
+                reasons.append(f"손절: {pnl_pct:.2%}")
+            if pnl_pct >= self._params["take_profit_pct"]:
+                reasons.append(f"익절: {pnl_pct:.2%}")
 
-        # 2. 익절
-        if pnl_pct >= self._params["take_profit_pct"]:
-            reasons.append(f"익절: {pnl_pct:.2%}")
-
-        # 3. 트레일링 스탑
+        # 2. 트레일링 스탑
         metadata = position.get("metadata", {})
         peak_price = metadata.get("peak_price", entry_price)
         if peak_price > 0 and current_price < peak_price * (1 - self._params["trailing_stop_pct"]):
             drop_from_peak = (current_price - peak_price) / peak_price
             reasons.append(f"트레일링: 고점대비 {drop_from_peak:.2%}")
 
-        # 4. 시간 손절
+        # 3. 시간 손절
         entry_date = position.get("entry_date", "")
         if entry_date:
             try:

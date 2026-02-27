@@ -38,6 +38,12 @@ class SwingReversionStrategy(ShortTermStrategy):
         "max_holding_days": 5,      # 최대 보유일
         "use_obv_filter": False,    # OBV 다이버전스 필터 (기본 OFF)
         "obv_divergence_days": 5,   # 다이버전스 확인 기간
+        "regime_filter": False,     # 추세하락 레짐 필터 (MA50<MA200 시 비활성)
+        # ATR 동적 손절/익절
+        "use_atr_stops": True,
+        "atr_period": 14,
+        "atr_stop_mult": 2.0,      # 손절: 진입가 - ATR * mult
+        "atr_profit_mult": 3.0,    # 익절: 진입가 + ATR * mult
     }
 
     def __init__(self, params: dict = None):
@@ -129,6 +135,15 @@ class SwingReversionStrategy(ShortTermStrategy):
         if close <= 0 or volume <= 0:
             return None
 
+        # 0. 추세하락 레짐 필터 (MA50 < MA200이면 비활성)
+        if self._params.get("regime_filter", False):
+            closes_all = df[close_col].astype(float)
+            if len(closes_all) >= 200:
+                ma50 = float(closes_all.rolling(50).mean().iloc[-1])
+                ma200 = float(closes_all.rolling(200).mean().iloc[-1])
+                if not pd.isna(ma50) and not pd.isna(ma200) and ma50 < ma200:
+                    return None  # 데드크로스 구간: 매수 비활성
+
         # 1. 거래량 급등 체크 (20일 이동평균 대비)
         vol_avg_days = self._params.get("volume_avg_days", 20)
         vol_series = df[volume_col].astype(float)
@@ -216,15 +231,20 @@ class SwingReversionStrategy(ShortTermStrategy):
         pnl_pct = (current_price - entry_price) / entry_price
         reasons = []
 
-        # 1. 손절
-        if pnl_pct <= self._params["stop_loss_pct"]:
-            reasons.append(f"손절: {pnl_pct:.2%}")
+        # 1. ATR 또는 고정 % 손절/익절
+        use_atr = self._params.get("use_atr_stops", False)
+        atr_applied = False
+        if use_atr:
+            atr_reasons, atr_applied = self._check_atr_exit(position, market_data)
+            reasons.extend(atr_reasons)
+        if not atr_applied:
+            # 고정 % fallback
+            if pnl_pct <= self._params["stop_loss_pct"]:
+                reasons.append(f"손절: {pnl_pct:.2%}")
+            if pnl_pct >= self._params["take_profit_pct"]:
+                reasons.append(f"익절: {pnl_pct:.2%}")
 
-        # 2. 익절
-        if pnl_pct >= self._params["take_profit_pct"]:
-            reasons.append(f"익절: {pnl_pct:.2%}")
-
-        # 3. RSI > 70 (과매수)
+        # 2. RSI > 70 (과매수)
         daily_data = market_data.get("daily_data", {})
         df = daily_data.get(ticker)
         if df is not None and len(df) >= self._params["rsi_period"] + 1:
@@ -232,7 +252,7 @@ class SwingReversionStrategy(ShortTermStrategy):
             if rsi is not None and rsi >= self._params["rsi_overbought"]:
                 reasons.append(f"RSI 과매수: {rsi:.1f}")
 
-        # 4. 시간 손절
+        # 3. 시간 손절
         entry_date = position.get("entry_date", "")
         if entry_date:
             try:

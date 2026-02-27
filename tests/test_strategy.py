@@ -508,3 +508,237 @@ class TestGenerateSignals:
         signals = vs.generate_signals("20240102", data)
 
         assert signals == {}
+
+
+# ===================================================================
+# 업종중립 Z-Score 테스트
+# ===================================================================
+
+class TestIndustryNeutral:
+    """industry_neutral 파라미터 검증."""
+
+    def test_default_disabled(self):
+        """기본값은 False이다."""
+        vs = ValueStrategy()
+        assert vs.industry_neutral is False
+
+    def test_enabled_with_sector(self):
+        """sector 컬럼이 있으면 업종중립 Z-Score가 적용된다."""
+        vs = ValueStrategy(
+            factor="pbr",
+            num_stocks=3,
+            min_market_cap=0,
+            min_volume=0,
+            industry_neutral=True,
+        )
+        fund = pd.DataFrame({
+            "ticker": ["A", "B", "C", "D", "E", "F"],
+            "pbr": [0.5, 0.3, 0.8, 1.0, 0.4, 1.5],
+            "per": [10, 5, 15, 8, 12, 20],
+            "close": [10000] * 6,
+            "market_cap": [1_000_000_000_000] * 6,
+            "volume": [1_000_000] * 6,
+            "sector": ["IT", "IT", "IT", "금융", "금융", "금융"],
+        })
+        data = {"fundamentals": fund}
+        signals = vs.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        assert len(signals) == 3
+        assert abs(sum(signals.values()) - 1.0) < 1e-9
+
+    def test_enabled_without_sector(self):
+        """sector 컬럼이 없으면 전체 Z-Score로 대체한다."""
+        vs = ValueStrategy(
+            factor="pbr",
+            num_stocks=3,
+            min_market_cap=0,
+            min_volume=0,
+            industry_neutral=True,
+        )
+        fund = pd.DataFrame({
+            "ticker": ["A", "B", "C", "D"],
+            "pbr": [0.5, 0.3, 0.8, 1.0],
+            "per": [10, 5, 15, 8],
+            "close": [10000] * 4,
+            "market_cap": [1_000_000_000_000] * 4,
+            "volume": [1_000_000] * 4,
+        })
+        data = {"fundamentals": fund}
+        signals = vs.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        assert len(signals) == 3
+
+    def test_composite_with_industry_neutral(self):
+        """composite + industry_neutral 조합이 동작한다."""
+        vs = ValueStrategy(
+            factor="composite",
+            num_stocks=2,
+            min_market_cap=0,
+            min_volume=0,
+            industry_neutral=True,
+        )
+        fund = pd.DataFrame({
+            "ticker": ["A", "B", "C", "D"],
+            "pbr": [0.5, 0.3, 0.8, 1.0],
+            "per": [10, 5, 15, 8],
+            "close": [10000] * 4,
+            "market_cap": [1_000_000_000_000] * 4,
+            "volume": [1_000_000] * 4,
+            "sector": ["IT", "IT", "금융", "금융"],
+        })
+        data = {"fundamentals": fund}
+        signals = vs.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        assert len(signals) == 2
+
+
+# ===================================================================
+# 주주환원 팩터 테스트
+# ===================================================================
+
+class TestShareholderYield:
+    """shareholder_yield 파라미터 검증."""
+
+    def test_default_disabled(self):
+        """기본값은 False이다."""
+        vs = ValueStrategy()
+        assert vs.shareholder_yield is False
+
+    def test_enabled_with_div_yield(self):
+        """div_yield 컬럼이 있으면 배당수익률이 밸류 스코어에 가산된다."""
+        vs = ValueStrategy(
+            factor="pbr",
+            num_stocks=2,
+            min_market_cap=0,
+            min_volume=0,
+            shareholder_yield=True,
+        )
+        # A와 C는 PBR이 비슷하지만 A의 배당이 훨씬 높음 → A가 선호되어야 함
+        fund = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "pbr": [0.50, 1.50, 0.51],
+            "per": [10, 20, 10],
+            "close": [10000] * 3,
+            "market_cap": [1_000_000_000_000] * 3,
+            "volume": [1_000_000] * 3,
+            "div_yield": [5.0, 1.0, 0.5],
+        })
+        data = {"fundamentals": fund}
+        signals = vs.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        assert len(signals) == 2
+        assert "A" in signals  # 높은 배당 + 낮은 PBR
+
+    def test_enabled_without_div_yield(self):
+        """div_yield 컬럼이 없으면 기존 로직으로 동작한다."""
+        vs = ValueStrategy(
+            factor="pbr",
+            num_stocks=2,
+            min_market_cap=0,
+            min_volume=0,
+            shareholder_yield=True,
+        )
+        fund = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "pbr": [0.5, 0.3, 0.8],
+            "per": [10, 5, 15],
+            "close": [10000] * 3,
+            "market_cap": [1_000_000_000_000] * 3,
+            "volume": [1_000_000] * 3,
+        })
+        data = {"fundamentals": fund}
+        signals = vs.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        # 배당 데이터 없어도 에러 없이 동작
+        assert len(signals) == 2
+
+
+# ===================================================================
+# F-Score 필터 테스트
+# ===================================================================
+
+class TestFScoreFilter:
+    """f_score_filter 파라미터 검증."""
+
+    def test_default_disabled(self):
+        """기본값은 0(비활성)이다."""
+        vs = ValueStrategy()
+        assert vs.f_score_filter == 0
+
+    def test_filter_with_f_score_column(self):
+        """f_score 컬럼이 있으면 직접 사용한다."""
+        vs = ValueStrategy(
+            factor="pbr",
+            num_stocks=5,
+            min_market_cap=0,
+            min_volume=0,
+            f_score_filter=2,
+        )
+        fund = pd.DataFrame({
+            "ticker": ["A", "B", "C", "D"],
+            "pbr": [0.5, 0.3, 0.8, 1.0],
+            "per": [10, 5, 15, 8],
+            "close": [10000] * 4,
+            "market_cap": [1_000_000_000_000] * 4,
+            "volume": [1_000_000] * 4,
+            "f_score": [3, 1, 2, 0],  # A(3), C(2) 만 통과
+        })
+        data = {"fundamentals": fund}
+        signals = vs.generate_signals("20240102", data)
+
+        assert "A" in signals
+        assert "C" in signals
+        assert "B" not in signals  # f_score=1 < 2
+        assert "D" not in signals  # f_score=0 < 2
+
+    def test_filter_with_simplified_fscore(self):
+        """f_score 컬럼 없을 때 간소화 F-Score를 사용한다."""
+        vs = ValueStrategy(
+            factor="pbr",
+            num_stocks=5,
+            min_market_cap=0,
+            min_volume=0,
+            f_score_filter=1,
+        )
+        fund = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "pbr": [0.5, 0.3, 0.8],
+            "per": [10, 5, 15],
+            "close": [10000] * 3,
+            "market_cap": [1_000_000_000_000] * 3,
+            "volume": [1_000_000] * 3,
+            "roe": [10.0, -5.0, 15.0],  # A, C만 ROA>0
+        })
+        data = {"fundamentals": fund}
+        signals = vs.generate_signals("20240102", data)
+
+        # B는 ROE < 0이므로 간소화 F-Score=0, 필터링됨
+        assert "B" not in signals
+
+    def test_zero_filter_no_effect(self):
+        """f_score_filter=0이면 필터가 적용되지 않는다."""
+        vs = ValueStrategy(
+            factor="pbr",
+            num_stocks=5,
+            min_market_cap=0,
+            min_volume=0,
+            f_score_filter=0,
+        )
+        fund = pd.DataFrame({
+            "ticker": ["A", "B", "C"],
+            "pbr": [0.5, 0.3, 0.8],
+            "per": [10, 5, 15],
+            "close": [10000] * 3,
+            "market_cap": [1_000_000_000_000] * 3,
+            "volume": [1_000_000] * 3,
+            "f_score": [0, 0, 0],
+        })
+        data = {"fundamentals": fund}
+        signals = vs.generate_signals("20240102", data)
+
+        assert len(signals) == 3  # 필터 비활성이므로 전부 통과

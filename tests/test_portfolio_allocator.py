@@ -54,8 +54,8 @@ class TestInitialization:
         kis = _mock_kis()
         alloc = PortfolioAllocator(kis, allocation_path=path)
 
-        assert alloc._long_term_pct == 0.90
-        assert alloc._short_term_pct == 0.10
+        assert alloc._long_term_pct == 0.95
+        assert alloc._short_term_pct == 0.05
 
     def test_init_custom_values(self, tmp_path):
         """사용자 지정 비율로 초기화된다."""
@@ -176,9 +176,9 @@ class TestBudget:
         # 005930을 단기로 태깅
         alloc.tag_position("005930", "short_term")
 
-        # 단기 예산: 100,000 - 30,000 = 70,000
+        # 단기 예산 (기본 5%): 50,000 - 30,000 = 20,000
         cash = alloc.get_short_term_cash()
-        assert cash == 70_000
+        assert cash == 20_000
 
     def test_get_long_term_cash(self, tmp_path):
         """장기 풀의 사용 가능 현금을 반환한다."""
@@ -191,9 +191,9 @@ class TestBudget:
 
         alloc.tag_position("005930", "long_term")
 
-        # 장기 예산: 900,000 - 500,000 = 400,000
+        # 장기 예산 (기본 95%): 950,000 - 500,000 = 450,000
         cash = alloc.get_long_term_cash()
-        assert cash == 400_000
+        assert cash == 450_000
 
     def test_get_short_term_cash_no_negative(self, tmp_path):
         """단기 현금이 음수가 되지 않는다."""
@@ -206,7 +206,7 @@ class TestBudget:
 
         alloc.tag_position("005930", "short_term")
 
-        # 단기 예산: 100,000, 사용: 200,000 -> max(100000 - 200000, 0) = 0
+        # 단기 예산 (기본 5%): 50,000, 사용: 200,000 -> max(50000 - 200000, 0) = 0
         assert alloc.get_short_term_cash() == 0
 
 
@@ -379,13 +379,13 @@ class TestRebalanceIntegration:
         assert result["total_eval"] == 1_000_000
         assert result["long_term_eval"] == 800_000
         assert result["short_term_eval"] == 50_000
-        assert result["long_term_target"] == 0.90
-        assert result["short_term_target"] == 0.10
+        assert result["long_term_target"] == 0.95
+        assert result["short_term_target"] == 0.05
         assert result["long_term_actual"] == 0.80
         assert result["short_term_actual"] == 0.05
-        # drift = |0.80 - 0.90| = 0.10 -> 10%, rebalance_needed
+        # drift = |0.80 - 0.95| = 0.15 -> 15%, rebalance_needed
         assert result["rebalance_needed"] is True
-        assert result["drift_pct"] == 10.0
+        assert result["drift_pct"] == 15.0
 
     def test_rebalance_allocation_zero_total(self, tmp_path):
         """총 가치가 0이면 리밸런싱 불필요."""
@@ -434,8 +434,8 @@ class TestPersistence:
         assert data["version"] == 1
         assert "updated_at" in data
         assert "config" in data
-        assert data["config"]["long_term_pct"] == 0.90
-        assert data["config"]["short_term_pct"] == 0.10
+        assert data["config"]["long_term_pct"] == 0.95
+        assert data["config"]["short_term_pct"] == 0.05
         assert data["config"]["soft_cap_mode"] is True
         assert "positions" in data
         assert "005930" in data["positions"]
@@ -452,7 +452,7 @@ class TestPersistence:
         alloc = PortfolioAllocator(kis, allocation_path=path)
 
         # 기본값으로 동작
-        assert alloc._long_term_pct == 0.90
+        assert alloc._long_term_pct == 0.95
         assert alloc.get_position_pool("005930") is None
 
     def test_nested_directory_creation(self, tmp_path):
@@ -494,8 +494,8 @@ class TestFeatureFlagIntegration:
         ff = FeatureFlags(flags_path=path)
         config = ff.get_config("short_term_trading")
 
-        assert config["long_term_pct"] == 0.90
-        assert config["short_term_pct"] == 0.10
+        assert config["long_term_pct"] == 0.95
+        assert config["short_term_pct"] == 0.05
         assert config["stop_loss_pct"] == -0.05
         assert config["take_profit_pct"] == 0.10
         assert config["max_concurrent_positions"] == 3
@@ -513,3 +513,157 @@ class TestFeatureFlagIntegration:
         assert ff.is_enabled("short_term_trading") is False
         ff.toggle("short_term_trading", enabled=True)
         assert ff.is_enabled("short_term_trading") is True
+
+
+# ===================================================================
+# ETF 로테이션 풀 테스트
+# ===================================================================
+
+
+class TestETFRotationPool:
+    """ETF 로테이션 3-pool 지원 테스트."""
+
+    def test_init_with_etf_rotation_pct(self, tmp_path):
+        """etf_rotation_pct 파라미터로 초기화된다."""
+        kis = _mock_kis(total_eval=1_000_000)
+        alloc = PortfolioAllocator(
+            kis, long_term_pct=0.70, short_term_pct=0.0,
+            etf_rotation_pct=0.30, allocation_path=_alloc_path(tmp_path),
+        )
+        assert alloc._etf_rotation_pct == 0.30
+        assert alloc._long_term_pct == 0.70
+
+    def test_tag_position_etf_rotation(self, tmp_path):
+        """'etf_rotation' 풀로 태깅할 수 있다."""
+        kis = _mock_kis()
+        alloc = PortfolioAllocator(
+            kis, etf_rotation_pct=0.30, allocation_path=_alloc_path(tmp_path),
+        )
+        alloc.tag_position("069500", "etf_rotation")
+        assert alloc.get_position_pool("069500") == "etf_rotation"
+
+    def test_tag_position_invalid_still_fails(self, tmp_path):
+        """유효하지 않은 풀 이름은 ValueError를 발생시킨다."""
+        kis = _mock_kis()
+        alloc = PortfolioAllocator(
+            kis, allocation_path=_alloc_path(tmp_path),
+        )
+        with pytest.raises(ValueError):
+            alloc.tag_position("000000", "invalid_pool")
+
+    def test_get_etf_rotation_budget(self, tmp_path):
+        """ETF 로테이션 예산이 올바르게 계산된다."""
+        kis = _mock_kis(total_eval=1_000_000)
+        alloc = PortfolioAllocator(
+            kis, long_term_pct=0.70, etf_rotation_pct=0.30,
+            allocation_path=_alloc_path(tmp_path),
+        )
+        assert alloc.get_etf_rotation_budget() == 300_000
+
+    def test_get_etf_rotation_cash(self, tmp_path):
+        """ETF 로테이션 가용 현금이 올바르게 계산된다."""
+        holdings = [
+            {"ticker": "069500", "eval_amount": 150_000, "current_price": 35000,
+             "qty": 4, "pnl": 0, "pnl_pct": 0.0},
+        ]
+        kis = _mock_kis(total_eval=1_000_000, holdings=holdings)
+        alloc = PortfolioAllocator(
+            kis, long_term_pct=0.70, etf_rotation_pct=0.30,
+            allocation_path=_alloc_path(tmp_path),
+        )
+        alloc.tag_position("069500", "etf_rotation")
+        # budget=300,000, used=150,000 → cash=150,000
+        assert alloc.get_etf_rotation_cash() == 150_000
+
+    def test_filter_etf_rotation_weights(self, tmp_path):
+        """ETF 로테이션 비중 스케일링이 올바르다."""
+        kis = _mock_kis()
+        alloc = PortfolioAllocator(
+            kis, long_term_pct=0.70, etf_rotation_pct=0.30,
+            allocation_path=_alloc_path(tmp_path),
+        )
+        weights = {"069500": 0.5, "371460": 0.5}
+        scaled = alloc.filter_etf_rotation_weights(weights)
+        assert scaled["069500"] == pytest.approx(0.15)
+        assert scaled["371460"] == pytest.approx(0.15)
+
+    def test_filter_etf_rotation_weights_empty(self, tmp_path):
+        """빈 weights에 대해 빈 딕셔너리를 반환한다."""
+        kis = _mock_kis()
+        alloc = PortfolioAllocator(
+            kis, etf_rotation_pct=0.30, allocation_path=_alloc_path(tmp_path),
+        )
+        assert alloc.filter_etf_rotation_weights({}) == {}
+
+    def test_persistence_etf_rotation_pct(self, tmp_path):
+        """JSON에 etf_rotation_pct가 저장/복원된다."""
+        path = _alloc_path(tmp_path)
+        kis = _mock_kis()
+
+        alloc1 = PortfolioAllocator(
+            kis, long_term_pct=0.70, etf_rotation_pct=0.30,
+            allocation_path=path,
+        )
+        alloc1.tag_position("069500", "etf_rotation")
+
+        # 같은 경로에서 새로 로드
+        alloc2 = PortfolioAllocator(kis, allocation_path=path)
+        assert alloc2._etf_rotation_pct == 0.30
+        assert alloc2._long_term_pct == 0.70
+        assert alloc2.get_position_pool("069500") == "etf_rotation"
+
+    def test_backward_compat_no_etf_in_json(self, tmp_path):
+        """기존 JSON (etf_rotation_pct 없음) 로드 시 기본값 0.0."""
+        path = _alloc_path(tmp_path)
+        old_data = {
+            "version": 1,
+            "updated_at": "2025-01-01T00:00:00",
+            "config": {"long_term_pct": 0.95, "short_term_pct": 0.05,
+                        "soft_cap_mode": True},
+            "positions": {},
+        }
+        Path(path).write_text(json.dumps(old_data), encoding="utf-8")
+
+        kis = _mock_kis()
+        alloc = PortfolioAllocator(kis, allocation_path=path)
+        assert alloc._etf_rotation_pct == 0.0
+        assert alloc._long_term_pct == 0.95
+
+    def test_rebalance_allocation_3_pools(self, tmp_path):
+        """3-pool rebalance_allocation이 올바르게 동작한다."""
+        holdings = [
+            {"ticker": "005930", "eval_amount": 700_000, "current_price": 70000,
+             "qty": 10, "pnl": 0, "pnl_pct": 0.0},
+            {"ticker": "069500", "eval_amount": 300_000, "current_price": 30000,
+             "qty": 10, "pnl": 0, "pnl_pct": 0.0},
+        ]
+        kis = _mock_kis(total_eval=1_000_000, holdings=holdings)
+        alloc = PortfolioAllocator(
+            kis, long_term_pct=0.70, short_term_pct=0.0,
+            etf_rotation_pct=0.30, allocation_path=_alloc_path(tmp_path),
+        )
+        alloc.tag_position("005930", "long_term")
+        alloc.tag_position("069500", "etf_rotation")
+
+        result = alloc.rebalance_allocation()
+        assert result["etf_rotation_target"] == 0.30
+        assert result["etf_rotation_actual"] == pytest.approx(0.30)
+        assert result["etf_rotation_eval"] == 300_000
+        assert "etf_rotation_target" in result
+
+    def test_get_positions_by_pool_etf_rotation(self, tmp_path):
+        """etf_rotation 풀의 포지션을 올바르게 반환한다."""
+        holdings = [
+            {"ticker": "069500", "eval_amount": 150_000, "current_price": 35000,
+             "qty": 4, "pnl": 5000, "pnl_pct": 3.5},
+        ]
+        kis = _mock_kis(total_eval=1_000_000, holdings=holdings)
+        alloc = PortfolioAllocator(
+            kis, etf_rotation_pct=0.30, allocation_path=_alloc_path(tmp_path),
+        )
+        alloc.tag_position("069500", "etf_rotation")
+
+        positions = alloc.get_positions_by_pool("etf_rotation")
+        assert len(positions) == 1
+        assert positions[0]["ticker"] == "069500"
+        assert positions[0]["eval_amount"] == 150_000

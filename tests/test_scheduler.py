@@ -284,6 +284,7 @@ def _make_bot_with_flag(flag_enabled: bool):
             mock_allocator = MagicMock()
             mock_allocator._long_term_pct = 0.90
             mock_allocator._short_term_pct = 0.10
+            mock_allocator._etf_rotation_pct = 0.0
             mock_allocator_cls.return_value = mock_allocator
 
             # ShortTermTrader mock
@@ -343,6 +344,10 @@ class TestShortTermScan:
         bot = _make_bot_with_flag(True)
         bot._is_trading_day = MagicMock(return_value=True)
         bot._send_notification = MagicMock()
+        bot._collect_short_term_data = MagicMock(return_value={
+            "daily_data": {"005930": MagicMock()},
+            "date": "20260226",
+        })
 
         # 시그널 mock
         mock_signal = MagicMock()
@@ -362,17 +367,39 @@ class TestShortTermScan:
         assert "1개 발견" in msg
         assert "005930" in msg
         assert "sig_test_001" in msg
+        # market_data가 전달되었는지 확인
+        call_args = bot.short_term_trader.scan_for_signals.call_args
+        assert call_args[0][0].get("daily_data"), "market_data가 전달되어야 합니다."
 
     def test_no_signals_no_notification(self):
         """시그널이 없으면 알림이 발송되지 않는다."""
         bot = _make_bot_with_flag(True)
         bot._is_trading_day = MagicMock(return_value=True)
         bot._send_notification = MagicMock()
+        bot._collect_short_term_data = MagicMock(return_value={
+            "daily_data": {"005930": MagicMock()},
+            "date": "20260226",
+        })
 
         bot.short_term_trader.scan_for_signals.return_value = []
 
         bot.short_term_scan()
 
+        bot._send_notification.assert_not_called()
+
+    def test_data_collection_failure_skips_scan(self):
+        """데이터 수집 실패 시 스캔을 스킵한다."""
+        bot = _make_bot_with_flag(True)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot._send_notification = MagicMock()
+        bot._collect_short_term_data = MagicMock(return_value={
+            "daily_data": {},
+            "date": "20260226",
+        })
+
+        bot.short_term_scan()
+
+        bot.short_term_trader.scan_for_signals.assert_not_called()
         bot._send_notification.assert_not_called()
 
 
@@ -492,15 +519,15 @@ class TestDaytradingClose:
 class TestSetupScheduleShortTerm:
     """setup_schedule에 단기 스케줄이 추가되는지 검증."""
 
-    def test_schedule_has_14_jobs(self):
-        """setup_schedule 후 14개의 작업이 등록된다 (기존 11 + 단기 3)."""
+    def test_schedule_has_19_jobs(self):
+        """setup_schedule 후 19개의 작업이 등록된다 (기존 11 + ETF 1 + 단기 3 + Phase6 4)."""
         bot = _make_bot_with_flag(False)
 
         bot.setup_schedule()
 
         jobs = bot.scheduler.get_jobs()
-        assert len(jobs) == 14, (
-            f"14개 작업이 등록되어야 합니다. 실제: {len(jobs)}개"
+        assert len(jobs) == 19, (
+            f"19개 작업이 등록되어야 합니다. 실제: {len(jobs)}개"
         )
 
     def test_short_term_job_ids_exist(self):
@@ -551,7 +578,7 @@ class TestExistingBehaviorRegression:
             assert hasattr(bot, method), f"{method} 메서드가 존재해야 합니다."
 
     def test_bot_has_new_methods(self):
-        """새 단기 트레이딩 메서드가 존재한다."""
+        """새 단기 트레이딩 + ETF 로테이션 메서드가 존재한다."""
         bot = _make_bot_with_flag(False)
 
         new_methods = [
@@ -559,6 +586,314 @@ class TestExistingBehaviorRegression:
             "short_term_scan",
             "short_term_monitor",
             "daytrading_close",
+            "execute_etf_rotation_rebalance",
+            "_fetch_etf_prices",
         ]
         for method in new_methods:
             assert hasattr(bot, method), f"{method} 메서드가 존재해야 합니다."
+
+
+class TestETFRotationScheduler:
+    """ETF 로테이션 스케줄러 통합 테스트."""
+
+    def test_etf_rotation_job_exists(self):
+        """ETF 로테이션 리밸런싱 잡이 등록된다."""
+        bot = _make_bot_with_flag(False)
+        bot.setup_schedule()
+
+        job_ids = [j.id for j in bot.scheduler.get_jobs()]
+        assert "etf_rotation_rebalance" in job_ids
+
+    def test_etf_rotation_skips_when_flag_off(self):
+        """etf_rotation flag off이면 스킵한다."""
+        bot = _make_bot_with_flag(False)
+        # flag off → 조기 리턴
+        bot.execute_etf_rotation_rebalance()
+
+    def test_etf_rotation_skips_non_trading_day(self):
+        """비거래일이면 스킵한다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n == "etf_rotation"
+        )
+        bot._is_trading_day = MagicMock(return_value=False)
+        bot.execute_etf_rotation_rebalance()
+
+    def test_etf_rotation_skips_no_allocator(self):
+        """allocator 없으면 스킵한다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n == "etf_rotation"
+        )
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.allocator = None
+        bot.execute_etf_rotation_rebalance()
+
+
+# ===================================================================
+# 전략 데이터 수집 테스트
+# ===================================================================
+
+
+class TestCollectStrategyData:
+    """_collect_strategy_data 메서드 테스트."""
+
+    def test_returns_correct_keys(self):
+        """반환값에 fundamentals, prices, index_prices 키가 있다."""
+        bot = _make_bot_with_flag(False)
+        with patch("src.scheduler.main.get_all_fundamentals") as mock_fund, \
+             patch("src.scheduler.main.get_price_data"), \
+             patch("src.scheduler.main.get_index_data") as mock_idx:
+            mock_fund.return_value = pd.DataFrame({
+                "ticker": ["005930"], "name": ["삼성전자"],
+                "market_cap": [500e12], "pbr": [1.5],
+            })
+            mock_idx.return_value = pd.DataFrame({"close": [2800.0]})
+
+            result = bot._collect_strategy_data("20260225")
+
+            assert "fundamentals" in result
+            assert "prices" in result
+            assert "index_prices" in result
+
+    def test_fundamentals_populated(self):
+        """fundamentals가 올바르게 채워진다."""
+        bot = _make_bot_with_flag(False)
+        expected_df = pd.DataFrame({
+            "ticker": ["005930", "000660"],
+            "name": ["삼성전자", "SK하이닉스"],
+            "market_cap": [500e12, 100e12],
+        })
+        with patch("src.scheduler.main.get_all_fundamentals") as mock_fund, \
+             patch("src.scheduler.main.get_price_data"), \
+             patch("src.scheduler.main.get_index_data") as mock_idx:
+            mock_fund.return_value = expected_df
+            mock_idx.return_value = pd.DataFrame()
+
+            result = bot._collect_strategy_data("20260225")
+
+            assert len(result["fundamentals"]) == 2
+            mock_fund.assert_called_once_with("20260225")
+
+    def test_empty_fundamentals_returns_safe_dict(self):
+        """펀더멘탈 수집 실패 시에도 안전한 dict를 반환한다."""
+        bot = _make_bot_with_flag(False)
+        with patch("src.scheduler.main.get_all_fundamentals") as mock_fund, \
+             patch("src.scheduler.main.get_price_data"), \
+             patch("src.scheduler.main.get_index_data") as mock_idx:
+            mock_fund.side_effect = Exception("pykrx error")
+            mock_idx.return_value = pd.DataFrame()
+
+            result = bot._collect_strategy_data("20260225")
+
+            assert result["fundamentals"].empty
+            assert result["prices"] == {}
+
+    def test_cache_hit_avoids_api(self):
+        """캐시 히트 시 get_all_fundamentals를 호출하지 않는다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n == "data_cache"
+        )
+        cached_df = pd.DataFrame({
+            "ticker": ["005930"], "name": ["삼성전자"],
+            "market_cap": [500e12],
+        })
+        bot.data_cache.get = MagicMock(return_value=cached_df)
+
+        with patch("src.scheduler.main.get_all_fundamentals") as mock_fund, \
+             patch("src.scheduler.main.get_price_data"), \
+             patch("src.scheduler.main.get_index_data") as mock_idx:
+            mock_idx.return_value = pd.DataFrame()
+
+            result = bot._collect_strategy_data("20260225")
+
+            mock_fund.assert_not_called()
+            assert len(result["fundamentals"]) == 1
+
+
+class TestCollectShortTermData:
+    """_collect_short_term_data 메서드 테스트."""
+
+    def test_returns_daily_data_and_date(self):
+        """반환값에 daily_data와 date 키가 있다."""
+        bot = _make_bot_with_flag(True)
+        with patch("src.scheduler.main.get_all_fundamentals") as mock_fund, \
+             patch("src.scheduler.main.get_price_data") as mock_price:
+            mock_fund.return_value = pd.DataFrame({
+                "ticker": ["005930"], "name": ["삼성전자"],
+                "market_cap": [500e12],
+            })
+            mock_price.return_value = pd.DataFrame({
+                "close": [70000.0], "volume": [1000000],
+            })
+
+            result = bot._collect_short_term_data("20260226")
+
+            assert "daily_data" in result
+            assert "date" in result
+            assert result["date"] == "20260226"
+            assert "005930" in result["daily_data"]
+
+    def test_max_100_stocks(self):
+        """시총 상위 100종목만 수집한다."""
+        bot = _make_bot_with_flag(True)
+        tickers = [f"{i:06d}" for i in range(150)]
+        with patch("src.scheduler.main.get_all_fundamentals") as mock_fund, \
+             patch("src.scheduler.main.get_price_data") as mock_price:
+            mock_fund.return_value = pd.DataFrame({
+                "ticker": tickers,
+                "market_cap": list(range(150, 0, -1)),
+            })
+            mock_price.return_value = pd.DataFrame({"close": [100.0]})
+
+            result = bot._collect_short_term_data("20260226")
+
+            # 최대 100종목
+            assert len(result["daily_data"]) <= 100
+
+    def test_empty_fundamentals_returns_empty(self):
+        """펀더멘탈 수집 실패 시 빈 daily_data를 반환한다."""
+        bot = _make_bot_with_flag(True)
+        with patch("src.scheduler.main.get_all_fundamentals") as mock_fund:
+            mock_fund.side_effect = Exception("pykrx error")
+
+            result = bot._collect_short_term_data("20260226")
+
+            assert result["daily_data"] == {}
+
+
+class TestPremarketWithData:
+    """premarket_check가 데이터를 올바르게 수집하는지 테스트."""
+
+    def test_passes_data_to_strategy(self):
+        """premarket_check가 strategy에 데이터를 전달한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.holidays.is_rebalance_day = MagicMock(return_value=True)
+        bot.holidays.prev_trading_day = MagicMock(
+            return_value=datetime.date(2026, 2, 25)
+        )
+
+        mock_strategy = MagicMock()
+        mock_strategy.generate_signals.return_value = {"005930": 0.1}
+        bot._strategy = mock_strategy
+
+        mock_data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        }
+        bot._collect_strategy_data = MagicMock(return_value=mock_data)
+        bot._send_notification = MagicMock()
+        bot.executor.dry_run = MagicMock(return_value={
+            "sell_orders": [], "buy_orders": [],
+            "risk_check": {"passed": True, "warnings": []},
+        })
+
+        bot.premarket_check()
+
+        # strategy에 data가 전달되었는지 확인
+        call_args = mock_strategy.generate_signals.call_args[0]
+        assert "fundamentals" in call_args[1]
+        # T-1 데이터 기준일 확인
+        bot._collect_strategy_data.assert_called_once_with("20260225")
+
+    def test_skips_on_empty_fundamentals(self):
+        """펀더멘탈 비어있으면 WARNING 알림 후 스킵한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.holidays.is_rebalance_day = MagicMock(return_value=True)
+        bot.holidays.prev_trading_day = MagicMock(
+            return_value=datetime.date(2026, 2, 25)
+        )
+        bot._strategy = MagicMock()
+
+        bot._collect_strategy_data = MagicMock(return_value={
+            "fundamentals": pd.DataFrame(),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        })
+        bot._send_notification = MagicMock()
+
+        bot.premarket_check()
+
+        # strategy.generate_signals가 호출되지 않아야 함
+        bot._strategy.generate_signals.assert_not_called()
+        # WARNING 알림이 발송됨
+        bot._send_notification.assert_called()
+        call_text = bot._send_notification.call_args[0][0]
+        assert "수집 실패" in call_text
+
+
+class TestRebalanceWithData:
+    """execute_rebalance가 데이터를 올바르게 수집하는지 테스트."""
+
+    def test_uses_prev_day_data(self):
+        """리밸런싱이 T-1 기준 데이터를 사용한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.holidays.is_rebalance_day = MagicMock(return_value=True)
+        bot.holidays.prev_trading_day = MagicMock(
+            return_value=datetime.date(2026, 2, 25)
+        )
+        bot.kis_client.is_configured.return_value = True
+
+        mock_strategy = MagicMock()
+        mock_strategy.generate_signals.return_value = {"005930": 1.0}
+        bot._strategy = mock_strategy
+
+        mock_data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        }
+        bot._collect_strategy_data = MagicMock(return_value=mock_data)
+        bot._send_notification = MagicMock()
+        bot.executor.execute_rebalance = MagicMock(return_value={
+            "success": True, "sell_orders": [], "buy_orders": [],
+            "errors": [],
+        })
+
+        bot.execute_rebalance()
+
+        bot._collect_strategy_data.assert_called_once_with("20260225")
+
+
+class TestSimulationWithData:
+    """daily_simulation_batch가 데이터를 주입하는지 테스트."""
+
+    def test_injects_strategy_data(self):
+        """시뮬레이터에 strategy_data가 주입된다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n == "daily_simulation"
+        )
+        bot.feature_flags.get_config.return_value = {
+            "strategies": ["multi_factor"],
+        }
+
+        mock_strategy = MagicMock()
+        mock_strategy.generate_signals.return_value = {"005930": 1.0}
+
+        mock_data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        }
+        bot._collect_strategy_data = MagicMock(return_value=mock_data)
+        bot._create_long_term_strategy = MagicMock(return_value=mock_strategy)
+        bot._send_notification = MagicMock()
+
+        with patch("src.data.daily_simulator.DailySimulator") as mock_sim_cls:
+            mock_sim = MagicMock()
+            mock_sim.run_daily_simulation.return_value = {}
+            mock_sim.format_telegram_report.return_value = "test"
+            mock_sim_cls.return_value = mock_sim
+
+            bot.daily_simulation_batch()
+
+            # strategy_data가 주입되었는지 확인
+            assert mock_sim.strategy_data == mock_data
+            bot._collect_strategy_data.assert_called_once()

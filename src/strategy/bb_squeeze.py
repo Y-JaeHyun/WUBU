@@ -36,11 +36,17 @@ class BBSqueezeStrategy(ShortTermStrategy):
         "volume_multiplier": 1.5,        # 거래량 1.5배
         "volume_avg_days": 20,
         "ma_trend_period": 200,          # MA200 추세 필터
+        "trend_filter_period": 0,        # 추가 추세필터 MA 기간 (0=비활성, 권장=100)
         "take_profit_pct": 0.10,         # +10%
         "stop_loss_pct": -0.05,          # -5%
         "max_holding_days": 7,
         "max_signals": 3,
         "min_market_cap": 300_000_000_000,
+        # ATR 동적 손절/익절
+        "use_atr_stops": True,
+        "atr_period": 14,
+        "atr_stop_mult": 2.0,           # 손절: 진입가 - ATR * mult
+        "atr_profit_mult": 3.0,         # 익절: 진입가 + ATR * mult
     }
 
     def __init__(self, params: dict = None):
@@ -208,6 +214,13 @@ class BBSqueezeStrategy(ShortTermStrategy):
         if latest_close <= ma200:
             return None  # 하락 추세
 
+        # 5b. 추가 추세필터 (trend_filter_period > 0이면 활성)
+        trend_filter_period = self._params.get("trend_filter_period", 0)
+        if trend_filter_period > 0 and len(closes) >= trend_filter_period:
+            ma_trend = float(closes.rolling(trend_filter_period).mean().iloc[-1])
+            if not pd.isna(ma_trend) and latest_close <= ma_trend:
+                return None  # 추가 추세필터 미달
+
         # 6. 시가총액 체크
         market_cap_col = "시가총액" if "시가총액" in df.columns else "market_cap"
         if market_cap_col in df.columns:
@@ -290,15 +303,20 @@ class BBSqueezeStrategy(ShortTermStrategy):
         pnl_pct = (current_price - entry_price) / entry_price
         reasons = []
 
-        # 1. 손절
-        if pnl_pct <= self._params["stop_loss_pct"]:
-            reasons.append(f"손절: {pnl_pct:.2%}")
+        # 1. ATR 또는 고정 % 손절/익절
+        use_atr = self._params.get("use_atr_stops", False)
+        atr_applied = False
+        if use_atr:
+            atr_reasons, atr_applied = self._check_atr_exit(position, market_data)
+            reasons.extend(atr_reasons)
+        if not atr_applied:
+            # 고정 % fallback
+            if pnl_pct <= self._params["stop_loss_pct"]:
+                reasons.append(f"손절: {pnl_pct:.2%}")
+            if pnl_pct >= self._params["take_profit_pct"]:
+                reasons.append(f"익절: {pnl_pct:.2%}")
 
-        # 2. 익절
-        if pnl_pct >= self._params["take_profit_pct"]:
-            reasons.append(f"익절: {pnl_pct:.2%}")
-
-        # 3. 하단밴드 재진입 (평균회귀 실패)
+        # 2. 하단밴드 재진입 (평균회귀 실패)
         daily_data = market_data.get("daily_data", {})
         df = daily_data.get(ticker)
         if df is not None:
@@ -313,7 +331,7 @@ class BBSqueezeStrategy(ShortTermStrategy):
                 if not pd.isna(current_lower) and current_price < float(current_lower):
                     reasons.append(f"하단밴드 재진입: 현재가={current_price:.0f}, 하단={float(current_lower):.0f}")
 
-        # 4. 시간 손절
+        # 3. 시간 손절
         entry_date = position.get("entry_date", "")
         if entry_date:
             try:

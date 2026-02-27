@@ -42,6 +42,12 @@ class DualMomentumStrategy:
         safe_asset: 안전자산 종목코드 (기본 "214980")
         lookback_months: 모멘텀 산출 기간 (월, 기본 12)
         n_select: 상대 모멘텀에서 선택할 자산 수 (기본 1)
+        volatility_target: 목표 변동성 (기본 0.0, 비활성).
+            0보다 큰 값 설정 시 목표 변동성 대비 실현 변동성으로
+            포지션 비중 조절 (target_vol / realized_vol).
+            예: 0.15 → 연환산 15% 변동성 타깃.
+        etf_universe: 추가 ETF 유니버스 딕셔너리 {이름: 종목코드}.
+            설정 시 기존 risky_assets에 병합. 기본 None.
     """
 
     def __init__(
@@ -50,11 +56,18 @@ class DualMomentumStrategy:
         safe_asset: str = DEFAULT_SAFE_ASSET,
         lookback_months: int = 12,
         n_select: int = 1,
+        volatility_target: float = 0.0,
+        etf_universe: Optional[dict[str, str]] = None,
     ):
         self.risky_assets = risky_assets or DEFAULT_RISKY_ASSETS.copy()
         self.safe_asset = safe_asset
         self.lookback_months = lookback_months
         self.n_select = n_select
+        self.volatility_target = volatility_target
+
+        # ETF 유니버스 확대
+        if etf_universe:
+            self.risky_assets.update(etf_universe)
 
         if self.n_select > len(self.risky_assets):
             logger.warning(
@@ -67,7 +80,8 @@ class DualMomentumStrategy:
             f"DualMomentumStrategy 초기화: "
             f"risky_assets={list(self.risky_assets.keys())}, "
             f"safe_asset={safe_asset}, "
-            f"lookback_months={lookback_months}, n_select={n_select}"
+            f"lookback_months={lookback_months}, n_select={n_select}, "
+            f"volatility_target={volatility_target}"
         )
 
     @property
@@ -267,12 +281,85 @@ class DualMomentumStrategy:
         if safe_weight > 0:
             allocation[self.safe_asset] = allocation.get(self.safe_asset, 0.0) + safe_weight
 
+        # 변동성 타깃 적용
+        if self.volatility_target > 0:
+            allocation = self._apply_volatility_target(allocation, prices)
+
         logger.info(
             f"듀얼 모멘텀 배분 결과: "
             + ", ".join(f"{k}={v:.0%}" for k, v in allocation.items())
         )
 
         return allocation
+
+    def _apply_volatility_target(
+        self,
+        allocation: dict[str, float],
+        prices: dict[str, pd.Series],
+    ) -> dict[str, float]:
+        """변동성 타깃에 따라 포지션 비중을 조절한다.
+
+        target_vol / realized_vol 비율로 위험자산 비중을 스케일링하고,
+        초과분은 안전자산으로 배분한다.
+
+        Args:
+            allocation: 현재 자산배분 딕셔너리
+            prices: 가격 시계열 딕셔너리
+
+        Returns:
+            조정된 자산배분 딕셔너리
+        """
+        adjusted = {}
+        excess_to_safe = 0.0
+
+        for ticker, weight in allocation.items():
+            if ticker == self.safe_asset:
+                adjusted[ticker] = weight
+                continue
+
+            # 실현 변동성 계산 (최근 60일 기준, 연환산)
+            price_series = None
+            # ticker로 직접 찾기
+            if ticker in prices:
+                price_series = prices[ticker]
+            else:
+                # risky_assets에서 asset_name으로 찾기
+                for asset_name, asset_ticker in self.risky_assets.items():
+                    if asset_ticker == ticker and asset_name in prices:
+                        price_series = prices[asset_name]
+                        break
+
+            if price_series is None or len(price_series) < 60:
+                adjusted[ticker] = weight
+                continue
+
+            daily_returns = price_series.iloc[-60:].pct_change().dropna()
+            if daily_returns.empty:
+                adjusted[ticker] = weight
+                continue
+
+            realized_vol = float(daily_returns.std() * np.sqrt(252))
+
+            if realized_vol <= 0:
+                adjusted[ticker] = weight
+                continue
+
+            # 비중 조절: target_vol / realized_vol
+            vol_scalar = min(self.volatility_target / realized_vol, 1.5)  # 최대 1.5배
+            new_weight = weight * vol_scalar
+            adjusted[ticker] = new_weight
+            excess_to_safe += weight - new_weight
+
+        # 초과분을 안전자산에 추가
+        if excess_to_safe > 0:
+            adjusted[self.safe_asset] = adjusted.get(self.safe_asset, 0.0) + excess_to_safe
+
+        # 비중 합이 1.0이 되도록 정규화
+        total = sum(adjusted.values())
+        if total > 0 and abs(total - 1.0) > 1e-9:
+            adjusted = {k: v / total for k, v in adjusted.items()}
+
+        return adjusted
 
     def backtest(
         self,

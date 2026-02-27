@@ -41,6 +41,10 @@ class QualityStrategy(Strategy):
         weights: 퀄리티 팩터별 가중치 딕셔너리
             {"roe": 0.3, "gpa": 0.3, "debt": 0.2, "accrual": 0.2}
         min_volume: 최소 일 거래대금 (기본 1억원)
+        strict_accrual: 엄격한 발생액 계산 여부 (기본 False).
+            활성화 시 (순이익 - 영업CF) / 총자산 방식 사용.
+            fundamentals에 'net_income', 'cfo', 'total_assets' 컬럼 필요.
+            데이터 없으면 기존 방식 유지.
     """
 
     def __init__(
@@ -49,16 +53,19 @@ class QualityStrategy(Strategy):
         min_market_cap: int = 100_000_000_000,
         weights: Optional[dict[str, float]] = None,
         min_volume: int = 100_000_000,
+        strict_accrual: bool = False,
     ):
         self.num_stocks = num_stocks
         self.min_market_cap = min_market_cap
         self.weights = weights or DEFAULT_QUALITY_WEIGHTS.copy()
         self.min_volume = min_volume
+        self.strict_accrual = strict_accrual
 
         logger.info(
             f"QualityStrategy 초기화: num_stocks={num_stocks}, "
             f"min_market_cap={min_market_cap:,}, "
-            f"weights={self.weights}, min_volume={min_volume:,}"
+            f"weights={self.weights}, min_volume={min_volume:,}, "
+            f"strict_accrual={strict_accrual}"
         )
 
     @property
@@ -148,8 +155,23 @@ class QualityStrategy(Strategy):
             # 부채비율 데이터 없으면 NaN
             result["debt_ratio"] = np.nan
 
-        # 발생액: 직접 제공되면 사용
-        if "accruals" in df.columns:
+        # 발생액: strict_accrual 모드 시 (순이익 - 영업CF) / 총자산 사용
+        if self.strict_accrual:
+            has_strict = all(
+                col in df.columns
+                for col in ("net_income", "cfo", "total_assets")
+            )
+            if has_strict:
+                total_assets = df["total_assets"].replace(0, np.nan)
+                result["accruals"] = (
+                    (df["net_income"] - df["cfo"]) / total_assets
+                ).values
+                logger.info("엄격한 발생액 계산 적용: (순이익 - 영업CF) / 총자산")
+            elif "accruals" in df.columns:
+                result["accruals"] = df["accruals"].values
+            else:
+                result["accruals"] = np.nan
+        elif "accruals" in df.columns:
             result["accruals"] = df["accruals"].values
         else:
             result["accruals"] = np.nan

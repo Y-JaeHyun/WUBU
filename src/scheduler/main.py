@@ -753,6 +753,18 @@ class TradingBot:
                 except Exception as e:
                     lines.append(f"\n[포트폴리오 조회 실패: {e}]")
 
+            # 매크로 요약 추가 (Phase 6)
+            if self.feature_flags.is_enabled("macro_monitor"):
+                try:
+                    from src.data.macro_collector import MacroCollector
+                    macro = MacroCollector()
+                    macro_text = macro.format_macro_report()
+                    if macro_text:
+                        lines.append("")
+                        lines.append(macro_text)
+                except Exception as e:
+                    logger.warning("이브닝 매크로 요약 실패: %s", e)
+
             # 스케줄 정보
             lines.append("")
             lines.append("[스케줄]")
@@ -1128,6 +1140,229 @@ class TradingBot:
             return f"포트폴리오 조회 오류: {e}"
 
     # ──────────────────────────────────────────────────────────
+    # Phase 6: 일일 시뮬레이션 + 뉴스/공시 + 매크로 + 성과DB
+    # ──────────────────────────────────────────────────────────
+
+    def morning_news_checklist(self) -> None:
+        """08:00 - DART 공시 + 매크로 오전 체크리스트.
+
+        전일 공시와 글로벌 매크로 요약을 텔레그램으로 발송한다.
+        Feature Flag 'news_collector'로 제어.
+        """
+        if not self.feature_flags.is_enabled("news_collector"):
+            return
+        if not self._is_trading_day():
+            return
+
+        try:
+            from src.data.news_collector import NewsCollector
+            collector = NewsCollector()
+            disclosures = collector.fetch_recent_disclosures(days=1)
+
+            # 매크로 데이터 추가
+            macro_summary = None
+            if self.feature_flags.is_enabled("macro_monitor"):
+                try:
+                    from src.data.macro_collector import MacroCollector
+                    macro = MacroCollector()
+                    macro_summary = macro.format_macro_report()
+                except Exception as e:
+                    logger.warning("매크로 데이터 수집 실패: %s", e)
+
+            text = collector.format_morning_checklist(
+                disclosures, macro_data=macro_summary
+            )
+            self._send_notification(text)
+            logger.info("오전 뉴스 체크리스트 발송 완료")
+        except Exception as e:
+            logger.error("오전 뉴스 체크리스트 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
+    def eod_news_summary(self) -> None:
+        """15:40 - 보유종목 영향 뉴스 + 매크로 요약.
+
+        장 마감 후 보유종목 관련 공시와 매크로 변동을 요약한다.
+        Feature Flag 'news_collector'로 제어.
+        """
+        if not self.feature_flags.is_enabled("news_collector"):
+            return
+        if not self._is_trading_day():
+            return
+
+        try:
+            from src.data.news_collector import NewsCollector
+            collector = NewsCollector()
+            disclosures = collector.fetch_recent_disclosures(days=1)
+
+            # 보유종목 정보
+            holdings = []
+            if self.kis_client.is_configured():
+                try:
+                    balance = self.kis_client.get_balance()
+                    holdings = balance.get("holdings", [])
+                except Exception:
+                    pass
+
+            text = collector.format_eod_news(disclosures, holdings)
+            self._send_notification(text)
+            logger.info("장마감 뉴스 요약 발송 완료")
+        except Exception as e:
+            logger.error("장마감 뉴스 요약 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
+    def daily_simulation_batch(self) -> None:
+        """16:00 - 일일 리밸런싱 시뮬레이션.
+
+        모든 등록 전략으로 가상 리밸런싱을 실행하고 결과를 저장/발송한다.
+        Feature Flag 'daily_simulation'로 제어.
+        """
+        if not self.feature_flags.is_enabled("daily_simulation"):
+            return
+        if not self._is_trading_day():
+            return
+
+        try:
+            from src.data.daily_simulator import DailySimulator
+            simulator = DailySimulator()
+
+            # 전략 인스턴스 생성
+            config = self.feature_flags.get_config("daily_simulation")
+            strategy_names = config.get(
+                "strategies", ["multi_factor", "three_factor"]
+            )
+            strategies = {}
+            for name in strategy_names:
+                try:
+                    strategy = self._create_long_term_strategy(name)
+                    if strategy:
+                        strategies[name] = strategy
+                except Exception as e:
+                    logger.warning("시뮬레이션 전략 생성 실패 (%s): %s", name, e)
+
+            if not strategies:
+                logger.warning("시뮬레이션 가능한 전략이 없습니다.")
+                return
+
+            simulator.strategies = strategies
+            result = simulator.run_daily_simulation()
+
+            # Drift 분석 (실제 보유 포트폴리오와 비교)
+            if self.kis_client.is_configured():
+                try:
+                    balance = self.kis_client.get_balance()
+                    holdings = balance.get("holdings", [])
+                    actual = {
+                        h["ticker"]: h.get("eval_amount", 0) for h in holdings
+                    }
+                    simulator.analyze_drift(actual)
+                except Exception:
+                    pass
+
+            text = simulator.format_telegram_report()
+            self._send_notification(text)
+            logger.info("일일 시뮬레이션 완료: %d개 전략", len(strategies))
+        except Exception as e:
+            logger.error("일일 시뮬레이션 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
+    def record_daily_performance(self) -> None:
+        """15:35 EOD 리뷰 후 - 일일 성과를 DB에 기록.
+
+        PerformanceDB에 NAV, 포지션, 거래 내역을 저장한다.
+        """
+        try:
+            from src.data.performance_db import PerformanceDB
+            db = PerformanceDB()
+
+            if not self.kis_client.is_configured():
+                return
+
+            balance = self.kis_client.get_balance()
+            total_eval = balance.get("total_eval", 0)
+            cash = balance.get("cash", 0)
+            holdings = balance.get("holdings", [])
+
+            if total_eval <= 0:
+                return
+
+            today = datetime.now(KST).strftime("%Y-%m-%d")
+
+            # NAV 기록
+            positions_value = total_eval - cash
+            db.record_daily_nav(today, total_eval, cash, positions_value)
+
+            # 포지션 기록
+            positions = []
+            for h in holdings:
+                positions.append({
+                    "ticker": h.get("ticker", ""),
+                    "name": h.get("name", ""),
+                    "qty": h.get("qty", 0),
+                    "avg_price": h.get("avg_price", 0),
+                    "market_value": h.get("eval_amount", 0),
+                    "weight": (
+                        h.get("eval_amount", 0) / total_eval
+                        if total_eval > 0 else 0
+                    ),
+                })
+            db.record_positions(today, positions)
+
+            logger.info("일일 성과 DB 기록 완료: NAV=%s", f"{total_eval:,}")
+        except Exception as e:
+            logger.error("성과 DB 기록 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
+    @staticmethod
+    def _create_long_term_strategy(name: str):
+        """전략 이름으로 장기 전략 인스턴스를 생성한다.
+
+        Args:
+            name: 전략 이름.
+
+        Returns:
+            Strategy 인스턴스 또는 None.
+        """
+        try:
+            if name == "multi_factor":
+                from src.strategy.multi_factor import MultiFactorStrategy
+                return MultiFactorStrategy(
+                    factors=["value", "momentum"],
+                    weights=[0.5, 0.5],
+                    combine_method="zscore",
+                    num_stocks=10,
+                )
+            elif name == "three_factor":
+                from src.strategy.three_factor import ThreeFactorStrategy
+                return ThreeFactorStrategy(num_stocks=10)
+            elif name == "shareholder_yield":
+                from src.strategy.shareholder_yield import ShareholderYieldStrategy
+                return ShareholderYieldStrategy(num_stocks=10)
+            elif name == "low_vol_quality":
+                from src.strategy.low_vol_quality import LowVolQualityStrategy
+                return LowVolQualityStrategy(num_stocks=10)
+            elif name == "etf_rotation":
+                from src.strategy.etf_rotation import ETFRotationStrategy
+                return ETFRotationStrategy()
+            elif name == "accrual":
+                from src.strategy.accrual import AccrualStrategy
+                return AccrualStrategy(num_stocks=10)
+            elif name == "pead":
+                from src.strategy.pead import PEADStrategy
+                return PEADStrategy(num_stocks=10)
+            elif name == "value":
+                from src.strategy.value import ValueStrategy
+                return ValueStrategy(num_stocks=10)
+            elif name == "momentum":
+                from src.strategy.momentum import MomentumStrategy
+                return MomentumStrategy(num_stocks=10)
+            else:
+                logger.warning("알 수 없는 장기 전략: %s", name)
+                return None
+        except Exception as e:
+            logger.warning("전략 생성 실패 (%s): %s", name, e)
+            return None
+
+    # ──────────────────────────────────────────────────────────
     # 스케줄 설정 및 실행
     # ──────────────────────────────────────────────────────────
 
@@ -1224,6 +1459,39 @@ class TradingBot:
             id="auto_backtest",
             name="자동 백테스트",
             misfire_grace_time=600,
+        )
+
+        # Phase 6: 일일 시뮬레이션 + 뉴스/공시 + 매크로 + 성과DB
+        self.scheduler.add_job(
+            self.morning_news_checklist,
+            CronTrigger(hour=8, minute=5, day_of_week="mon-fri"),
+            id="morning_news_checklist",
+            name="오전 뉴스 체크리스트",
+            misfire_grace_time=300,
+        )
+
+        self.scheduler.add_job(
+            self.eod_news_summary,
+            CronTrigger(hour=15, minute=40, day_of_week="mon-fri"),
+            id="eod_news_summary",
+            name="장마감 뉴스 요약",
+            misfire_grace_time=300,
+        )
+
+        self.scheduler.add_job(
+            self.daily_simulation_batch,
+            CronTrigger(hour=16, minute=5, day_of_week="mon-fri"),
+            id="daily_simulation",
+            name="일일 시뮬레이션",
+            misfire_grace_time=600,
+        )
+
+        self.scheduler.add_job(
+            self.record_daily_performance,
+            CronTrigger(hour=15, minute=37, day_of_week="mon-fri"),
+            id="record_performance",
+            name="성과 DB 기록",
+            misfire_grace_time=300,
         )
 
         # Phase 5-B: 단기 트레이딩 스케줄
@@ -1338,6 +1606,7 @@ def main() -> None:
             combine_method="zscore",
             num_stocks=10,
             apply_market_timing=True,
+            turnover_penalty=0.1,
         )
         bot.set_strategy(strategy)
     except Exception as e:
