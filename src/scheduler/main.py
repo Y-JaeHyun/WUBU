@@ -33,7 +33,10 @@ from dotenv import load_dotenv
 from src.alert.alert_manager import AlertManager
 from src.alert.conditions import (
     DailyMoveCondition,
+    DisclosureAlertCondition,
+    MarketCrashCondition,
     MddThresholdCondition,
+    PriceShockCondition,
     RebalanceAlertCondition,
 )
 from src.alert.telegram_bot import TelegramNotifier
@@ -114,6 +117,9 @@ class TradingBot:
         self.alert_manager.add_condition(MddThresholdCondition(threshold=-0.15))
         self.alert_manager.add_condition(DailyMoveCondition(threshold=0.05))
         self.alert_manager.add_condition(RebalanceAlertCondition(days_before=3))
+        self.alert_manager.add_condition(DisclosureAlertCondition())
+        self.alert_manager.add_condition(PriceShockCondition())
+        self.alert_manager.add_condition(MarketCrashCondition())
 
         # Phase 5-A: Feature Flags + 24시간 기능 확장
         self.feature_flags: FeatureFlags = FeatureFlags()
@@ -2061,6 +2067,150 @@ class TradingBot:
         except Exception as e:
             logger.warning("전략 생성 실패 (%s): %s", name, e)
             return None
+
+    # ──────────────────────────────────────────────────────────
+    # 긴급 리밸런싱 모니터
+    # ──────────────────────────────────────────────────────────
+
+    def emergency_monitor_check(self) -> None:
+        """장중 30분마다 - 긴급 리밸런싱 모니터링.
+
+        보유 종목의 급등/급락, KOSPI 급변, 긴급 공시를 감지하여
+        알림을 발송한다. auto_exit_enabled가 True이고 CRITICAL 레벨이면
+        긴급 매도를 트리거한다.
+
+        Feature Flag 'emergency_monitor'로 제어.
+
+        # 스케줄 등록 예시:
+        # scheduler.add_job(
+        #     self.emergency_monitor_check,
+        #     'interval',
+        #     minutes=30,
+        #     id='emergency_monitor',
+        # )
+        """
+        if not self.feature_flags.is_enabled("emergency_monitor"):
+            return
+        if not self._is_trading_day():
+            return
+
+        config = self.feature_flags.get_config("emergency_monitor")
+        price_shock_pct = config.get("price_shock_pct", 5.0)
+        market_crash_pct = config.get("market_crash_pct", 3.0)
+        auto_exit_enabled = config.get("auto_exit_enabled", False)
+
+        state: dict = {
+            "price_shocks": [],
+            "market_change_pct": 0.0,
+            "portfolio_disclosures": [],
+        }
+
+        try:
+            # 1. 보유 종목 급등/급락 체크
+            holdings = []
+            if self.kis_client.is_configured():
+                try:
+                    balance = self.kis_client.get_balance()
+                    holdings = balance.get("holdings", [])
+                except Exception as e:
+                    logger.warning("긴급 모니터 잔고 조회 실패: %s", e)
+
+            price_shocks = []
+            for h in holdings:
+                change_pct = float(h.get("change_pct", 0))
+                if abs(change_pct) >= price_shock_pct:
+                    price_shocks.append({
+                        "name": h.get("name", ""),
+                        "ticker": h.get("ticker", ""),
+                        "change": change_pct,
+                    })
+            state["price_shocks"] = price_shocks
+
+            # 2. KOSPI 지수 변동 체크
+            try:
+                from pykrx import stock as pykrx_stock
+                today_str = datetime.now(KST).strftime("%Y%m%d")
+                yesterday = (
+                    datetime.now(KST) - timedelta(days=7)
+                ).strftime("%Y%m%d")
+                kospi = pykrx_stock.get_index_ohlcv(
+                    yesterday, today_str, "1001"
+                )
+                if len(kospi) >= 2:
+                    prev_close = float(kospi["종가"].iloc[-2])
+                    curr_close = float(kospi["종가"].iloc[-1])
+                    if prev_close > 0:
+                        market_change = (
+                            (curr_close - prev_close) / prev_close * 100
+                        )
+                        state["market_change_pct"] = market_change
+            except Exception as e:
+                logger.warning("긴급 모니터 KOSPI 조회 실패: %s", e)
+
+            # 3. DART 긴급 공시 체크
+            try:
+                from src.data.news_collector import NewsCollector
+                collector = NewsCollector()
+                disclosures = collector.fetch_recent_disclosures(days=1)
+
+                held_tickers = {
+                    h.get("ticker", "") for h in holdings
+                }
+                held_names = {
+                    h.get("name", "") for h in holdings
+                }
+
+                portfolio_disclosures = []
+                for d in disclosures:
+                    corp_name = d.get("corp_name", "")
+                    is_held = (
+                        d.get("corp_code", "") in held_tickers
+                        or corp_name in held_names
+                    )
+                    category = d.get("category", "")
+                    portfolio_disclosures.append({
+                        "corp_name": corp_name,
+                        "report_nm": d.get("report_nm", ""),
+                        "category": category,
+                        "is_held": is_held,
+                    })
+                state["portfolio_disclosures"] = portfolio_disclosures
+            except Exception as e:
+                logger.warning("긴급 모니터 공시 조회 실패: %s", e)
+
+            # 4. 알림 조건 검사 및 발송
+            triggered = self.alert_manager.check_and_alert(state)
+
+            if triggered:
+                logger.info(
+                    "긴급 모니터 알림 %d건 발동", len(triggered)
+                )
+
+                # 5. auto_exit: CRITICAL 레벨이면 긴급 매도
+                if auto_exit_enabled:
+                    has_critical = (
+                        len(state["price_shocks"]) > 0
+                        and any(
+                            abs(s["change"]) >= 7.0
+                            for s in state["price_shocks"]
+                        )
+                    ) or abs(state["market_change_pct"]) > market_crash_pct
+
+                    if has_critical and self.kis_client.is_configured():
+                        self._send_notification(
+                            "[긴급 매도] CRITICAL 조건 감지 — "
+                            "자동 매도를 시도합니다.",
+                            level="CRITICAL",
+                        )
+                        logger.warning(
+                            "긴급 자동 매도 트리거 (auto_exit_enabled=True)"
+                        )
+            else:
+                logger.debug("긴급 모니터 정상: 이상 없음")
+
+        except Exception as e:
+            logger.error("긴급 모니터 체크 실패: %s", e)
+            logger.debug(traceback.format_exc())
 
     # ──────────────────────────────────────────────────────────
     # 스케줄 설정 및 실행

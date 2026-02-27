@@ -10,10 +10,12 @@
 - **안전 필터**: 모멘텀 캡(300%), 업종 비중 상한, 계열사 탐지(하이브리드)
 - **마켓 타이밍**: KOSPI vs MA200 기반 시장 진입/이탈 오버레이
 - **ETF 로테이션**: 모멘텀 기반 상위 N개 ETF 월간 리밸런싱
-- **백테스트 엔진**: 수수료/슬리피지 반영, 장기/단기 분리 엔진
+- **백테스트 엔진**: diff-based 리밸런싱, 수수료/슬리피지 반영, 장기/단기 분리 엔진
 - **한국투자증권 KIS API 연동**: 모의/실전 듀얼모드, WebSocket 실시간 시세
 - **Telegram 실시간 알림**: 매매 시그널, 포트폴리오 현황, 커맨드 제어
-- **Feature Flag 시스템**: 10개 플래그, 런타임 토글 (재시작 없이 즉시 반영)
+- **긴급 모니터링**: 30분 간격 급등락(±5%)/시장급변(±3%)/공시 감지 + 자동매도 옵션
+- **EOD 공시 교육**: 8개 카테고리별 영향 분석 + 투자 학습 팁 자동 제공
+- **Feature Flag 시스템**: 11개 플래그, 런타임 토글 (재시작 없이 즉시 반영)
 - **일일 시뮬레이션**: 매일 가상 리밸런싱으로 전략 검증
 - **뉴스/공시 수집**: DART 공시, 매크로(ECOS/FRED) 데이터 수집
 - **성과 DB**: SQLite 기반 NAV/포지션/거래 기록 추적
@@ -34,7 +36,7 @@
 | 알림 | Telegram Bot API |
 | DB | SQLite (성과 기록) |
 | 배포 | systemd |
-| 테스트 | pytest (1,445+ 테스트) |
+| 테스트 | pytest (1,475+ 테스트) |
 
 ## 프로젝트 구조
 
@@ -106,13 +108,14 @@ src/
 ├── alert/             # 알림 시스템
 │   ├── telegram_bot.py      # Telegram 봇
 │   ├── telegram_commander.py # Telegram 커맨드 처리
-│   └── alert_manager.py     # 알림 관리자
+│   ├── alert_manager.py     # 알림 관리자
+│   └── conditions.py        # 긴급 조건 (급등락/시장급변/공시)
 ├── scheduler/         # 자동 스케줄링
 │   ├── main.py              # APScheduler 메인 (19개 작업)
 │   └── holidays.py          # 한국 공휴일/휴장일
 └── utils/             # 유틸리티
     ├── config.py            # 설정 관리
-    ├── feature_flags.py     # Feature Flag 시스템 (10개)
+    ├── feature_flags.py     # Feature Flag 시스템 (11개)
     └── logger.py            # 로깅
 ```
 
@@ -251,9 +254,10 @@ journalctl -u quant-bot -f    # 로그 확인
 | 09:10 | ETF 로테이션 | ETF 월간 리밸런싱 |
 | 09~15 | 장중 모니터링 | 보유종목 현황, MDD 추적 |
 | 15:20 | 데이트레이딩 청산 | ORB 포지션 청산 |
+| 09~15 | 긴급 모니터링 | 30분 간격 급등락/시장급변/공시 감지 |
 | 15:35 | EOD 리뷰 | 당일 성과 요약 |
 | 15:37 | 성과 DB 기록 | NAV/포지션/거래 SQLite 저장 |
-| 15:40 | EOD 뉴스 | 장후 공시 수집 |
+| 15:40 | EOD 뉴스+교육 | 장후 공시 수집 + 투자 학습 콘텐츠 |
 | 16:00 | 종목 리뷰 | 52주 고저 분석 |
 | 16:05 | 일일 시뮬레이션 | 가상 리밸런싱 검증 |
 | 19:00 | 이브닝 리포트 | 포트폴리오 성과, 시장 동향 |
@@ -287,6 +291,7 @@ journalctl -u quant-bot -f    # 로그 확인
 | `news_collector` | ON | DART 공시/뉴스 수집 |
 | `macro_monitor` | ON | 매크로 데이터 (ECOS/FRED) |
 | `etf_rotation` | ON | ETF 로테이션 전략 |
+| `emergency_monitor` | ON | 긴급 모니터링 (급등락/시장급변/공시) |
 
 ## 테스트
 
@@ -314,6 +319,7 @@ python3 -m pytest tests/ --cov=src --cov-report=html
 | Phase 5-B | 듀얼 포트폴리오, 단기 전략 4종, 백테스트 검증 | ✅ |
 | Phase 6 | 전략 고도화 + 신규 전략 5종 + 인프라 확장 (뉴스/매크로/성과DB/시뮬레이션) | ✅ |
 | Phase 6-B | 안전 필터: 모멘텀 캡, 업종 비중 제한, 계열사 집중도, 섹터 데이터 수집 | ✅ |
+| Phase 6-C | 긴급 모니터링, EOD 공시 교육, 리밸런싱 시뮬레이션, 백테스트 diff-based 개선 | ✅ |
 
 ## Disclaimer
 

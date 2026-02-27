@@ -1,0 +1,189 @@
+{
+  "multi_factor": {
+    "date": "2026-02-27",
+    "strategy": "multi_factor",
+    "universe_size": 7,
+    "selected": [
+      {
+        "ticker": "030530",
+        "name": "원익홀딩스",
+        "weight": 0.14285714285714285,
+        "rank": 1,
+        "score": 0.14285714285714285,
+        "change": "NEW"
+      },
+      {
+        "ticker": "004020",
+        "name": "현대제철",
+        "weight": 0.14285714285714285,
+        "rank": 2,
+        "score": 0.14285714285714285,
+        "change": "NEW"
+      },
+      {
+        "ticker": "004990",
+        "name": "롯데지주",
+        "weight": 0.14285714285714285,
+        "rank": 3,
+        "score": 0.14285714285714285,
+        "change": "NEW"
+      },
+      {
+        "ticker": "023530",
+        "name": "롯데쇼핑",
+        "weight": 0.14285714285714285,
+        "rank": 4,
+        "score": 0.14285714285714285,
+        "change": "NEW"
+      },
+      {
+        "ticker": "475830",
+        "name": "오름테라퓨틱",
+        "weight": 0.14285714285714285,
+        "rank": 5,
+        "score": 0.14285714285714285,
+        "change": "NEW"
+      },
+      {
+        "ticker": "006800",
+        "name": "미래에셋증권",
+        "weight": 0.14285714285714285,
+        "rank": 6,
+        "score": 0.14285714285714285,
+        "change": "NEW"
+      },
+      {
+        "ticker": "032820",
+        "name": "우리기술",
+        "weight": 0.14285714285714285,
+        "rank": 7,
+        "score": 0.14285714285714285,
+        "change": "NEW"
+      }
+    ],
+    "turnover_vs_yesterday": 1.0,
+    "rebalancing_countdown": 3
+  },
+  "three_factor": {
+    "date": "2026-02-27",
+    "strategy": "three_factor",
+    "universe_size": 10,
+    "selected": [
+      {
+        "ticker": "278470",
+        "name": "에이피알",
+        "weight": 0.1,
+        "rank": 1,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "402340",
+        "name": "SK스퀘어",
+        "weight": 0.1,
+        "rank": 2,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "319400",
+        "name": "현대무벡스",
+        "weight": 0.1,
+        "rank": 3,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "004800",
+        "name": "효성",
+        "weight": 0.1,
+        "rank": 4,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "000660",
+        "name": "SK하이닉스",
+        "weight": 0.1,
+        "rank": 5,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "298040",
+        "name": "효성중공업",
+        "weight": 0.1,
+        "rank": 6,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "071970",
+        "name": "HD현대마린엔진",
+        "weight": 0.1,
+        "rank": 7,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "214370",
+        "name": "케어젠",
+        "weight": 0.1,
+        "rank": 8,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "039490",
+        "name": "키움증권",
+        "weight": 0.1,
+        "rank": 9,
+        "score": 0.1,
+        "change": "NEW"
+      },
+      {
+        "ticker": "006800",
+        "name": "미래에셋증권",
+        "weight": 0.1,
+        "rank": 10,
+        "score": 0.1,
+        "change": "NEW"
+      }
+    ],
+    "turnover_vs_yesterday": 1.0,
+    "rebalancing_countdown": 3
+  },
+  "etf_rotation": {
+    "date": "2026-02-27",
+    "strategy": "etf_rotation",
+    "universe_size": 3,
+    "selected": [
+      {
+        "ticker": "469150",
+        "name": "469150",
+        "weight": 0.3333333333333333,
+        "rank": 1,
+        "score": 0.3333333333333333,
+        "change": "NEW"
+      },
+      {
+        "ticker": "069500",
+        "name": "069500",
+        "weight": 0.3333333333333333,
+        "rank": 2,
+        "score": 0.3333333333333333,
+        "change": "NEW"
+      },
+      {
+        "ticker": "117700",
+        "name": "117700",
+        "weight": 0.3333333333333333,
+        "rank": 3,
+        "score": 0.3333333333333333,
+        "change": "NEW"
+      }
+    ],
+    "turnover_vs_yesterday": 1.0,
+    "rebalancing_countdown": 3
+  }
+}

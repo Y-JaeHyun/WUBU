@@ -112,6 +112,16 @@ class FeatureFlags:
                 "include_vix": True,
             },
         },
+        "emergency_monitor": {
+            "enabled": True,
+            "description": "긴급 리밸런싱 모니터 (급등락/시장급변/공시)",
+            "config": {
+                "price_shock_pct": 5.0,
+                "market_crash_pct": 3.0,
+                "auto_exit_enabled": False,
+                "check_interval_minutes": 30,
+            },
+        },
     }
 
     def __init__(self, flags_path: Optional[str] = None) -> None:
