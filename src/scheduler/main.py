@@ -122,6 +122,7 @@ class TradingBot:
             self.notifier, self.feature_flags
         )
         self.commander.register_command("/portfolio", self._cmd_portfolio)
+        self.commander.register_command("/balance", self._cmd_balance)
         self.stock_reviewer: StockReviewer = StockReviewer()
         self.night_researcher: NightResearcher = NightResearcher()
 
@@ -419,6 +420,7 @@ class TradingBot:
                     short_term_risk=self.short_term_risk,
                 )
                 self.commander.register_command("/portfolio", self._cmd_portfolio)
+                self.commander.register_command("/balance", self._cmd_balance)
 
                 logger.info("단기 트레이딩 모듈 초기화 완료 (모드=%s)", mode)
 
@@ -710,10 +712,12 @@ class TradingBot:
             lookback_months = config.get("lookback_months", 12)
             lookback_days = lookback_months * 21
             n_select = config.get("n_select", 2)
+            max_same_sector = config.get("max_same_sector", 1)
 
             strategy = ETFRotationStrategy(
                 lookback=lookback_days,
                 num_etfs=n_select,
+                max_same_sector=max_same_sector,
             )
 
             # ETF 가격 수집
@@ -1528,6 +1532,287 @@ class TradingBot:
         except Exception as e:
             return f"포트폴리오 조회 오류: {e}"
 
+    def _cmd_balance(self, args: str) -> str:
+        """Telegram /balance 커맨드 핸들러.
+
+        전체 포트폴리오 요약: 계좌 총괄 + 통합 보유종목 + 전략 프리뷰.
+        """
+        if not self.kis_client.is_configured():
+            return "KIS API 미설정 상태입니다."
+
+        try:
+            # 1. 계좌 총괄
+            balance = self.kis_client.get_balance()
+            total_eval = balance.get("total_eval", 0)
+            cash = balance.get("cash", 0)
+            profit_pct = balance.get("total_profit_pct", 0.0)
+            holdings = balance.get("holdings", [])
+            holdings_map = {h["ticker"]: h for h in holdings}
+
+            lines = [
+                "[계좌 총괄]",
+                f"  총 평가: {total_eval:,}원",
+                f"  현금: {cash:,}원",
+                f"  수익률: {profit_pct:+.2f}%",
+                f"  종목 수: {len(holdings)}개",
+            ]
+
+            # 풀 배분 요약 (allocator 활성 시)
+            if self.allocator:
+                alloc = self.allocator.rebalance_allocation()
+                long_pct = alloc.get("long_term_actual", 0)
+                long_tgt = alloc.get("long_term_target", 0)
+                etf_pct = alloc.get("etf_rotation_actual", 0)
+                etf_tgt = alloc.get("etf_rotation_target", 0)
+                lines.append(
+                    f"  풀 배분: 장기 {long_pct:.0%}/{long_tgt:.0%}"
+                    f" | ETF {etf_pct:.0%}/{etf_tgt:.0%}"
+                )
+
+            # 2. 현재 보유 종목 (통합 리스트 + 풀 태그)
+            lines.append("")
+            lines.append("[현재 보유 종목]")
+            lines.extend(
+                self._format_merged_holdings(holdings, holdings_map)
+            )
+
+            # 3. 장기 전략 프리뷰
+            if self.feature_flags.is_enabled("daily_simulation"):
+                lines.append("")
+                try:
+                    lines.extend(
+                        self._generate_long_term_preview(holdings_map)
+                    )
+                except Exception as e:
+                    lines.append(f"[장기 전략 프리뷰] 생성 실패: {e}")
+
+            # 4. ETF 로테이션 프리뷰
+            if self.feature_flags.is_enabled("etf_rotation"):
+                lines.append("")
+                lines.append("[ETF 리밸런싱 프리뷰 (오늘 기준)]")
+                try:
+                    lines.extend(self._generate_etf_preview())
+                except Exception as e:
+                    lines.append(f"  프리뷰 생성 실패: {e}")
+
+            result = "\n".join(lines)
+            if len(result) > 4096:
+                result = result[:4090] + "\n(...)"
+            return result
+
+        except Exception as e:
+            return f"잔고 조회 오류: {e}"
+
+    def _format_merged_holdings(
+        self,
+        holdings: list[dict],
+        holdings_map: dict[str, dict],
+    ) -> list[str]:
+        """모든 보유 종목을 풀 태그와 함께 통합 리스트로 포맷한다."""
+        # 풀별 ticker→label 매핑 구축
+        pool_labels = {
+            "long_term": "장기",
+            "etf_rotation": "ETF",
+            "short_term": "단기",
+        }
+        ticker_pool: dict[str, str] = {}
+
+        if self.allocator:
+            for pool_name, label in pool_labels.items():
+                for p in self.allocator.get_positions_by_pool(pool_name):
+                    ticker_pool[p["ticker"]] = label
+
+        sorted_holdings = sorted(
+            holdings,
+            key=lambda x: x.get("eval_amount", 0),
+            reverse=True,
+        )
+
+        lines: list[str] = []
+        max_display = 15
+        for h in sorted_holdings[:max_display]:
+            label = ticker_pool.get(h["ticker"], "미분류") if self.allocator else ""
+            prefix = f"{label}| " if label else "  "
+            lines.append(
+                f"  {prefix}{h['name'][:10]:10s} "
+                f"{h.get('qty', 0):>5d}주 "
+                f"{h.get('eval_amount', 0):>10,}원 "
+                f"{h.get('pnl_pct', 0.0):>+6.1f}%"
+            )
+
+        remaining = len(sorted_holdings) - max_display
+        if remaining > 0:
+            lines.append(f"  ...외 {remaining}종목")
+
+        if not holdings:
+            lines.append("  (보유 없음)")
+
+        return lines
+
+    def _generate_long_term_preview(
+        self, holdings_map: dict[str, dict],
+    ) -> list[str]:
+        """DailySimulator 캐시에서 장기 전략 프리뷰를 생성한다."""
+        sim_config = self.feature_flags.get_config("daily_simulation")
+        strategy_name = sim_config.get("primary_strategy", "multi_factor")
+
+        sim_data = self._find_latest_simulation(strategy_name)
+        if sim_data is None:
+            return [
+                f"[장기 전략 프리뷰 ({strategy_name})]",
+                "  (시뮬레이션 데이터 없음 - 16:05 이후 갱신)",
+            ]
+
+        sim_date = sim_data.get("date", "?")
+        selected = sim_data.get("selected", [])
+
+        lines = [f"[장기 전략 프리뷰 ({sim_date} 기준)]"]
+
+        max_display = 7
+        for item in selected[:max_display]:
+            rank = item.get("rank", "?")
+            name = item.get("name", item.get("ticker", "?"))
+            weight = item.get("weight", 0)
+            ticker = item.get("ticker", "")
+            held = "(보유중)" if ticker in holdings_map else "(신규)"
+            lines.append(
+                f"  {rank}. {name}: {weight:.1%} {held}"
+            )
+
+        remaining = len(selected) - max_display
+        if remaining > 0:
+            lines.append(f"  ...외 {remaining}종목")
+
+        # dry_run으로 매수/매도 예상
+        if self.executor and selected:
+            try:
+                signals = {
+                    item["ticker"]: item["weight"]
+                    for item in selected
+                }
+                dry = self.executor.dry_run(signals, pool="long_term")
+                sell_count = len(dry.get("sell_orders", []))
+                buy_count = len(dry.get("buy_orders", []))
+                lines.append(
+                    f"  예상 변경: 매도 {sell_count}건, 매수 {buy_count}건"
+                )
+            except Exception:
+                pass
+
+        return lines
+
+    @staticmethod
+    def _find_latest_simulation(strategy_name: str) -> Optional[dict]:
+        """DailySimulator에서 최신 시뮬레이션 결과를 가져온다."""
+        try:
+            from src.data.daily_simulator import DailySimulator
+            sim = DailySimulator()
+            history = sim.get_history(strategy_name, days=7)
+            return history[0] if history else None
+        except Exception:
+            return None
+
+    def _generate_etf_preview(self) -> list[str]:
+        """ETF 로테이션 모멘텀 순위 + 시그널 프리뷰를 생성한다."""
+        from src.strategy.etf_rotation import ETFRotationStrategy
+
+        config = self.feature_flags.get_config("etf_rotation")
+        lookback_months = config.get("lookback_months", 12)
+        lookback_days = lookback_months * 21
+        n_select = config.get("n_select", 2)
+        max_same_sector = config.get("max_same_sector", 1)
+
+        strategy = ETFRotationStrategy(
+            lookback=lookback_days, num_etfs=n_select,
+            max_same_sector=max_same_sector,
+        )
+
+        etf_prices = self._fetch_etf_prices(
+            strategy.etf_universe, lookback_days
+        )
+
+        if not etf_prices:
+            return ["  ETF 가격 수집 실패 (pykrx API 응답 없음)"]
+
+        # 시그널 생성 (fallback + 진단 포함)
+        date_str = datetime.now(KST).strftime("%Y%m%d")
+        signals = strategy.generate_signals(
+            date_str, {"etf_prices": etf_prices}
+        )
+
+        diag = strategy.last_diagnostics
+        lines = []
+
+        # lookback 상태 표시
+        lb_used = diag.get("lookback_used", lookback_days)
+        if diag.get("status") == "DEGRADED":
+            lines.append(
+                f"  * lookback: {lb_used}일 "
+                f"({lookback_days}일 데이터 부족으로 하향)"
+            )
+
+        # 모멘텀 순위 (generate_signals 내부에서 이미 계산됨)
+        per_ticker = diag.get("per_ticker", {})
+        ok_tickers = {
+            t: info["momentum"]
+            for t, info in per_ticker.items()
+            if info.get("status") == "OK"
+        }
+        if ok_tickers:
+            ranked = sorted(ok_tickers.items(), key=lambda x: x[1], reverse=True)
+            lines.append("  모멘텀 순위:")
+            for i, (ticker, mom) in enumerate(ranked, 1):
+                name = strategy.etf_universe.get(ticker, ticker)
+                lines.append(f"    {i}. {name}: {mom:+.1%}")
+
+        # 데이터 문제 ETF 표시
+        problem_tickers = [
+            (t, info)
+            for t, info in per_ticker.items()
+            if info.get("status") in ("DATA_MISSING", "DATA_SHORT", "DATA_INVALID")
+        ]
+        if problem_tickers:
+            for ticker, info in problem_tickers:
+                name = strategy.etf_universe.get(ticker, ticker)
+                status = info["status"]
+                avail = info.get("available_days", 0)
+                req = info.get("required_days", lb_used)
+                if status == "DATA_MISSING":
+                    lines.append(f"  * {name}: 데이터 누락")
+                elif status == "DATA_SHORT":
+                    lines.append(
+                        f"  * {name}: 데이터 부족 ({avail}/{req}일)"
+                    )
+                elif status == "DATA_INVALID":
+                    lines.append(f"  * {name}: 데이터 오류")
+
+        if signals:
+            lines.append("  선정 ETF:")
+            for ticker, weight in sorted(
+                signals.items(), key=lambda x: x[1], reverse=True,
+            ):
+                name = strategy.etf_universe.get(ticker, ticker)
+                lines.append(f"    {name}: {weight:.1%}")
+
+            # Dry run
+            if self.executor:
+                try:
+                    dry = self.executor.dry_run(
+                        signals, pool="etf_rotation"
+                    )
+                    sell_count = len(dry.get("sell_orders", []))
+                    buy_count = len(dry.get("buy_orders", []))
+                    lines.append(
+                        f"  예상 변경: 매도 {sell_count}건, 매수 {buy_count}건"
+                    )
+                except Exception:
+                    pass
+        else:
+            reason = diag.get("reason", "원인 불명")
+            lines.append(f"  시그널 없음: {reason}")
+
+        return lines
+
     # ──────────────────────────────────────────────────────────
     # Phase 6: 일일 시뮬레이션 + 뉴스/공시 + 매크로 + 성과DB
     # ──────────────────────────────────────────────────────────
@@ -1738,7 +2023,7 @@ class TradingBot:
                     factors=["value", "momentum"],
                     weights=[0.5, 0.5],
                     combine_method="zscore",
-                    num_stocks=10,
+                    num_stocks=7,
                 )
             elif name == "three_factor":
                 from src.strategy.three_factor import ThreeFactorStrategy
@@ -1756,6 +2041,7 @@ class TradingBot:
                 return ETFRotationStrategy(
                     lookback=lookback_months * 21,
                     num_etfs=config.get("n_select", 2),
+                    max_same_sector=config.get("max_same_sector", 1),
                 )
             elif name == "accrual":
                 from src.strategy.accrual import AccrualStrategy
@@ -2027,7 +2313,7 @@ def main() -> None:
             factors=["value", "momentum"],
             weights=[0.5, 0.5],
             combine_method="zscore",
-            num_stocks=10,
+            num_stocks=7,
             apply_market_timing=True,
             turnover_penalty=0.1,
         )

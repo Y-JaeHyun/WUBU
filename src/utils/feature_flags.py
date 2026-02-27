@@ -79,10 +79,12 @@ class FeatureFlags:
             "description": "ETF 로테이션 전략 (확장 유니버스)",
             "config": {
                 "lookback_months": 12,
-                "n_select": 2,
+                "n_select": 3,
                 "rebalance_freq": "monthly",
                 "volatility_target": 0.0,
                 "etf_rotation_pct": 0.30,
+                "max_same_sector": 1,
+                "momentum_cap": 3.0,
             },
         },
         "daily_simulation": {
@@ -91,6 +93,7 @@ class FeatureFlags:
             "config": {
                 "strategies": ["multi_factor", "three_factor", "etf_rotation"],
                 "report_time": "16:00",
+                "primary_strategy": "multi_factor",
             },
         },
         "news_collector": {

@@ -72,6 +72,7 @@ class TelegramCommander:
         self._commands["/confirm"] = self._cmd_confirm
         self._commands["/reject"] = self._cmd_reject
         self._commands["/short_status"] = self._cmd_short_status
+        self._commands["/balance"] = self._cmd_balance
         self._commands["/short_config"] = self._cmd_short_config
 
     def register_command(
@@ -157,6 +158,7 @@ class TelegramCommander:
             "/config <name> [key=val] - 설정 조회/변경",
             "/status - 봇 상태 요약",
             "/portfolio - 포트폴리오 현황",
+            "/balance - 잔고 + ETF 리밸런싱 프리뷰",
             "/reload - 설정 파일 리로드",
             "/signals - 대기 시그널 목록",
             "/confirm <id> - 시그널 승인",
@@ -228,6 +230,10 @@ class TelegramCommander:
     def _cmd_portfolio(self, args: str) -> str:
         """포트폴리오 현황 (TradingBot에서 콜백으로 교체)."""
         return "포트폴리오 조회는 봇 통합 후 사용 가능합니다."
+
+    def _cmd_balance(self, args: str) -> str:
+        """잔고 + ETF 리밸런싱 프리뷰 (TradingBot에서 콜백으로 교체)."""
+        return "잔고 프리뷰는 봇 통합 후 사용 가능합니다."
 
     def _cmd_reload(self, args: str) -> str:
         """설정 파일 리로드."""

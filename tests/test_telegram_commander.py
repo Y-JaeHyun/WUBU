@@ -82,12 +82,13 @@ class TestInitialization:
     """TelegramCommander 초기화 검증."""
 
     def test_default_commands_registered(self, commander):
-        """초기화 시 기본 커맨드 12개가 등록되어야 한다."""
+        """초기화 시 기본 커맨드 13개가 등록되어야 한다."""
         expected_commands = {
             "/help", "/features", "/toggle",
             "/config", "/status", "/portfolio", "/reload",
             "/signals", "/confirm", "/reject",
             "/short_status", "/short_config",
+            "/balance",
         }
         assert set(commander._commands.keys()) == expected_commands
 

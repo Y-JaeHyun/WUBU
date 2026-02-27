@@ -236,7 +236,7 @@ def get_all_fundamentals(
         market: "KOSPI", "KOSDAQ", 또는 "ALL"
 
     Returns:
-        DataFrame with columns: ['ticker', 'name', 'market', 'bps', 'per', 'pbr',
+        DataFrame with columns: ['ticker', 'name', 'market', 'sector', 'bps', 'per', 'pbr',
                                   'eps', 'div_yield', 'close', 'market_cap', 'volume']
         Index: RangeIndex
     """
@@ -282,6 +282,20 @@ def get_all_fundamentals(
             merged["name"] = [pykrx_stock.get_market_ticker_name(t) for t in merged["ticker"]]
             merged["market"] = mkt
 
+            # 업종 분류 추가
+            try:
+                sector_df = pykrx_stock.get_market_sector_classifications(d, market=mkt)
+                time.sleep(0.5)
+                if not sector_df.empty and "업종명" in sector_df.columns:
+                    sector_map = sector_df["업종명"].to_dict()
+                    merged["sector"] = [sector_map.get(t, "") for t in merged["ticker"]]
+                    logger.info(f"{mkt} 업종 분류 매핑 완료: {len(sector_map)}개")
+                else:
+                    merged["sector"] = ""
+            except Exception as e:
+                logger.warning(f"{mkt} 업종 분류 조회 실패: {e}")
+                merged["sector"] = ""
+
             results.append(merged)
 
         if not results:
@@ -292,7 +306,7 @@ def get_all_fundamentals(
 
         # 컬럼 순서 정리
         col_order = [
-            "ticker", "name", "market", "bps", "per", "pbr",
+            "ticker", "name", "market", "sector", "bps", "per", "pbr",
             "eps", "div_yield", "dps", "close", "market_cap", "volume",
         ]
         # dps가 없을 수도 있으므로 존재하는 컬럼만 선택
