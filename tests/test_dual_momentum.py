@@ -4,6 +4,8 @@ DualMomentumStrategy 초기화, 모멘텀 계산, 상대/절대 시그널,
 자산 배분 생성, 백테스트 연동 등을 검증한다.
 """
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -23,7 +25,7 @@ def _make_etf_prices(
     tickers: list[str],
     periods: int = 300,
     seed: int = 42,
-    trends: dict[str, float] | None = None,
+    trends: Optional[dict] = None,
 ) -> dict[str, pd.Series]:
     """ETF 가격 시계열 dict를 생성한다.
 

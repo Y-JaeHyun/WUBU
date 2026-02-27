@@ -4,6 +4,7 @@ Strategy ABC를 상속한 더미 전략으로 백테스트 실행, 거래비용 
 성과 지표 계산 정합성 등을 검증한다.
 """
 
+from typing import Optional
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -20,7 +21,7 @@ from src.backtest.engine import Backtest, Strategy
 class DummyStrategy(Strategy):
     """테스트용 더미 전략. 매 리밸런싱마다 고정된 시그널을 반환한다."""
 
-    def __init__(self, signals: dict | None = None):
+    def __init__(self, signals: Optional[dict] = None):
         self._signals = signals or {}
 
     @property
@@ -185,7 +186,7 @@ class TestRebalanceDates:
             strategy=DummyStrategy(),
             start_date="20240101",
             end_date="20240630",
-            rebalance_freq="weekly",
+            rebalance_freq="daily",
         )
         with pytest.raises(ValueError, match="지원하지 않는 리밸런싱 주기"):
             bt._get_rebalance_dates()
@@ -507,7 +508,73 @@ class TestGetPriceOnDate:
 
 
 # ===================================================================
-# Diff-based 리밸런싱 테스트
+# Weekly / Biweekly 리밸런싱 테스트
+# ===================================================================
+
+class TestWeeklyBiweeklyRebalance:
+    """weekly/biweekly 리밸런싱 날짜 생성 검증."""
+
+    def test_weekly_rebalance(self):
+        """주간 리밸런싱 시 매주 첫 영업일이 선택된다."""
+        bt = Backtest(
+            strategy=DummyStrategy(),
+            start_date="20240101",
+            end_date="20240229",
+            rebalance_freq="weekly",
+        )
+        dates = bt._get_rebalance_dates()
+
+        # 약 9주 (1/1~2/29)
+        assert len(dates) >= 8
+        # 각 날짜가 영업일
+        for d in dates:
+            ts = pd.Timestamp(d)
+            assert ts.weekday() < 5
+
+    def test_biweekly_rebalance(self):
+        """격주 리밸런싱은 주간의 약 절반이다."""
+        bt_w = Backtest(
+            strategy=DummyStrategy(),
+            start_date="20240101",
+            end_date="20240630",
+            rebalance_freq="weekly",
+        )
+        bt_bw = Backtest(
+            strategy=DummyStrategy(),
+            start_date="20240101",
+            end_date="20240630",
+            rebalance_freq="biweekly",
+        )
+        weekly_dates = bt_w._get_rebalance_dates()
+        biweekly_dates = bt_bw._get_rebalance_dates()
+
+        # biweekly는 weekly의 약 절반
+        assert len(biweekly_dates) == len(weekly_dates) // 2 + (
+            1 if len(weekly_dates) % 2 else 0
+        )
+
+    def test_biweekly_subset_of_weekly(self):
+        """biweekly 날짜는 weekly 날짜의 부분집합이다."""
+        bt_w = Backtest(
+            strategy=DummyStrategy(),
+            start_date="20240101",
+            end_date="20240630",
+            rebalance_freq="weekly",
+        )
+        bt_bw = Backtest(
+            strategy=DummyStrategy(),
+            start_date="20240101",
+            end_date="20240630",
+            rebalance_freq="biweekly",
+        )
+        weekly_dates = set(bt_w._get_rebalance_dates())
+        biweekly_dates = set(bt_bw._get_rebalance_dates())
+
+        assert biweekly_dates.issubset(weekly_dates)
+
+
+# ===================================================================
+# Diff-based / 차등 리밸런싱 테스트
 # ===================================================================
 
 class _RotatingStrategy(Strategy):
@@ -525,6 +592,23 @@ class _RotatingStrategy(Strategy):
         idx = min(self._call_count, len(self._signals_by_call) - 1)
         self._call_count += 1
         return self._signals_by_call[idx]
+
+
+class DualSignalStrategy(Strategy):
+    """리밸런싱마다 번갈아 다른 시그널을 반환하는 전략."""
+
+    def __init__(self, signals_list: list):
+        self._signals_list = signals_list
+        self._call_count = 0
+
+    @property
+    def name(self) -> str:
+        return "DualSignalStrategy"
+
+    def generate_signals(self, date: str, data: dict) -> dict:
+        idx = self._call_count % len(self._signals_list)
+        self._call_count += 1
+        return self._signals_list[idx]
 
 
 class TestDiffBasedRebalancing:
@@ -688,3 +772,176 @@ class TestDiffBasedRebalancing:
         a_trades = trades[trades["ticker"] == "A"]
         a_sells = a_trades[a_trades["action"] == "sell"]
         assert len(a_sells) == 0, "유지 종목 A가 불필요하게 매도되어 비용 발생"
+
+
+class TestDifferentialRebalancing:
+    """차등 리밸런싱 동작 검증 (min_rebalance_threshold 등)."""
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_retained_stock_not_sold(self, mock_price, mock_fund):
+        """유지 종목이 매도되지 않는다.
+
+        1차: A=50%, B=50%
+        2차: A=50%, B=50% (동일)
+        → 2차에서 매도 거래가 발생하지 않아야 한다.
+        """
+        dates = pd.bdate_range("2024-01-02", periods=45)
+        flat_price = 50000
+        flat_df = pd.DataFrame(
+            {
+                "open": [flat_price] * 45,
+                "high": [flat_price] * 45,
+                "low": [flat_price] * 45,
+                "close": [flat_price] * 45,
+                "volume": [1_000_000] * 45,
+            },
+            index=dates,
+        )
+        flat_df.index.name = "date"
+
+        mock_price.return_value = flat_df
+        mock_fund.return_value = pd.DataFrame()
+
+        strategy = DummyStrategy(signals={"005930": 0.5, "000660": 0.5})
+
+        bt = Backtest(
+            strategy=strategy,
+            start_date="20240102",
+            end_date="20240229",
+            initial_capital=100_000_000,
+        )
+        bt.run()
+
+        trades = bt.get_trades()
+        # 첫 리밸런싱에서만 매수, 두 번째부터는 비중 동일하므로 거래 없음
+        sell_trades = trades[trades["action"] == "sell"]
+        assert len(sell_trades) == 0, "유지 종목에 대한 매도가 발생하면 안 됨"
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_min_rebalance_threshold_skips_small_changes(self, mock_price, mock_fund):
+        """min_rebalance_threshold 미만의 비중 변화는 거래를 스킵한다."""
+        dates = pd.bdate_range("2024-01-02", periods=45)
+        flat_price = 50000
+        flat_df = pd.DataFrame(
+            {
+                "open": [flat_price] * 45,
+                "high": [flat_price] * 45,
+                "low": [flat_price] * 45,
+                "close": [flat_price] * 45,
+                "volume": [1_000_000] * 45,
+            },
+            index=dates,
+        )
+        flat_df.index.name = "date"
+
+        mock_price.return_value = flat_df
+        mock_fund.return_value = pd.DataFrame()
+
+        # 두 시그널 간 차이가 0.01 (1%)
+        strategy = DualSignalStrategy([
+            {"005930": 0.50, "000660": 0.50},
+            {"005930": 0.51, "000660": 0.49},
+        ])
+
+        bt = Backtest(
+            strategy=strategy,
+            start_date="20240102",
+            end_date="20240229",
+            initial_capital=100_000_000,
+            min_rebalance_threshold=0.02,  # 2% 이상만 거래
+        )
+        bt.run()
+
+        trades = bt.get_trades()
+        # 첫 리밸런싱에서 매수만, 이후 비중 변화가 2% 미만이라 거래 없음
+        buy_trades_after_first = trades[
+            (trades["action"] == "buy") &
+            (trades["date"] > pd.Timestamp("20240201"))
+        ]
+        sell_trades = trades[trades["action"] == "sell"]
+        assert len(sell_trades) == 0
+        assert len(buy_trades_after_first) == 0
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_removed_stock_is_sold(self, mock_price, mock_fund):
+        """타겟에서 빠진 종목은 매도된다."""
+        dates = pd.bdate_range("2024-01-02", periods=45)
+        flat_price = 50000
+        flat_df = pd.DataFrame(
+            {
+                "open": [flat_price] * 45,
+                "high": [flat_price] * 45,
+                "low": [flat_price] * 45,
+                "close": [flat_price] * 45,
+                "volume": [1_000_000] * 45,
+            },
+            index=dates,
+        )
+        flat_df.index.name = "date"
+
+        mock_price.return_value = flat_df
+        mock_fund.return_value = pd.DataFrame()
+
+        # 1차: A+B, 2차: A만 (B는 빠짐)
+        strategy = DualSignalStrategy([
+            {"005930": 0.5, "000660": 0.5},
+            {"005930": 1.0},
+        ])
+
+        bt = Backtest(
+            strategy=strategy,
+            start_date="20240102",
+            end_date="20240229",
+            initial_capital=100_000_000,
+        )
+        bt.run()
+
+        trades = bt.get_trades()
+        # 000660이 매도되어야 함
+        sell_trades = trades[
+            (trades["action"] == "sell") & (trades["ticker"] == "000660")
+        ]
+        assert len(sell_trades) > 0, "타겟에서 빠진 종목이 매도되어야 함"
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_differential_reduces_trade_count(self, mock_price, mock_fund):
+        """차등 리밸런싱이 동일 시그널 반복 시 거래 횟수를 줄인다."""
+        dates = pd.bdate_range("2024-01-02", periods=65)
+        flat_price = 50000
+        flat_df = pd.DataFrame(
+            {
+                "open": [flat_price] * 65,
+                "high": [flat_price] * 65,
+                "low": [flat_price] * 65,
+                "close": [flat_price] * 65,
+                "volume": [1_000_000] * 65,
+            },
+            index=dates,
+        )
+        flat_df.index.name = "date"
+
+        mock_price.return_value = flat_df
+        mock_fund.return_value = pd.DataFrame()
+
+        # 동일 시그널을 3개월 반복
+        strategy = DummyStrategy(signals={"005930": 0.5, "000660": 0.5})
+
+        bt = Backtest(
+            strategy=strategy,
+            start_date="20240102",
+            end_date="20240329",
+            initial_capital=100_000_000,
+        )
+        bt.run()
+
+        results = bt.get_results()
+        # 동일 시그널이므로 첫 리밸런싱의 매수만 발생 (매도 0건)
+        trades = bt.get_trades()
+        sell_count = len(trades[trades["action"] == "sell"])
+        assert sell_count == 0, (
+            f"동일 시그널 반복 시 매도가 발생하면 안 됨 (발생: {sell_count}건)"
+        )

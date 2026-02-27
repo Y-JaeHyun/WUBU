@@ -122,6 +122,63 @@ class FeatureFlags:
                 "check_interval_minutes": 30,
             },
         },
+        "walk_forward_backtest": {
+            "enabled": False,
+            "description": "Walk-Forward 백테스트 (OOS Sharpe 계산)",
+            "config": {
+                "train_years": 5,
+                "test_years": 1,
+                "step_months": 12,
+            },
+        },
+        "low_volatility_factor": {
+            "enabled": False,
+            "description": "저변동성 팩터 (N팩터 전략 활성화)",
+            "config": {
+                "vol_period": 60,
+                "weight": 0.15,
+            },
+        },
+        "drawdown_overlay": {
+            "enabled": False,
+            "description": "드로다운 기반 디레버리징 오버레이",
+            "config": {
+                "thresholds": [[-0.10, 0.75], [-0.15, 0.50], [-0.20, 0.25]],
+                "recovery_buffer": 0.02,
+            },
+        },
+        "sector_neutral": {
+            "enabled": False,
+            "description": "섹터 중립 스코어링 (섹터 편향 제거)",
+            "config": {
+                "max_sector_pct": 0.25,
+            },
+        },
+        "vol_targeting": {
+            "enabled": False,
+            "description": "변동성 타겟팅 (하방 변동성 기반)",
+            "config": {
+                "target_vol": 0.15,
+                "lookback_days": 20,
+                "use_downside_only": True,
+            },
+        },
+        "turnover_reduction": {
+            "enabled": False,
+            "description": "회전율 감소 (버퍼 존 + 보유 보너스)",
+            "config": {
+                "buffer_size": 5,
+                "holding_bonus": 0.1,
+            },
+        },
+        "regime_meta_model": {
+            "enabled": False,
+            "description": "레짐 기반 팩터 가중치 동적 조절",
+            "config": {
+                "level": "rule_based",
+                "update_freq": "monthly",
+            },
+        },
     }
 
     def __init__(self, flags_path: Optional[str] = None) -> None:

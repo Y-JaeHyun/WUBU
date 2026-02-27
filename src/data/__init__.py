@@ -15,3 +15,7 @@ from src.data.etf_collector import (  # noqa: F401
     get_etf_list,
     ETF_UNIVERSE,
 )
+from src.data.sector_collector import (  # noqa: F401
+    get_sector_classification,
+    get_sector_for_tickers,
+)

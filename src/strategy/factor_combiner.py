@@ -8,6 +8,8 @@ Z-Score 결합과 순위(Rank) 결합 두 가지 방법을 지원한다.
 N팩터 결합(combine_n_factors_zscore, combine_n_factors_rank)을 지원한다.
 """
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
@@ -146,7 +148,7 @@ def _zscore_with_clip(series: pd.Series, clip_limit: float = 3.0) -> pd.Series:
 
 def combine_n_factors_zscore(
     factors: dict[str, pd.Series],
-    weights: dict[str, float] | None = None,
+    weights: Optional[dict[str, float]] = None,
 ) -> pd.Series:
     """N개 팩터의 Z-Score 기반 결합.
 
@@ -230,7 +232,7 @@ def combine_n_factors_zscore(
 
 def combine_n_factors_rank(
     factors: dict[str, pd.Series],
-    weights: dict[str, float] | None = None,
+    weights: Optional[dict[str, float]] = None,
 ) -> pd.Series:
     """N개 팩터의 순위(Rank) 기반 결합.
 

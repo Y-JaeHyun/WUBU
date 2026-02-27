@@ -58,7 +58,7 @@ class RealtimeManager:
     # 가격 조회
     # ------------------------------------------------------------------
 
-    def get_latest_price(self, ticker: str) -> dict | None:
+    def get_latest_price(self, ticker: str) -> Optional[dict]:
         """캐시된 최신 tick 데이터를 반환한다.
 
         Args:

@@ -8,6 +8,8 @@
     cov_matrix = estimator.estimate(returns_df)
 """
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
@@ -38,7 +40,7 @@ class CovarianceEstimator:
         self,
         method: str = "ledoit_wolf",
         lookback_days: int = 252,
-        halflife: int | None = None,
+        halflife: Optional[int] = None,
     ):
         method = method.lower()
         if method not in VALID_METHODS:
