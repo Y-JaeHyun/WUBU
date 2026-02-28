@@ -1,0 +1,121 @@
+{
+  "date": "2026-02-27",
+  "strategy": "three_factor",
+  "universe_size": 10,
+  "selected": [
+    {
+      "ticker": "319400",
+      "name": "현대무벡스",
+      "weight": 0.1,
+      "rank": 1,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "278470",
+      "name": "에이피알",
+      "weight": 0.1,
+      "rank": 2,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "402340",
+      "name": "SK스퀘어",
+      "weight": 0.1,
+      "rank": 3,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "298040",
+      "name": "효성중공업",
+      "weight": 0.1,
+      "rank": 4,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "004800",
+      "name": "효성",
+      "weight": 0.1,
+      "rank": 5,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "000660",
+      "name": "SK하이닉스",
+      "weight": 0.1,
+      "rank": 6,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "036460",
+      "name": "한국가스공사",
+      "weight": 0.1,
+      "rank": 7,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "071970",
+      "name": "HD현대마린엔진",
+      "weight": 0.1,
+      "rank": 8,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "039490",
+      "name": "키움증권",
+      "weight": 0.1,
+      "rank": 9,
+      "score": 0.1,
+      "change": "NEW"
+    },
+    {
+      "ticker": "214370",
+      "name": "케어젠",
+      "weight": 0.1,
+      "rank": 10,
+      "score": 0.1,
+      "change": "NEW"
+    }
+  ],
+  "factor_scores": {
+    "319400": {
+      "composite": 0.1
+    },
+    "278470": {
+      "composite": 0.1
+    },
+    "402340": {
+      "composite": 0.1
+    },
+    "298040": {
+      "composite": 0.1
+    },
+    "004800": {
+      "composite": 0.1
+    },
+    "000660": {
+      "composite": 0.1
+    },
+    "036460": {
+      "composite": 0.1
+    },
+    "071970": {
+      "composite": 0.1
+    },
+    "039490": {
+      "composite": 0.1
+    },
+    "214370": {
+      "composite": 0.1
+    }
+  },
+  "turnover_vs_yesterday": 1.0,
+  "rebalancing_countdown": 3
+}

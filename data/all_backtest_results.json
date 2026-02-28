@@ -1,0 +1,160 @@
+{
+  "backtest_config": {
+    "start_date": "20200101",
+    "end_date": "20251231",
+    "initial_capital": 1450000,
+    "mode": "long"
+  },
+  "results": [
+    {
+      "category": "long_term",
+      "strategy_name": "Value(PBR)",
+      "total_return": 253.96,
+      "cagr": 23.46,
+      "sharpe_ratio": 0.7,
+      "mdd": -53.98,
+      "win_rate": 50.7,
+      "total_trades": 609,
+      "final_value": 5132490.0,
+      "elapsed_sec": 840.8
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "Value(Composite)",
+      "total_return": 134.35,
+      "cagr": 15.25,
+      "sharpe_ratio": 0.51,
+      "mdd": -43.75,
+      "win_rate": 49.3,
+      "total_trades": 554,
+      "final_value": 3398102.0,
+      "elapsed_sec": 815.3
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "Momentum(Residual)",
+      "total_return": 0.0,
+      "cagr": 0.0,
+      "sharpe_ratio": 0.0,
+      "mdd": 0.0,
+      "win_rate": 0.0,
+      "total_trades": 0,
+      "final_value": 1450000.0,
+      "elapsed_sec": 716.0
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "Quality",
+      "total_return": 15.08,
+      "cagr": 2.37,
+      "sharpe_ratio": 0.11,
+      "mdd": -51.27,
+      "win_rate": 52.11,
+      "total_trades": 485,
+      "final_value": 1668724.0,
+      "elapsed_sec": 523.9
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "MultiFactor(V+M)",
+      "total_return": 88.78,
+      "cagr": 11.17,
+      "sharpe_ratio": 0.38,
+      "mdd": -47.42,
+      "win_rate": 50.7,
+      "total_trades": 220,
+      "final_value": 2737317.0,
+      "elapsed_sec": 472.8
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "MultiFactor+MT",
+      "total_return": 65.89,
+      "cagr": 8.8,
+      "sharpe_ratio": 0.32,
+      "mdd": -47.42,
+      "win_rate": 50.7,
+      "total_trades": 170,
+      "final_value": 2405353.0,
+      "elapsed_sec": 476.7
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "ThreeFactor(V+M+Q)",
+      "total_return": 117.22,
+      "cagr": 13.8,
+      "sharpe_ratio": 0.54,
+      "mdd": -41.98,
+      "win_rate": 57.75,
+      "total_trades": 382,
+      "final_value": 3149618.0,
+      "elapsed_sec": 466.4
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "ShareholderYield",
+      "total_return": 38.54,
+      "cagr": 5.58,
+      "sharpe_ratio": 0.21,
+      "mdd": -37.88,
+      "win_rate": 47.89,
+      "total_trades": 484,
+      "final_value": 2008809.0,
+      "elapsed_sec": 478.4
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "PEAD",
+      "total_return": 124.24,
+      "cagr": 14.41,
+      "sharpe_ratio": 0.47,
+      "mdd": -58.2,
+      "win_rate": 47.89,
+      "total_trades": 592,
+      "final_value": 3251505.0,
+      "elapsed_sec": 480.4
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "LowVolQuality",
+      "total_return": 28.3,
+      "cagr": 4.24,
+      "sharpe_ratio": 0.17,
+      "mdd": -49.41,
+      "win_rate": 50.7,
+      "total_trades": 187,
+      "final_value": 1860335.0,
+      "elapsed_sec": 475.5
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "Accrual",
+      "total_return": 122.0,
+      "cagr": 14.22,
+      "sharpe_ratio": 0.46,
+      "mdd": -57.95,
+      "win_rate": 47.89,
+      "total_trades": 577,
+      "final_value": 3219019.0,
+      "elapsed_sec": 491.5
+    },
+    {
+      "category": "long_term",
+      "strategy_name": "RiskParity(MF)",
+      "total_return": 88.8,
+      "cagr": 11.18,
+      "sharpe_ratio": 0.38,
+      "mdd": -47.42,
+      "win_rate": 50.7,
+      "total_trades": 219,
+      "final_value": 2737538.0,
+      "elapsed_sec": 476.1
+    }
+  ],
+  "recommendation": {
+    "long_term_best": "Value(PBR)",
+    "long_term_sharpe": 0.7,
+    "long_term_stable": "ShareholderYield"
+  },
+  "total_elapsed_sec": 6714.7
+}

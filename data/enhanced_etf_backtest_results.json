@@ -1,0 +1,401 @@
+{
+  "config": {
+    "start_date": "20200101",
+    "end_date": "20251231",
+    "capital": 1450000,
+    "etf_universe": {
+      "069500": "KODEX 200",
+      "371460": "TIGER 미국S&P500",
+      "133690": "TIGER 미국나스닥100",
+      "091160": "KODEX 반도체",
+      "091170": "KODEX 은행",
+      "117700": "KODEX 건설",
+      "132030": "KODEX 골드선물(H)",
+      "464310": "TIGER 글로벌AI&로보틱스INDXX",
+      "469150": "ACE AI반도체포커스",
+      "439870": "KODEX 단기채권"
+    }
+  },
+  "results": [
+    {
+      "strategy_name": "Baseline: ETF(3M,top3)",
+      "total_return": 214.17,
+      "cagr": 21.03,
+      "sharpe_ratio": 1.02,
+      "mdd": -34.28,
+      "final_value": 4555498.0,
+      "trades": 361,
+      "yearly_returns": {
+        "2020": 24.14,
+        "2021": 27.22,
+        "2022": -24.81,
+        "2023": 32.22,
+        "2024": 21.26,
+        "2025": 65.03
+      },
+      "elapsed_sec": 0.7,
+      "risk_adjusted": 2.9754959159859977
+    },
+    {
+      "strategy_name": "Baseline: ETF(12M,top3)",
+      "total_return": 147.35,
+      "cagr": 16.3,
+      "sharpe_ratio": 0.82,
+      "mdd": -25.41,
+      "final_value": 3586506.0,
+      "trades": 361,
+      "yearly_returns": {
+        "2020": 20.13,
+        "2021": 18.61,
+        "2022": -15.21,
+        "2023": 14.44,
+        "2024": 25.01,
+        "2025": 43.74
+      },
+      "elapsed_sec": 0.6,
+      "risk_adjusted": 3.2270759543486816
+    },
+    {
+      "strategy_name": "Baseline: ETF(3M,top3,invol)",
+      "total_return": 218.21,
+      "cagr": 21.28,
+      "sharpe_ratio": 1.08,
+      "mdd": -33.61,
+      "final_value": 4614065.0,
+      "trades": 361,
+      "yearly_returns": {
+        "2020": 26.11,
+        "2021": 21.38,
+        "2022": -23.26,
+        "2023": 32.2,
+        "2024": 18.56,
+        "2025": 72.19
+      },
+      "elapsed_sec": 0.8,
+      "risk_adjusted": 3.2133293662600417
+    },
+    {
+      "strategy_name": "Enhanced: all_filters",
+      "total_return": 280.47,
+      "cagr": 24.95,
+      "sharpe_ratio": 1.27,
+      "mdd": -21.97,
+      "final_value": 5516826.0,
+      "trades": 341,
+      "yearly_returns": {
+        "2020": 38.62,
+        "2021": 22.65,
+        "2022": -5.19,
+        "2023": 27.93,
+        "2024": 19.43,
+        "2025": 54.73
+      },
+      "elapsed_sec": 1.1,
+      "risk_adjusted": 5.780609922621757
+    },
+    {
+      "strategy_name": "Enhanced: vol_only",
+      "total_return": 210.46,
+      "cagr": 20.79,
+      "sharpe_ratio": 1.05,
+      "mdd": -30.11,
+      "final_value": 4501650.0,
+      "trades": 337,
+      "yearly_returns": {
+        "2020": 25.61,
+        "2021": 21.7,
+        "2022": -15.44,
+        "2023": 22.52,
+        "2024": 20.43,
+        "2025": 61.42
+      },
+      "elapsed_sec": 0.9,
+      "risk_adjusted": 3.48721355031551
+    },
+    {
+      "strategy_name": "Enhanced: mkt_only",
+      "total_return": 232.79,
+      "cagr": 22.19,
+      "sharpe_ratio": 1.14,
+      "mdd": -21.76,
+      "final_value": 4825411.0,
+      "trades": 351,
+      "yearly_returns": {
+        "2020": 23.15,
+        "2021": 28.07,
+        "2022": -7.68,
+        "2023": 25.45,
+        "2024": 19.99,
+        "2025": 52.06
+      },
+      "elapsed_sec": 0.8,
+      "risk_adjusted": 5.2389705882352935
+    },
+    {
+      "strategy_name": "Enhanced: vol+mkt",
+      "total_return": 241.94,
+      "cagr": 22.75,
+      "sharpe_ratio": 1.21,
+      "mdd": -21.83,
+      "final_value": 4958198.0,
+      "trades": 351,
+      "yearly_returns": {
+        "2020": 25.61,
+        "2021": 22.9,
+        "2022": -7.15,
+        "2023": 26.99,
+        "2024": 20.62,
+        "2025": 56.0
+      },
+      "elapsed_sec": 1.0,
+      "risk_adjusted": 5.54283096655978
+    },
+    {
+      "strategy_name": "Enhanced: vol+trend",
+      "total_return": 256.89,
+      "cagr": 23.63,
+      "sharpe_ratio": 1.14,
+      "mdd": -27.72,
+      "final_value": 5174956.0,
+      "trades": 325,
+      "yearly_returns": {
+        "2020": 38.62,
+        "2021": 20.74,
+        "2022": -10.76,
+        "2023": 25.24,
+        "2024": 19.04,
+        "2025": 58.99
+      },
+      "elapsed_sec": 1.1,
+      "risk_adjusted": 4.112554112554112
+    },
+    {
+      "strategy_name": "Enhanced: top2_all",
+      "total_return": 276.55,
+      "cagr": 24.74,
+      "sharpe_ratio": 1.13,
+      "mdd": -23.57,
+      "final_value": 5459905.0,
+      "trades": 252,
+      "yearly_returns": {
+        "2020": 31.45,
+        "2021": 33.94,
+        "2022": -6.88,
+        "2023": 27.7,
+        "2024": 25.69,
+        "2025": 43.22
+      },
+      "elapsed_sec": 1.0,
+      "risk_adjusted": 4.794229953330505
+    },
+    {
+      "strategy_name": "Enhanced: short_mom",
+      "total_return": 271.93,
+      "cagr": 24.48,
+      "sharpe_ratio": 1.25,
+      "mdd": -22.01,
+      "final_value": 5392942.0,
+      "trades": 343,
+      "yearly_returns": {
+        "2020": 39.6,
+        "2021": 22.58,
+        "2022": -5.22,
+        "2023": 27.85,
+        "2024": 18.55,
+        "2025": 51.55
+      },
+      "elapsed_sec": 1.1,
+      "risk_adjusted": 5.679236710586097
+    },
+    {
+      "strategy_name": "Enhanced: long_mom",
+      "total_return": 277.8,
+      "cagr": 24.81,
+      "sharpe_ratio": 1.26,
+      "mdd": -22.08,
+      "final_value": 5478087.0,
+      "trades": 339,
+      "yearly_returns": {
+        "2020": 38.62,
+        "2021": 20.8,
+        "2022": -5.09,
+        "2023": 28.37,
+        "2024": 19.73,
+        "2025": 54.93
+      },
+      "elapsed_sec": 1.1,
+      "risk_adjusted": 5.7065217391304355
+    },
+    {
+      "strategy_name": "Enhanced: mild_riskoff",
+      "total_return": 272.36,
+      "cagr": 24.5,
+      "sharpe_ratio": 1.23,
+      "mdd": -24.61,
+      "final_value": 5399175.0,
+      "trades": 341,
+      "yearly_returns": {
+        "2020": 38.62,
+        "2021": 21.77,
+        "2022": -7.3,
+        "2023": 26.94,
+        "2024": 19.68,
+        "2025": 56.27
+      },
+      "elapsed_sec": 1.2,
+      "risk_adjusted": 4.997968305566842
+    },
+    {
+      "strategy_name": "Enhanced: strong_riskoff",
+      "total_return": 290.96,
+      "cagr": 25.52,
+      "sharpe_ratio": 1.31,
+      "mdd": -19.64,
+      "final_value": 5668964.0,
+      "trades": 341,
+      "yearly_returns": {
+        "2020": 38.62,
+        "2021": 23.33,
+        "2022": -2.82,
+        "2023": 29.15,
+        "2024": 19.94,
+        "2025": 52.77
+      },
+      "elapsed_sec": 1.1,
+      "risk_adjusted": 6.670061099796334
+    },
+    {
+      "strategy_name": "CrossAsset: base",
+      "total_return": 132.73,
+      "cagr": 15.12,
+      "sharpe_ratio": 0.71,
+      "mdd": -36.05,
+      "final_value": 3374590.0,
+      "trades": 267,
+      "yearly_returns": {
+        "2020": 36.93,
+        "2021": 25.12,
+        "2022": -28.49,
+        "2023": 23.43,
+        "2024": 19.56,
+        "2025": 27.52
+      },
+      "elapsed_sec": 0.9,
+      "risk_adjusted": 1.969486823855756
+    },
+    {
+      "strategy_name": "CrossAsset: no_trend",
+      "total_return": 117.21,
+      "cagr": 13.8,
+      "sharpe_ratio": 0.84,
+      "mdd": -20.65,
+      "final_value": 3149562.0,
+      "trades": 317,
+      "yearly_returns": {
+        "2020": 16.97,
+        "2021": 12.88,
+        "2022": -12.43,
+        "2023": 20.89,
+        "2024": 16.36,
+        "2025": 33.24
+      },
+      "elapsed_sec": 1.0,
+      "risk_adjusted": 4.067796610169492
+    },
+    {
+      "strategy_name": "CrossAsset: no_corr",
+      "total_return": 151.85,
+      "cagr": 16.65,
+      "sharpe_ratio": 0.79,
+      "mdd": -36.05,
+      "final_value": 3651758.0,
+      "trades": 275,
+      "yearly_returns": {
+        "2020": 37.84,
+        "2021": 25.15,
+        "2022": -28.52,
+        "2023": 23.45,
+        "2024": 19.85,
+        "2025": 36.74
+      },
+      "elapsed_sec": 0.7,
+      "risk_adjusted": 2.191400832177531
+    },
+    {
+      "strategy_name": "CrossAsset: short_bias",
+      "total_return": 162.04,
+      "cagr": 17.42,
+      "sharpe_ratio": 0.82,
+      "mdd": -36.13,
+      "final_value": 3799518.0,
+      "trades": 267,
+      "yearly_returns": {
+        "2020": 36.93,
+        "2021": 23.96,
+        "2022": -28.51,
+        "2023": 29.21,
+        "2024": 20.06,
+        "2025": 37.9
+      },
+      "elapsed_sec": 0.9,
+      "risk_adjusted": 2.269582064766122
+    },
+    {
+      "strategy_name": "CrossAsset: top2",
+      "total_return": 169.38,
+      "cagr": 17.96,
+      "sharpe_ratio": 0.81,
+      "mdd": -36.14,
+      "final_value": 3905946.0,
+      "trades": 220,
+      "yearly_returns": {
+        "2020": 34.44,
+        "2021": 25.61,
+        "2022": -28.51,
+        "2023": 30.21,
+        "2024": 29.22,
+        "2025": 31.41
+      },
+      "elapsed_sec": 0.8,
+      "risk_adjusted": 2.241283895960155
+    },
+    {
+      "strategy_name": "CrossAsset: max2_class",
+      "total_return": 139.46,
+      "cagr": 15.67,
+      "sharpe_ratio": 0.77,
+      "mdd": -33.15,
+      "final_value": 3472132.0,
+      "trades": 292,
+      "yearly_returns": {
+        "2020": 41.66,
+        "2021": 20.17,
+        "2022": -23.95,
+        "2023": 21.26,
+        "2024": 25.34,
+        "2025": 20.41
+      },
+      "elapsed_sec": 0.9,
+      "risk_adjusted": 2.3227752639517347
+    },
+    {
+      "strategy_name": "CrossAsset: high_corr",
+      "total_return": 151.85,
+      "cagr": 16.65,
+      "sharpe_ratio": 0.79,
+      "mdd": -36.05,
+      "final_value": 3651758.0,
+      "trades": 275,
+      "yearly_returns": {
+        "2020": 37.84,
+        "2021": 25.15,
+        "2022": -28.52,
+        "2023": 23.45,
+        "2024": 19.85,
+        "2025": 36.74
+      },
+      "elapsed_sec": 0.9,
+      "risk_adjusted": 2.191400832177531
+    }
+  ]
+}

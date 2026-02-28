@@ -1,0 +1,193 @@
+{
+  "config": {
+    "start_date": "20200101",
+    "end_date": "20251231",
+    "capital": 1450000,
+    "grid": {
+      "lookback_months": [
+        3,
+        6,
+        9,
+        12
+      ],
+      "num_etfs": [
+        1,
+        2,
+        3
+      ],
+      "weighting": [
+        "equal"
+      ]
+    },
+    "etf_universe": {
+      "069500": "KODEX 200",
+      "371460": "TIGER 미국S&P500",
+      "133690": "TIGER 미국나스닥100",
+      "091160": "KODEX 반도체",
+      "091170": "KODEX 은행",
+      "117700": "KODEX 건설",
+      "132030": "KODEX 골드선물(H)",
+      "464310": "TIGER 글로벌AI&로보틱스INDXX",
+      "469150": "ACE AI반도체포커스",
+      "439870": "KODEX 단기채권"
+    }
+  },
+  "results": [
+    {
+      "lookback_months": 3,
+      "num_etfs": 1,
+      "weighting": "equal",
+      "total_return": 35.59,
+      "cagr": 5.21,
+      "sharpe_ratio": 0.21,
+      "mdd": -57.33,
+      "final_value": 1966082.0,
+      "trades": 131,
+      "elapsed_sec": 0.5
+    },
+    {
+      "lookback_months": 3,
+      "num_etfs": 2,
+      "weighting": "equal",
+      "total_return": 122.94,
+      "cagr": 14.3,
+      "sharpe_ratio": 0.61,
+      "mdd": -41.93,
+      "final_value": 3232630.0,
+      "trades": 258,
+      "elapsed_sec": 0.5
+    },
+    {
+      "lookback_months": 3,
+      "num_etfs": 3,
+      "weighting": "equal",
+      "total_return": 214.17,
+      "cagr": 21.03,
+      "sharpe_ratio": 1.02,
+      "mdd": -34.28,
+      "final_value": 4555498.0,
+      "trades": 361,
+      "elapsed_sec": 0.6
+    },
+    {
+      "lookback_months": 6,
+      "num_etfs": 1,
+      "weighting": "equal",
+      "total_return": 63.58,
+      "cagr": 8.55,
+      "sharpe_ratio": 0.32,
+      "mdd": -60.45,
+      "final_value": 2371926.0,
+      "trades": 131,
+      "elapsed_sec": 0.4
+    },
+    {
+      "lookback_months": 6,
+      "num_etfs": 2,
+      "weighting": "equal",
+      "total_return": 105.26,
+      "cagr": 12.74,
+      "sharpe_ratio": 0.53,
+      "mdd": -38.78,
+      "final_value": 2976249.0,
+      "trades": 256,
+      "elapsed_sec": 0.5
+    },
+    {
+      "lookback_months": 6,
+      "num_etfs": 3,
+      "weighting": "equal",
+      "total_return": 106.71,
+      "cagr": 12.87,
+      "sharpe_ratio": 0.62,
+      "mdd": -33.5,
+      "final_value": 2997263.0,
+      "trades": 365,
+      "elapsed_sec": 0.6
+    },
+    {
+      "lookback_months": 9,
+      "num_etfs": 1,
+      "weighting": "equal",
+      "total_return": -10.51,
+      "cagr": -1.83,
+      "sharpe_ratio": -0.07,
+      "mdd": -56.02,
+      "final_value": 1297556.0,
+      "trades": 129,
+      "elapsed_sec": 0.4
+    },
+    {
+      "lookback_months": 9,
+      "num_etfs": 2,
+      "weighting": "equal",
+      "total_return": 28.14,
+      "cagr": 4.22,
+      "sharpe_ratio": 0.15,
+      "mdd": -42.82,
+      "final_value": 1857982.0,
+      "trades": 256,
+      "elapsed_sec": 0.6
+    },
+    {
+      "lookback_months": 9,
+      "num_etfs": 3,
+      "weighting": "equal",
+      "total_return": 75.51,
+      "cagr": 9.83,
+      "sharpe_ratio": 0.45,
+      "mdd": -36.72,
+      "final_value": 2544906.0,
+      "trades": 367,
+      "elapsed_sec": 0.6
+    },
+    {
+      "lookback_months": 12,
+      "num_etfs": 1,
+      "weighting": "equal",
+      "total_return": 73.93,
+      "cagr": 9.67,
+      "sharpe_ratio": 0.36,
+      "mdd": -47.36,
+      "final_value": 2522050.0,
+      "trades": 133,
+      "elapsed_sec": 0.4
+    },
+    {
+      "lookback_months": 12,
+      "num_etfs": 2,
+      "weighting": "equal",
+      "total_return": 117.78,
+      "cagr": 13.85,
+      "sharpe_ratio": 0.61,
+      "mdd": -32.69,
+      "final_value": 3157849.0,
+      "trades": 252,
+      "elapsed_sec": 0.5
+    },
+    {
+      "lookback_months": 12,
+      "num_etfs": 3,
+      "weighting": "equal",
+      "total_return": 147.35,
+      "cagr": 16.3,
+      "sharpe_ratio": 0.82,
+      "mdd": -25.41,
+      "final_value": 3586506.0,
+      "trades": 361,
+      "elapsed_sec": 0.6
+    }
+  ],
+  "best": {
+    "lookback_months": 3,
+    "num_etfs": 3,
+    "weighting": "equal",
+    "total_return": 214.17,
+    "cagr": 21.03,
+    "sharpe_ratio": 1.02,
+    "mdd": -34.28,
+    "final_value": 4555498.0,
+    "trades": 361,
+    "elapsed_sec": 0.6
+  }
+}

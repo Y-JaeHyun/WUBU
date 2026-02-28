@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "updated_at": "2026-02-26T21:13:23",
+  "config": {
+    "long_term_pct": 0.7,
+    "short_term_pct": 0.0,
+    "etf_rotation_pct": 0.3,
+    "soft_cap_mode": true
+  },
+  "positions": {}
+}

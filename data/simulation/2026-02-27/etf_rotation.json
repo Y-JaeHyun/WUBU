@@ -1,0 +1,44 @@
+{
+  "date": "2026-02-27",
+  "strategy": "etf_rotation",
+  "universe_size": 3,
+  "selected": [
+    {
+      "ticker": "469150",
+      "name": "469150",
+      "weight": 0.3333333333333333,
+      "rank": 1,
+      "score": 0.3333333333333333,
+      "change": "NEW"
+    },
+    {
+      "ticker": "069500",
+      "name": "069500",
+      "weight": 0.3333333333333333,
+      "rank": 2,
+      "score": 0.3333333333333333,
+      "change": "NEW"
+    },
+    {
+      "ticker": "117700",
+      "name": "117700",
+      "weight": 0.3333333333333333,
+      "rank": 3,
+      "score": 0.3333333333333333,
+      "change": "NEW"
+    }
+  ],
+  "factor_scores": {
+    "469150": {
+      "composite": 0.3333333333333333
+    },
+    "069500": {
+      "composite": 0.3333333333333333
+    },
+    "117700": {
+      "composite": 0.3333333333333333
+    }
+  },
+  "turnover_vs_yesterday": 1.0,
+  "rebalancing_countdown": 3
+}

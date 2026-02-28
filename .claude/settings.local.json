@@ -4,7 +4,11 @@
       "Bash(ls:*)",
       "Bash(grep:*)",
       "Bash(wc:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(tail:*)",
+      "Bash(git push:*)",
+      "Bash(gh api:*)",
+      "Bash(git add:*)"
     ]
   }
 }

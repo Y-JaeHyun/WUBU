@@ -951,9 +951,11 @@ class TradingBot:
 
         enhanced_etf_rotation flag가 ON이면 EnhancedETFRotationStrategy,
         OFF이면 기존 ETFRotationStrategy를 생성한다.
+        etf_rotation config에서 공통 파라미터(lookback, n_select 등)를 읽고,
+        enhanced_etf_rotation config에서 추가 파라미터를 읽는다.
 
         Returns:
-            ETF 전략 객체.
+            ETF 전략 객체 (ETFRotationStrategy 또는 EnhancedETFRotationStrategy).
         """
         config = self.feature_flags.get_config("etf_rotation")
         lookback_months = config.get("lookback_months", 12)
