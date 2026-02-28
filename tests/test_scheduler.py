@@ -519,15 +519,15 @@ class TestDaytradingClose:
 class TestSetupScheduleShortTerm:
     """setup_schedule에 단기 스케줄이 추가되는지 검증."""
 
-    def test_schedule_has_19_jobs(self):
-        """setup_schedule 후 19개의 작업이 등록된다 (기존 11 + ETF 1 + 단기 3 + Phase6 4)."""
+    def test_schedule_has_20_jobs(self):
+        """setup_schedule 후 20개의 작업이 등록된다 (기존 19 + emergency_monitor 1)."""
         bot = _make_bot_with_flag(False)
 
         bot.setup_schedule()
 
         jobs = bot.scheduler.get_jobs()
-        assert len(jobs) == 19, (
-            f"19개 작업이 등록되어야 합니다. 실제: {len(jobs)}개"
+        assert len(jobs) == 20, (
+            f"20개 작업이 등록되어야 합니다. 실제: {len(jobs)}개"
         )
 
     def test_short_term_job_ids_exist(self):

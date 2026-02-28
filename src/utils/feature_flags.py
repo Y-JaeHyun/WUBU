@@ -51,7 +51,7 @@ class FeatureFlags:
             "description": "주간 자동 백테스트",
             "config": {
                 "lookback_months": 6,
-                "strategies": ["value", "momentum", "multi_factor"],
+                "strategies": ["value", "momentum", "multi_factor", "three_factor", "quality"],
             },
         },
         "night_research": {

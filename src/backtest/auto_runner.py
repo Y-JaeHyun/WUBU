@@ -27,7 +27,9 @@ class AutoBacktester:
         strategies: Optional[list[str]] = None,
     ) -> None:
         self.lookback_months = lookback_months
-        self.strategies = strategies or ["value", "momentum", "multi_factor"]
+        self.strategies = strategies or [
+            "value", "momentum", "multi_factor", "three_factor", "quality",
+        ]
 
     def run_all(self) -> str:
         """등록된 모든 전략에 대해 백테스트를 실행한다.
@@ -84,7 +86,7 @@ class AutoBacktester:
         """전략명으로 전략 객체를 생성한다.
 
         Args:
-            name: 전략 이름 ("value", "momentum", "multi_factor").
+            name: 전략 이름.
 
         Returns:
             Strategy 객체. 알 수 없는 이름이면 None.
@@ -108,6 +110,56 @@ class AutoBacktester:
                     num_stocks=10,
                     apply_market_timing=True,
                 )
+            elif name == "quality":
+                from src.strategy.quality import QualityStrategy
+
+                return QualityStrategy()
+            elif name == "three_factor":
+                from src.strategy.three_factor import ThreeFactorStrategy
+
+                return ThreeFactorStrategy(num_stocks=10)
+            elif name == "pead":
+                from src.strategy.pead import PEADStrategy
+
+                return PEADStrategy(num_stocks=10)
+            elif name == "shareholder_yield":
+                from src.strategy.shareholder_yield import (
+                    ShareholderYieldStrategy,
+                )
+
+                return ShareholderYieldStrategy(num_stocks=10)
+            elif name == "low_vol_quality":
+                from src.strategy.low_vol_quality import (
+                    LowVolQualityStrategy,
+                )
+
+                return LowVolQualityStrategy(num_stocks=10)
+            elif name == "accrual":
+                from src.strategy.accrual import AccrualStrategy
+
+                return AccrualStrategy(num_stocks=10)
+            elif name == "dual_momentum":
+                from src.strategy.dual_momentum import DualMomentumStrategy
+
+                return DualMomentumStrategy()
+            elif name == "etf_rotation":
+                from src.strategy.etf_rotation import ETFRotationStrategy
+
+                return ETFRotationStrategy()
+            elif name == "enhanced_etf_rotation":
+                from src.strategy.enhanced_etf_rotation import (
+                    EnhancedETFRotationStrategy,
+                )
+
+                return EnhancedETFRotationStrategy()
+            elif name == "cross_asset_momentum":
+                from src.strategy.cross_asset_momentum import (
+                    CrossAssetMomentumStrategy,
+                )
+
+                return CrossAssetMomentumStrategy()
+            else:
+                logger.warning("알 수 없는 전략: %s", name)
         except Exception as e:
             logger.error("전략 생성 실패 (%s): %s", name, e)
         return None

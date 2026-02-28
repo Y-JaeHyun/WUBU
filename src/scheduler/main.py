@@ -136,6 +136,36 @@ class TradingBot:
         self.stock_reviewer: StockReviewer = StockReviewer()
         self.night_researcher: NightResearcher = NightResearcher()
 
+        # 오버레이 (feature flag 기반 초기화)
+        self._drawdown_overlay = None
+        self._vol_targeting_overlay = None
+
+        if self.feature_flags.is_enabled("drawdown_overlay"):
+            from src.strategy.drawdown_overlay import DrawdownOverlay
+
+            dd_cfg = self.feature_flags.get_config("drawdown_overlay")
+            thresholds = [
+                (t[0], t[1])
+                for t in dd_cfg.get(
+                    "thresholds",
+                    [[-0.10, 0.75], [-0.15, 0.50], [-0.20, 0.25]],
+                )
+            ]
+            self._drawdown_overlay = DrawdownOverlay(
+                thresholds=thresholds,
+                recovery_buffer=dd_cfg.get("recovery_buffer", 0.02),
+            )
+
+        if self.feature_flags.is_enabled("vol_targeting"):
+            from src.strategy.vol_targeting import VolTargetingOverlay
+
+            vt_cfg = self.feature_flags.get_config("vol_targeting")
+            self._vol_targeting_overlay = VolTargetingOverlay(
+                target_vol=vt_cfg.get("target_vol", 0.15),
+                lookback_days=vt_cfg.get("lookback_days", 20),
+                use_downside_only=vt_cfg.get("use_downside_only", True),
+            )
+
         # 전략 (외부에서 주입 가능)
         self._strategy = None
 
@@ -716,10 +746,11 @@ class TradingBot:
         return etf_prices
 
     def execute_etf_rotation_rebalance(self) -> None:
-        """09:10 - ETF 로테이션 모니터링.
+        """09:10 - ETF 로테이션 모멘텀 순위 모니터링 (진단 전용).
 
-        리밸런싱일: 09:05 통합 리밸런싱에서 이미 실행됨 → 모멘텀 순위만 로깅.
-        비 리밸런싱일: 모멘텀 순위 로깅만 수행.
+        실제 ETF 매매는 09:05 execute_rebalance()에서 통합 수행된다.
+        이 메서드는 모멘텀 순위를 로깅하여 운영 모니터링을 돕는다.
+        리밸런싱일/비 리밸런싱일 공통으로 순위만 기록한다.
         """
         if not self.feature_flags.is_enabled("etf_rotation"):
             return
@@ -794,6 +825,62 @@ class TradingBot:
         except Exception as e:
             logger.warning("ETF 모멘텀 순위 로깅 실패: %s", e)
 
+    def _apply_live_overlays(
+        self, signals: dict[str, float]
+    ) -> dict[str, float]:
+        """라이브 리밸런싱에 drawdown/vol_targeting 오버레이를 적용한다.
+
+        Args:
+            signals: {ticker: weight} 포트폴리오 비중.
+
+        Returns:
+            오버레이 적용 후 {ticker: weight}.
+        """
+        if not signals:
+            return signals
+
+        # 1. 드로다운 오버레이
+        if self._drawdown_overlay is not None:
+            try:
+                balance = self.kis_client.get_balance()
+                pv = balance.get("total_eval", 0)
+                if pv > 0:
+                    signals = self._drawdown_overlay.apply_overlay(
+                        signals, pv
+                    )
+                    logger.info(
+                        "드로다운 오버레이 적용: %d종목", len(signals)
+                    )
+            except Exception as e:
+                logger.warning("드로다운 오버레이 실패: %s", e)
+
+        # 2. 변동성 타겟팅
+        if self._vol_targeting_overlay is not None:
+            try:
+                pv_series = self.portfolio_tracker.get_values_series()
+                if len(pv_series) > 0:
+                    signals = self._vol_targeting_overlay.apply(
+                        signals, pv_series
+                    )
+                    logger.info(
+                        "변동성 타겟팅 적용: %d종목", len(signals)
+                    )
+            except Exception as e:
+                logger.warning("변동성 타겟팅 실패: %s", e)
+
+        # 최소 노출 하한 (10%) — 백테스트 엔진과 동일
+        if signals:
+            total_w = sum(signals.values())
+            if 0 < total_w < 0.10:
+                scale = 0.10 / total_w
+                signals = {t: w * scale for t, w in signals.items()}
+                logger.info(
+                    "최소 노출 하한 적용: %.1f%% → 10%%",
+                    total_w * 100,
+                )
+
+        return signals
+
     def execute_rebalance(self) -> None:
         """09:05 - 통합 리밸런싱 실행 (해당일만).
 
@@ -855,6 +942,10 @@ class TradingBot:
                     level="CRITICAL",
                 )
                 return
+
+            # 오버레이 적용 (drawdown + vol_targeting)
+            if long_signals:
+                long_signals = self._apply_live_overlays(long_signals)
 
             # EOD 뉴스 관심종목용 시그널 캐시
             if long_signals:
@@ -2273,6 +2364,9 @@ class TradingBot:
             if total_eval <= 0:
                 return
 
+            # EOD 포트폴리오 트래커 스냅샷
+            self.portfolio_tracker.update(total_eval)
+
             today = datetime.now(KST).strftime("%Y-%m-%d")
 
             # NAV 기록
@@ -2362,14 +2456,7 @@ class TradingBot:
         긴급 매도를 트리거한다.
 
         Feature Flag 'emergency_monitor'로 제어.
-
-        # 스케줄 등록 예시:
-        # scheduler.add_job(
-        #     self.emergency_monitor_check,
-        #     'interval',
-        #     minutes=30,
-        #     id='emergency_monitor',
-        # )
+        setup_schedule()에서 CronTrigger(minute="*/30", hour="9-15")로 등록됨.
         """
         if not self.feature_flags.is_enabled("emergency_monitor"):
             return
@@ -2657,6 +2744,15 @@ class TradingBot:
             CronTrigger(hour=15, minute=20, day_of_week="mon-fri"),
             id="daytrading_close",
             name="데이트레이딩 청산",
+            misfire_grace_time=300,
+        )
+
+        # 긴급 리밸런싱 모니터 (장중 30분 간격)
+        self.scheduler.add_job(
+            self.emergency_monitor_check,
+            CronTrigger(minute="*/30", hour="9-15", day_of_week="mon-fri"),
+            id="emergency_monitor",
+            name="긴급 리밸런싱 모니터",
             misfire_grace_time=300,
         )
 
