@@ -449,7 +449,10 @@ class Backtest:
                             )
                             if price is not None and price > 0:
                                 sell_amount = portfolio_value * delta
-                                sell_qty = int(sell_amount / price)
+                                # M2: 매수측과 동일하게 거래비용 반영
+                                sell_qty = int(
+                                    sell_amount / (price * (1 - self.sell_cost))
+                                )
                                 sell_qty = min(sell_qty, holdings[ticker])
                                 if sell_qty > 0:
                                     proceeds = (
