@@ -155,6 +155,13 @@ class TradingBot:
                 thresholds=thresholds,
                 recovery_buffer=dd_cfg.get("recovery_buffer", 0.02),
             )
+            # PortfolioTracker의 고점을 DrawdownOverlay에 동기화 (재시작 시 보존)
+            if self.portfolio_tracker.peak > 0:
+                self._drawdown_overlay._peak = self.portfolio_tracker.peak
+                logger.info(
+                    "DrawdownOverlay peak 동기화: %s",
+                    f"{self.portfolio_tracker.peak:,.0f}",
+                )
 
         if self.feature_flags.is_enabled("vol_targeting"):
             from src.strategy.vol_targeting import VolTargetingOverlay
@@ -931,6 +938,17 @@ class TradingBot:
             date_str = today.strftime("%Y%m%d")
             logger.info("리밸런싱 시그널 생성 중: %s", date_str)
 
+            # turnover_reduction: 현재 보유 종목을 전략에 전달
+            if hasattr(self._strategy, "update_holdings"):
+                try:
+                    balance = self.kis_client.get_balance()
+                    current_tickers = {
+                        h["ticker"] for h in balance.get("holdings", [])
+                    }
+                    self._strategy.update_holdings(current_tickers)
+                except Exception as e:
+                    logger.warning("보유 종목 업데이트 실패: %s", e)
+
             try:
                 long_signals = self._strategy.generate_signals(
                     date_str, strategy_data
@@ -1536,9 +1554,76 @@ class TradingBot:
             text = backtester.run_all()
             self._send_notification(text)
             logger.info("자동 백테스트 완료")
+
+            # Walk-Forward 검증 (옵셔널)
+            if self.feature_flags.is_enabled("walk_forward_backtest"):
+                try:
+                    self._run_walk_forward(config)
+                except Exception as wf_err:
+                    logger.error("Walk-Forward 실패: %s", wf_err)
+                    logger.debug(traceback.format_exc())
+
         except Exception as e:
             logger.error("자동 백테스트 실패: %s", e)
             logger.debug(traceback.format_exc())
+
+    def _run_walk_forward(self, backtest_config: dict) -> None:
+        """Walk-Forward 백테스트를 실행하고 결과를 발송한다."""
+        from src.backtest.walk_forward import WalkForwardBacktest
+
+        wf_cfg = self.feature_flags.get_config("walk_forward_backtest")
+        strategies = backtest_config.get(
+            "strategies", ["value", "momentum", "multi_factor"]
+        )
+
+        results_lines = ["[Walk-Forward 검증 결과]", ""]
+
+        for strategy_name in strategies[:3]:  # 상위 3개만 (실행시간 제한)
+            try:
+                strategy = self._create_long_term_strategy(strategy_name)
+                if strategy is None:
+                    continue
+
+                def strategy_factory(train_start, train_end, s=strategy):
+                    return s
+
+                wf = WalkForwardBacktest(
+                    strategy_factory=strategy_factory,
+                    full_start_date=(
+                        datetime.now(KST)
+                        - timedelta(
+                            days=365 * (
+                                wf_cfg.get("train_years", 5)
+                                + wf_cfg.get("test_years", 1)
+                            )
+                        )
+                    ).strftime("%Y%m%d"),
+                    full_end_date=datetime.now(KST).strftime("%Y%m%d"),
+                    train_years=wf_cfg.get("train_years", 5),
+                    test_years=wf_cfg.get("test_years", 1),
+                    step_months=wf_cfg.get("step_months", 12),
+                )
+                wf.run()
+                oos = wf.get_oos_results()
+
+                if oos:
+                    avg_sharpe = sum(
+                        r.get("sharpe", 0) for r in oos
+                    ) / len(oos)
+                    results_lines.append(
+                        f"  {strategy_name}: OOS Sharpe={avg_sharpe:.2f} "
+                        f"({len(oos)}구간)"
+                    )
+                else:
+                    results_lines.append(f"  {strategy_name}: 결과 없음")
+
+            except Exception as e:
+                results_lines.append(f"  {strategy_name}: 실패 ({e})")
+                logger.warning("Walk-Forward %s 실패: %s", strategy_name, e)
+
+        if len(results_lines) > 2:
+            self._send_notification("\n".join(results_lines))
+            logger.info("Walk-Forward 검증 완료")
 
     def night_research_job(self) -> None:
         """22:00 평일 - 야간 리서치 리포트.
@@ -2416,7 +2501,45 @@ class TradingBot:
                 )
             elif name == "three_factor":
                 from src.strategy.three_factor import ThreeFactorStrategy
-                return ThreeFactorStrategy(num_stocks=10)
+
+                tf_kwargs: dict = {"num_stocks": 10}
+
+                # low_volatility_factor 연동
+                if self.feature_flags.is_enabled("low_volatility_factor"):
+                    lv_cfg = self.feature_flags.get_config("low_volatility_factor")
+                    tf_kwargs["low_vol_weight"] = lv_cfg.get("weight", 0.15)
+                    tf_kwargs["low_vol_params"] = {
+                        "vol_period": lv_cfg.get("vol_period", 60),
+                    }
+
+                # sector_neutral 연동
+                if self.feature_flags.is_enabled("sector_neutral"):
+                    sn_cfg = self.feature_flags.get_config("sector_neutral")
+                    tf_kwargs["sector_neutral"] = True
+                    tf_kwargs["max_sector_pct"] = sn_cfg.get("max_sector_pct", 0.25)
+
+                # turnover_reduction 연동
+                if self.feature_flags.is_enabled("turnover_reduction"):
+                    tr_cfg = self.feature_flags.get_config("turnover_reduction")
+                    tf_kwargs["turnover_buffer"] = tr_cfg.get("buffer_size", 5)
+                    tf_kwargs["holding_bonus"] = tr_cfg.get("holding_bonus", 0.1)
+
+                # regime_meta_model 연동
+                if self.feature_flags.is_enabled("regime_meta_model"):
+                    try:
+                        from src.ml.regime_model import RuleBasedRegimeModel
+
+                        rm_cfg = self.feature_flags.get_config("regime_meta_model")
+                        factor_names = ["value", "momentum", "quality"]
+                        if tf_kwargs.get("low_vol_weight", 0) > 0:
+                            factor_names.append("low_vol")
+                        tf_kwargs["regime_model"] = RuleBasedRegimeModel(
+                            factor_names=factor_names,
+                        )
+                    except Exception as e:
+                        logger.warning("레짐 모델 초기화 실패: %s", e)
+
+                return ThreeFactorStrategy(**tf_kwargs)
             elif name == "shareholder_yield":
                 from src.strategy.shareholder_yield import ShareholderYieldStrategy
                 return ShareholderYieldStrategy(num_stocks=10)
