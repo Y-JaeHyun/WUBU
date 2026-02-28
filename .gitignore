@@ -3,6 +3,7 @@
 .env.local
 .env.production
 .kis_token.json
+.secrets/
 *.pem
 *.key
 

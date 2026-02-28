@@ -738,18 +738,10 @@ class TradingBot:
                 )
 
             # 모멘텀 순위 로깅 (리밸런싱일/비 리밸런싱일 공통)
-            from src.strategy.etf_rotation import ETFRotationStrategy
+            strategy = self._create_etf_strategy()
 
             lookback_months = config.get("lookback_months", 12)
             lookback_days = lookback_months * 21
-            n_select = config.get("n_select", 2)
-            max_same_sector = config.get("max_same_sector", 1)
-
-            strategy = ETFRotationStrategy(
-                lookback=lookback_days,
-                num_etfs=n_select,
-                max_same_sector=max_same_sector,
-            )
 
             etf_prices = self._fetch_etf_prices(
                 strategy.etf_universe, lookback_days
@@ -762,21 +754,44 @@ class TradingBot:
             strategy.generate_signals(date_str, {"etf_prices": etf_prices})
 
             diag = strategy.last_diagnostics
-            per_ticker = diag.get("per_ticker", {})
-            ok_tickers = {
-                t: info["momentum"]
-                for t, info in per_ticker.items()
-                if info.get("status") == "OK"
-            }
-            if ok_tickers:
+
+            # Enhanced 전략은 composite_scores, 기존 전략은 per_ticker
+            composite_scores = diag.get("composite_scores", {})
+            if composite_scores:
+                # Enhanced: composite momentum scores
                 ranked = sorted(
-                    ok_tickers.items(), key=lambda x: x[1], reverse=True
+                    composite_scores.items(),
+                    key=lambda x: x[1],
+                    reverse=True,
                 )
                 rank_str = ", ".join(
-                    f"{strategy.etf_universe.get(t, t)}={m:+.1%}"
+                    f"{strategy.etf_universe.get(t, t)}={m:+.2f}"
                     for t, m in ranked[:5]
                 )
-                logger.info("ETF 모멘텀 순위: %s", rank_str)
+                regime = diag.get("market_regime", "N/A")
+                logger.info(
+                    "Enhanced ETF 모멘텀 순위: %s (regime=%s)",
+                    rank_str, regime,
+                )
+            else:
+                # 기존: per_ticker momentum
+                per_ticker = diag.get("per_ticker", {})
+                ok_tickers = {
+                    t: info["momentum"]
+                    for t, info in per_ticker.items()
+                    if info.get("status") == "OK"
+                }
+                if ok_tickers:
+                    ranked = sorted(
+                        ok_tickers.items(),
+                        key=lambda x: x[1],
+                        reverse=True,
+                    )
+                    rank_str = ", ".join(
+                        f"{strategy.etf_universe.get(t, t)}={m:+.1%}"
+                        for t, m in ranked[:5]
+                    )
+                    logger.info("ETF 모멘텀 순위: %s", rank_str)
 
         except Exception as e:
             logger.warning("ETF 모멘텀 순위 로깅 실패: %s", e)
@@ -933,6 +948,72 @@ class TradingBot:
                 f"[리밸런싱 실행 오류] {e}", level="CRITICAL"
             )
 
+    def _create_etf_strategy(self):
+        """Feature flag에 따라 적절한 ETF 로테이션 전략을 생성한다.
+
+        enhanced_etf_rotation flag가 ON이면 EnhancedETFRotationStrategy,
+        OFF이면 기존 ETFRotationStrategy를 생성한다.
+        etf_rotation config에서 공통 파라미터(lookback, n_select 등)를 읽고,
+        enhanced_etf_rotation config에서 추가 파라미터를 읽는다.
+
+        Returns:
+            ETF 전략 객체 (ETFRotationStrategy 또는 EnhancedETFRotationStrategy).
+        """
+        config = self.feature_flags.get_config("etf_rotation")
+        lookback_months = config.get("lookback_months", 12)
+        lookback_days = lookback_months * 21
+        n_select = config.get("n_select", 2)
+        max_same_sector = config.get("max_same_sector", 1)
+
+        use_enhanced = self.feature_flags.is_enabled("enhanced_etf_rotation")
+
+        if use_enhanced:
+            from src.strategy.enhanced_etf_rotation import (
+                EnhancedETFRotationStrategy,
+            )
+
+            enh_config = self.feature_flags.get_config("enhanced_etf_rotation")
+
+            strategy = EnhancedETFRotationStrategy(
+                num_etfs=n_select,
+                max_same_sector=max_same_sector,
+                use_vol_weight=enh_config.get("use_vol_weight", True),
+                use_market_filter=enh_config.get("use_market_filter", True),
+                use_trend_filter=enh_config.get("use_trend_filter", True),
+                max_drawdown_filter=(
+                    enh_config.get("max_drawdown_filter", 0.15)
+                    if enh_config.get("use_max_drawdown_filter", True)
+                    else 0.0
+                ),
+                cash_ratio_risk_off=enh_config.get(
+                    "cash_ratio_risk_off", 0.7
+                ),
+                vol_lookback=enh_config.get("vol_lookback", 60),
+                market_ma_period=enh_config.get("market_ma_period", 200),
+                trend_short_ma=enh_config.get("trend_short_ma", 20),
+                trend_long_ma=enh_config.get("trend_long_ma", 60),
+            )
+            logger.info(
+                "Enhanced ETF 전략 생성: num_etfs=%d, "
+                "vol_weight=%s, market_filter=%s, trend_filter=%s, "
+                "cash_ratio_risk_off=%.1f",
+                n_select,
+                enh_config.get("use_vol_weight", True),
+                enh_config.get("use_market_filter", True),
+                enh_config.get("use_trend_filter", True),
+                enh_config.get("cash_ratio_risk_off", 0.7),
+            )
+        else:
+            from src.strategy.etf_rotation import ETFRotationStrategy
+
+            strategy = ETFRotationStrategy(
+                lookback=lookback_days,
+                num_etfs=n_select,
+                max_same_sector=max_same_sector,
+            )
+
+        return strategy
+
     def _generate_etf_signals(self, date_str: str) -> dict[str, float]:
         """ETF 로테이션 시그널을 생성한다.
 
@@ -946,19 +1027,11 @@ class TradingBot:
             return {}
 
         try:
-            from src.strategy.etf_rotation import ETFRotationStrategy
+            strategy = self._create_etf_strategy()
 
             config = self.feature_flags.get_config("etf_rotation")
             lookback_months = config.get("lookback_months", 12)
             lookback_days = lookback_months * 21
-            n_select = config.get("n_select", 2)
-            max_same_sector = config.get("max_same_sector", 1)
-
-            strategy = ETFRotationStrategy(
-                lookback=lookback_days,
-                num_etfs=n_select,
-                max_same_sector=max_same_sector,
-            )
 
             etf_prices = self._fetch_etf_prices(
                 strategy.etf_universe, lookback_days
@@ -979,8 +1052,7 @@ class TradingBot:
     def _get_etf_universe_tickers(self) -> set[str]:
         """ETF 로테이션 유니버스의 ticker 집합을 반환한다."""
         try:
-            from src.strategy.etf_rotation import ETFRotationStrategy
-            strategy = ETFRotationStrategy()
+            strategy = self._create_etf_strategy()
             return set(strategy.etf_universe.keys())
         except Exception:
             return set()
@@ -1848,18 +1920,11 @@ class TradingBot:
 
     def _generate_etf_preview(self) -> list[str]:
         """ETF 로테이션 모멘텀 순위 + 시그널 프리뷰를 생성한다."""
-        from src.strategy.etf_rotation import ETFRotationStrategy
+        strategy = self._create_etf_strategy()
 
         config = self.feature_flags.get_config("etf_rotation")
         lookback_months = config.get("lookback_months", 12)
         lookback_days = lookback_months * 21
-        n_select = config.get("n_select", 2)
-        max_same_sector = config.get("max_same_sector", 1)
-
-        strategy = ETFRotationStrategy(
-            lookback=lookback_days, num_etfs=n_select,
-            max_same_sector=max_same_sector,
-        )
 
         etf_prices = self._fetch_etf_prices(
             strategy.etf_universe, lookback_days
@@ -1877,48 +1942,73 @@ class TradingBot:
         diag = strategy.last_diagnostics
         lines = []
 
-        # lookback 상태 표시
-        lb_used = diag.get("lookback_used", lookback_days)
-        if diag.get("status") == "DEGRADED":
-            lines.append(
-                f"  * lookback: {lb_used}일 "
-                f"({lookback_days}일 데이터 부족으로 하향)"
-            )
+        # Enhanced 전략 여부에 따라 분기
+        is_enhanced = self.feature_flags.is_enabled("enhanced_etf_rotation")
 
-        # 모멘텀 순위 (generate_signals 내부에서 이미 계산됨)
-        per_ticker = diag.get("per_ticker", {})
-        ok_tickers = {
-            t: info["momentum"]
-            for t, info in per_ticker.items()
-            if info.get("status") == "OK"
-        }
-        if ok_tickers:
-            ranked = sorted(ok_tickers.items(), key=lambda x: x[1], reverse=True)
-            lines.append("  모멘텀 순위:")
-            for i, (ticker, mom) in enumerate(ranked, 1):
-                name = strategy.etf_universe.get(ticker, ticker)
-                lines.append(f"    {i}. {name}: {mom:+.1%}")
+        if is_enhanced:
+            # Enhanced: composite scores + market regime
+            regime = diag.get("market_regime", "N/A")
+            lines.append(f"  전략: Enhanced ETF (regime={regime})")
 
-        # 데이터 문제 ETF 표시
-        problem_tickers = [
-            (t, info)
-            for t, info in per_ticker.items()
-            if info.get("status") in ("DATA_MISSING", "DATA_SHORT", "DATA_INVALID")
-        ]
-        if problem_tickers:
-            for ticker, info in problem_tickers:
-                name = strategy.etf_universe.get(ticker, ticker)
-                status = info["status"]
-                avail = info.get("available_days", 0)
-                req = info.get("required_days", lb_used)
-                if status == "DATA_MISSING":
-                    lines.append(f"  * {name}: 데이터 누락")
-                elif status == "DATA_SHORT":
-                    lines.append(
-                        f"  * {name}: 데이터 부족 ({avail}/{req}일)"
-                    )
-                elif status == "DATA_INVALID":
-                    lines.append(f"  * {name}: 데이터 오류")
+            composite_scores = diag.get("composite_scores", {})
+            if composite_scores:
+                ranked = sorted(
+                    composite_scores.items(),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )
+                lines.append("  복합 모멘텀 순위:")
+                for i, (ticker, score) in enumerate(ranked, 1):
+                    name = strategy.etf_universe.get(ticker, ticker)
+                    lines.append(f"    {i}. {name}: {score:+.2f}")
+        else:
+            # 기존: lookback 상태 + per_ticker momentum
+            lb_used = diag.get("lookback_used", lookback_days)
+            if diag.get("status") == "DEGRADED":
+                lines.append(
+                    f"  * lookback: {lb_used}일 "
+                    f"({lookback_days}일 데이터 부족으로 하향)"
+                )
+
+            per_ticker = diag.get("per_ticker", {})
+            ok_tickers = {
+                t: info["momentum"]
+                for t, info in per_ticker.items()
+                if info.get("status") == "OK"
+            }
+            if ok_tickers:
+                ranked = sorted(
+                    ok_tickers.items(),
+                    key=lambda x: x[1],
+                    reverse=True,
+                )
+                lines.append("  모멘텀 순위:")
+                for i, (ticker, mom) in enumerate(ranked, 1):
+                    name = strategy.etf_universe.get(ticker, ticker)
+                    lines.append(f"    {i}. {name}: {mom:+.1%}")
+
+            # 데이터 문제 ETF 표시
+            problem_tickers = [
+                (t, info)
+                for t, info in per_ticker.items()
+                if info.get("status") in (
+                    "DATA_MISSING", "DATA_SHORT", "DATA_INVALID"
+                )
+            ]
+            if problem_tickers:
+                for ticker, info in problem_tickers:
+                    name = strategy.etf_universe.get(ticker, ticker)
+                    status = info["status"]
+                    avail = info.get("available_days", 0)
+                    req = info.get("required_days", lb_used)
+                    if status == "DATA_MISSING":
+                        lines.append(f"  * {name}: 데이터 누락")
+                    elif status == "DATA_SHORT":
+                        lines.append(
+                            f"  * {name}: 데이터 부족 ({avail}/{req}일)"
+                        )
+                    elif status == "DATA_INVALID":
+                        lines.append(f"  * {name}: 데이터 오류")
 
         if signals:
             lines.append("  선정 ETF:")
@@ -2245,14 +2335,7 @@ class TradingBot:
                 from src.strategy.low_vol_quality import LowVolQualityStrategy
                 return LowVolQualityStrategy(num_stocks=10)
             elif name == "etf_rotation":
-                from src.strategy.etf_rotation import ETFRotationStrategy
-                config = self.feature_flags.get_config("etf_rotation")
-                lookback_months = config.get("lookback_months", 12)
-                return ETFRotationStrategy(
-                    lookback=lookback_months * 21,
-                    num_etfs=config.get("n_select", 2),
-                    max_same_sector=config.get("max_same_sector", 1),
-                )
+                return self._create_etf_strategy()
             elif name == "accrual":
                 from src.strategy.accrual import AccrualStrategy
                 return AccrualStrategy(num_stocks=10)
