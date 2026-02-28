@@ -366,6 +366,80 @@ class TestFormatEodNews:
         result = collector.format_eod_news(disclosures=important, holdings=[])
         assert "[기타 주요 공시]" in result
 
+    def test_sentiment_icons_in_output(self, collector, sample_disclosures):
+        """감성 분류 아이콘이 출력에 포함된다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(disclosures=important)
+        # 최소 하나의 감성 아이콘이 포함되어야 함
+        assert any(icon in result for icon in ["[+]", "[-]", "[=]"])
+
+    def test_sentiment_labels_in_output(self, collector, sample_disclosures):
+        """감성 라벨(상승요인/하락요인/중립)이 출력에 포함된다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(disclosures=important)
+        assert any(
+            label in result
+            for label in ["+상승요인", "-하락요인", "~중립"]
+        )
+
+    def test_sentiment_summary_counts(self, collector, sample_disclosures):
+        """감성 요약 통계가 표시된다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(disclosures=important)
+        # "총 N건" 형태의 요약이 포함되어야 함
+        assert "총" in result and "건" in result
+
+    def test_watchlist_section(self, collector, sample_disclosures):
+        """관심종목(watchlist) 공시가 별도 섹션으로 표시된다."""
+        important = collector.filter_important(sample_disclosures)
+        # SK하이닉스(000660)을 관심종목, 삼성전자(005930)을 보유종목으로 설정
+        result = collector.format_eod_news(
+            disclosures=important,
+            holdings=["005930"],
+            watchlist=["000660"],
+        )
+        assert "[보유종목 관련]" in result
+        assert "[관심종목 관련]" in result
+
+    def test_watchlist_excludes_holdings(self, collector, sample_disclosures):
+        """관심종목에서 보유종목은 제외된다 (중복 방지)."""
+        important = collector.filter_important(sample_disclosures)
+        # 삼성전자를 보유종목과 관심종목 모두에 넣으면, 보유종목에만 표시
+        result = collector.format_eod_news(
+            disclosures=important,
+            holdings=["005930"],
+            watchlist=["005930", "000660"],
+        )
+        # 삼성전자는 보유종목 섹션에, 관심종목 섹션에는 SK하이닉스만
+        assert "[보유]" in result
+        assert "[관심]" in result
+
+    def test_holding_tag_shown(self, collector, sample_disclosures):
+        """보유종목 공시에 [보유] 태그가 표시된다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(
+            disclosures=important, holdings=["005930"]
+        )
+        assert "[보유]" in result
+
+    def test_watchlist_tag_shown(self, collector, sample_disclosures):
+        """관심종목 공시에 [관심] 태그가 표시된다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(
+            disclosures=important, watchlist=["000660"]
+        )
+        assert "[관심]" in result
+
+    def test_empty_holdings_and_watchlist(self, collector, sample_disclosures):
+        """보유종목과 관심종목 모두 빈 경우에도 기타 공시가 정상 표시된다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(
+            disclosures=important, holdings=[], watchlist=[]
+        )
+        assert "[기타 주요 공시]" in result
+        assert "[보유종목 관련]" not in result
+        assert "[관심종목 관련]" not in result
+
 
 # ===================================================================
 # _categorize() 테스트
@@ -405,3 +479,161 @@ class TestCategorize:
             NewsCollector._categorize("임원ㆍ주요주주특정증권등소유상황보고서")
             == "major_shareholder"
         )
+
+
+# ===================================================================
+# classify_sentiment() 테스트
+# ===================================================================
+
+
+class TestClassifySentiment:
+    """classify_sentiment() 감성 분류 테스트."""
+
+    def test_positive_buyback(self):
+        """자사주 취득은 긍정으로 분류된다."""
+        assert NewsCollector.classify_sentiment("자기주식취득결정") == "positive"
+
+    def test_positive_dividend(self):
+        """배당 공시는 긍정으로 분류된다."""
+        assert NewsCollector.classify_sentiment("현금ㆍ현물배당결정") == "positive"
+
+    def test_negative_rights_issue(self):
+        """유상증자는 부정으로 분류된다."""
+        assert NewsCollector.classify_sentiment("유상증자결정") == "negative"
+
+    def test_negative_delisting(self):
+        """상장폐지는 부정으로 분류된다."""
+        assert NewsCollector.classify_sentiment("상장폐지결정") == "negative"
+
+    def test_negative_convertible_bond(self):
+        """전환사채는 부정으로 분류된다."""
+        assert NewsCollector.classify_sentiment("전환사채발행결정") == "negative"
+
+    def test_neutral_report(self):
+        """사업보고서는 중립으로 분류된다."""
+        assert NewsCollector.classify_sentiment("사업보고서") == "neutral"
+
+    def test_neutral_shareholder(self):
+        """임원 변동 공시는 중립으로 분류된다."""
+        assert NewsCollector.classify_sentiment("임원ㆍ주요주주변동") == "neutral"
+
+    def test_category_fallback_negative(self):
+        """키워드 미매칭 시 카테고리 기본값으로 폴백한다 (부정)."""
+        result = NewsCollector.classify_sentiment(
+            "알 수 없는 공시 제목", category="rights_issue"
+        )
+        assert result == "negative"
+
+    def test_category_fallback_positive(self):
+        """키워드 미매칭 시 카테고리 기본값으로 폴백한다 (긍정)."""
+        result = NewsCollector.classify_sentiment(
+            "알 수 없는 공시 제목", category="buyback"
+        )
+        assert result == "positive"
+
+    def test_no_match_returns_neutral(self):
+        """키워드도 카테고리도 없으면 중립을 반환한다."""
+        assert NewsCollector.classify_sentiment("일반 보고서") == "neutral"
+
+    def test_negative_priority_over_positive(self):
+        """부정 키워드가 긍정보다 우선한다 (보수적 판단)."""
+        # "유상증자"(부정)와 "배당"(긍정) 모두 포함된 경우
+        result = NewsCollector.classify_sentiment("유상증자 후 배당 결정")
+        assert result == "negative"
+
+
+# ===================================================================
+# sentiment_icon() / sentiment_label() 테스트
+# ===================================================================
+
+
+class TestSentimentHelpers:
+    """sentiment_icon()과 sentiment_label() 테스트."""
+
+    def test_positive_icon(self):
+        assert NewsCollector.sentiment_icon("positive") == "[+]"
+
+    def test_negative_icon(self):
+        assert NewsCollector.sentiment_icon("negative") == "[-]"
+
+    def test_neutral_icon(self):
+        assert NewsCollector.sentiment_icon("neutral") == "[=]"
+
+    def test_unknown_icon_default(self):
+        assert NewsCollector.sentiment_icon("unknown") == "[=]"
+
+    def test_positive_label(self):
+        assert NewsCollector.sentiment_label("positive") == "+상승요인"
+
+    def test_negative_label(self):
+        assert NewsCollector.sentiment_label("negative") == "-하락요인"
+
+    def test_neutral_label(self):
+        assert NewsCollector.sentiment_label("neutral") == "~중립"
+
+    def test_unknown_label_default(self):
+        assert NewsCollector.sentiment_label("unknown") == "~중립"
+
+
+# ===================================================================
+# _format_disc_with_sentiment() 테스트
+# ===================================================================
+
+
+class TestFormatDiscWithSentiment:
+    """_format_disc_with_sentiment() 개별 공시 포매팅 테스트."""
+
+    def test_positive_disc_format(self, collector):
+        """긍정 공시에 [+] 아이콘과 +상승요인 라벨이 포함된다."""
+        disc = {
+            "corp_name": "SK하이닉스",
+            "report_nm": "자기주식취득결정",
+            "category": "buyback",
+        }
+        result = collector._format_disc_with_sentiment(disc)
+        assert "[+]" in result
+        assert "+상승요인" in result
+        assert "SK하이닉스" in result
+
+    def test_negative_disc_format(self, collector):
+        """부정 공시에 [-] 아이콘과 -하락요인 라벨이 포함된다."""
+        disc = {
+            "corp_name": "테스트기업",
+            "report_nm": "유상증자결정",
+            "category": "rights_issue",
+        }
+        result = collector._format_disc_with_sentiment(disc)
+        assert "[-]" in result
+        assert "-하락요인" in result
+
+    def test_neutral_disc_format(self, collector):
+        """중립 공시에 [=] 아이콘과 ~중립 라벨이 포함된다."""
+        disc = {
+            "corp_name": "삼성전자",
+            "report_nm": "사업보고서",
+            "category": "earnings",
+        }
+        result = collector._format_disc_with_sentiment(disc)
+        assert "[=]" in result
+        assert "~중립" in result
+
+    def test_tag_included(self, collector):
+        """tag 파라미터가 출력에 포함된다."""
+        disc = {
+            "corp_name": "삼성전자",
+            "report_nm": "자기주식취득결정",
+            "category": "buyback",
+        }
+        result = collector._format_disc_with_sentiment(disc, tag="보유")
+        assert "[보유]" in result
+
+    def test_no_tag(self, collector):
+        """tag가 None이면 태그가 생략된다."""
+        disc = {
+            "corp_name": "삼성전자",
+            "report_nm": "자기주식취득결정",
+            "category": "buyback",
+        }
+        result = collector._format_disc_with_sentiment(disc, tag=None)
+        assert "[보유]" not in result
+        assert "[관심]" not in result

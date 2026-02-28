@@ -64,31 +64,29 @@ class RebalanceExecutor:
 
         logger.info("RebalanceExecutor 초기화 완료")
 
-    def execute_rebalance(
-        self,
-        target_weights: dict[str, float],
-        pool: str | None = None,
-    ) -> dict:
-        """리밸런싱을 실행한다.
+    # ──────────────────────────────────────────────────────────
+    # 공통 주문 실행
+    # ──────────────────────────────────────────────────────────
 
-        1. 현재 포지션 조회
-        2. 목표 vs 현재 차이 계산
-        3. risk_guard 체크
-        4. 매도 먼저 실행
-        5. 매수 실행
-        6. 결과 리포트 반환
+    def _execute_order_batch(
+        self,
+        sell_orders: list[dict],
+        buy_orders: list[dict],
+    ) -> dict:
+        """매도/매수 주문 배치를 실행한다.
+
+        execute_rebalance와 execute_integrated_rebalance에서 공통 사용.
 
         Args:
-            target_weights: {ticker: weight} 형태의 목표 비중.
-                weight는 0~1 사이 비율.
-            pool: 리밸런싱 대상 풀 ("long_term", "etf_rotation" 등).
-                None이면 "long_term"으로 동작.
+            sell_orders: 매도 주문 리스트.
+            buy_orders: 매수 주문 리스트.
 
         Returns:
             실행 결과 딕셔너리.
         """
         start_time = datetime.now(KST)
-        result = {
+        mode_tag = self.kis_client.mode_tag
+        result: dict = {
             "success": False,
             "timestamp": start_time.isoformat(),
             "sells": [],
@@ -98,14 +96,6 @@ class RebalanceExecutor:
             "errors": [],
             "skipped": [],
         }
-
-        mode_tag = self.kis_client.mode_tag
-        logger.info(
-            "=" * 60 + "\n%s 리밸런싱 실행 시작: %d개 종목, 시각=%s",
-            mode_tag,
-            len(target_weights),
-            start_time.strftime("%Y-%m-%d %H:%M:%S"),
-        )
 
         # 0. KIS 클라이언트 설정 확인
         if not self.kis_client.is_configured():
@@ -126,47 +116,14 @@ class RebalanceExecutor:
                 result["errors"].append(msg)
                 return result
 
-        # 1. 리스크 검증 (전체 리밸런싱)
-        risk_passed, risk_warnings = self.risk_guard.check_rebalance(target_weights)
-        if not risk_passed:
-            msg = f"리스크 검증 실패: {risk_warnings}"
-            logger.error(msg)
-            result["errors"].append(msg)
-            return result
-
-        if risk_warnings:
-            for w in risk_warnings:
-                logger.warning("리스크 경고: %s", w)
-
-        # 2. 리밸런싱 주문 계산 (allocator가 있으면 풀 비중으로 스케일링)
-        effective_weights = target_weights
-        if self.allocator is not None:
-            if pool == "etf_rotation":
-                effective_weights = self.allocator.filter_etf_rotation_weights(
-                    target_weights
-                )
-            else:
-                effective_weights = self.allocator.filter_long_term_weights(
-                    target_weights
-                )
-            logger.info(
-                "allocator 적용 (pool=%s): 원래 비중 합=%.4f -> 스케일 비중 합=%.4f",
-                pool or "long_term",
-                sum(target_weights.values()),
-                sum(effective_weights.values()),
-            )
-
-        sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
-            effective_weights, allocator=self.allocator, pool=pool
-        )
-
         if not sell_orders and not buy_orders:
             logger.info("리밸런싱 필요 없음: 현재 포지션이 목표와 동일합니다.")
             result["success"] = True
             return result
 
-        # 3. 회전율 검증
         portfolio_value = self.position_manager.get_portfolio_value()
+
+        # 회전율 검증
         turnover_passed, turnover_reason = self.risk_guard.check_turnover(
             sell_orders, buy_orders, portfolio_value
         )
@@ -175,10 +132,11 @@ class RebalanceExecutor:
             result["errors"].append(turnover_reason)
             return result
 
-        # 4. 개별 주문 리스크 검증 및 매도 실행
-        logger.info("매도 주문 %d건 실행 시작", len(sell_orders))
+        # 매도 실행
+        logger.info(
+            "%s 매도 주문 %d건 실행 시작", mode_tag, len(sell_orders)
+        )
         for order_spec in sell_orders:
-            # 개별 주문 리스크 검증
             order_passed, order_reason = self.risk_guard.check_order(
                 order_spec, portfolio_value
             )
@@ -205,16 +163,17 @@ class RebalanceExecutor:
 
             time.sleep(self.ORDER_DELAY)
 
-        # 5. 매도 체결 대기 (간략 대기)
+        # 매도 체결 대기
         if sell_orders:
             logger.info("매도 체결 대기 중 (3초)...")
             time.sleep(3.0)
             self.order_manager.sync_order_status()
 
-        # 6. 매수 실행
-        logger.info("매수 주문 %d건 실행 시작", len(buy_orders))
+        # 매수 실행
+        logger.info(
+            "%s 매수 주문 %d건 실행 시작", mode_tag, len(buy_orders)
+        )
         for order_spec in buy_orders:
-            # 개별 주문 리스크 검증
             order_passed, order_reason = self.risk_guard.check_order(
                 order_spec, portfolio_value
             )
@@ -241,11 +200,11 @@ class RebalanceExecutor:
 
             time.sleep(self.ORDER_DELAY)
 
-        # 7. 최종 상태 동기화
+        # 최종 상태 동기화
         time.sleep(2.0)
         self.order_manager.sync_order_status()
 
-        # 8. 결과 집계
+        # 결과 집계
         result["total_sell_amount"] = sum(
             o.get("amount", 0) for o in sell_orders
         )
@@ -282,6 +241,102 @@ class RebalanceExecutor:
 
         return result
 
+    # ──────────────────────────────────────────────────────────
+    # 풀별 리밸런싱 (기존 호환)
+    # ──────────────────────────────────────────────────────────
+
+    def execute_rebalance(
+        self,
+        target_weights: dict[str, float],
+        pool: str | None = None,
+    ) -> dict:
+        """리밸런싱을 실행한다.
+
+        1. 현재 포지션 조회
+        2. 목표 vs 현재 차이 계산
+        3. risk_guard 체크
+        4. 매도 먼저 실행
+        5. 매수 실행
+        6. 결과 리포트 반환
+
+        Args:
+            target_weights: {ticker: weight} 형태의 목표 비중.
+                weight는 0~1 사이 비율.
+            pool: 리밸런싱 대상 풀 ("long_term", "etf_rotation" 등).
+                None이면 "long_term"으로 동작.
+
+        Returns:
+            실행 결과 딕셔너리.
+        """
+        logger.info(
+            "=" * 60 + "\n%s 리밸런싱 실행 시작: %d개 종목",
+            self.kis_client.mode_tag,
+            len(target_weights),
+        )
+
+        # 0. 실전 모드 안전장치 (리스크 검증 전에 확인)
+        if not self.kis_client.is_paper:
+            confirmed = os.getenv("KIS_LIVE_CONFIRMED", "false").lower()
+            if confirmed not in ("true", "1", "yes"):
+                msg = (
+                    "실전 모드 리밸런싱이 차단되었습니다. "
+                    "KIS_LIVE_CONFIRMED=true를 .env에 설정하세요."
+                )
+                logger.error(msg)
+                return {
+                    "success": False,
+                    "errors": [msg],
+                    "sells": [],
+                    "buys": [],
+                    "total_sell_amount": 0,
+                    "total_buy_amount": 0,
+                    "skipped": [],
+                }
+
+        # 1. 리스크 검증
+        risk_passed, risk_warnings = self.risk_guard.check_rebalance(target_weights)
+        if not risk_passed:
+            msg = f"리스크 검증 실패: {risk_warnings}"
+            logger.error(msg)
+            return {
+                "success": False,
+                "errors": [msg],
+                "sells": [],
+                "buys": [],
+                "total_sell_amount": 0,
+                "total_buy_amount": 0,
+                "skipped": [],
+            }
+
+        if risk_warnings:
+            for w in risk_warnings:
+                logger.warning("리스크 경고: %s", w)
+
+        # 2. 리밸런싱 주문 계산 (allocator가 있으면 풀 비중으로 스케일링)
+        effective_weights = target_weights
+        if self.allocator is not None:
+            if pool == "etf_rotation":
+                effective_weights = self.allocator.filter_etf_rotation_weights(
+                    target_weights
+                )
+            else:
+                effective_weights = self.allocator.filter_long_term_weights(
+                    target_weights
+                )
+            logger.info(
+                "allocator 적용 (pool=%s): 원래 비중 합=%.4f -> 스케일 비중 합=%.4f",
+                pool or "long_term",
+                sum(target_weights.values()),
+                sum(effective_weights.values()),
+            )
+
+        sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
+            effective_weights, allocator=self.allocator, pool=pool
+        )
+
+        # 3. 주문 배치 실행
+        return self._execute_order_batch(sell_orders, buy_orders)
+
     def dry_run(
         self,
         target_weights: dict[str, float],
@@ -297,20 +352,7 @@ class RebalanceExecutor:
             pool: 리밸런싱 대상 풀. None이면 "long_term".
 
         Returns:
-            시뮬레이션 결과 딕셔너리:
-            {
-                "is_dry_run": True,
-                "portfolio_value": int,
-                "current_positions": dict,
-                "target_weights": dict,
-                "sell_orders": [dict, ...],
-                "buy_orders": [dict, ...],
-                "total_sell_amount": int,
-                "total_buy_amount": int,
-                "net_cash_flow": int,
-                "risk_check": {"passed": bool, "warnings": list},
-                "turnover_check": {"passed": bool, "reason": str},
-            }
+            시뮬레이션 결과 딕셔너리.
         """
         logger.info(
             "리밸런싱 DRY RUN 시작: %d개 종목", len(target_weights)
@@ -398,6 +440,208 @@ class RebalanceExecutor:
             f"{result['total_buy_amount']:,}",
             "통과" if risk_passed else "실패",
             "통과" if turnover_passed else "실패",
+        )
+
+        return result
+
+    # ──────────────────────────────────────────────────────────
+    # 통합 리밸런싱 (장기 + ETF 병합)
+    # ──────────────────────────────────────────────────────────
+
+    def execute_integrated_rebalance(
+        self,
+        pool_signals: dict[str, dict[str, float]],
+    ) -> dict:
+        """통합 리밸런싱을 실행한다.
+
+        모든 풀의 시그널을 병합하여 단일 포트폴리오 목표를 생성하고,
+        전체 포트폴리오에 대해 한 번의 diff로 매매 주문을 실행한다.
+
+        Args:
+            pool_signals: {
+                "long_term": {ticker: weight, ...},
+                "etf_rotation": {ticker: weight, ...},
+            }
+            각 풀의 weight 합은 ~1.0 (100% 기준).
+
+        Returns:
+            실행 결과 딕셔너리 (execute_rebalance와 동일 구조).
+        """
+        if self.allocator is None:
+            logger.error("통합 리밸런싱에는 allocator가 필요합니다.")
+            return {
+                "success": False,
+                "errors": ["allocator 미설정"],
+                "sells": [],
+                "buys": [],
+                "total_sell_amount": 0,
+                "total_buy_amount": 0,
+                "skipped": [],
+            }
+
+        # 1. 풀별 시그널 병합
+        merged_weights = self.allocator.merge_pool_targets(pool_signals)
+
+        if not merged_weights:
+            logger.warning("병합된 목표 비중이 없습니다.")
+            return {
+                "success": True,
+                "errors": [],
+                "sells": [],
+                "buys": [],
+                "total_sell_amount": 0,
+                "total_buy_amount": 0,
+                "skipped": [],
+            }
+
+        logger.info(
+            "=" * 60 + "\n%s 통합 리밸런싱 시작: %d개 풀, %d개 종목, 비중합=%.4f",
+            self.kis_client.mode_tag,
+            len(pool_signals),
+            len(merged_weights),
+            sum(merged_weights.values()),
+        )
+
+        # 2. 병합 비중에 대해 risk_guard 검증
+        risk_passed, risk_warnings = self.risk_guard.check_rebalance(merged_weights)
+        if not risk_passed:
+            msg = f"리스크 검증 실패: {risk_warnings}"
+            logger.error(msg)
+            return {
+                "success": False,
+                "errors": [msg],
+                "sells": [],
+                "buys": [],
+                "total_sell_amount": 0,
+                "total_buy_amount": 0,
+                "skipped": [],
+            }
+
+        if risk_warnings:
+            for w in risk_warnings:
+                logger.warning("리스크 경고: %s", w)
+
+        # 3. 리밸런싱 주문 계산 (integrated=True로 풀 제외 바이패스)
+        sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
+            merged_weights, allocator=self.allocator, pool=None, integrated=True
+        )
+
+        # 4. 주문 배치 실행
+        result = self._execute_order_batch(sell_orders, buy_orders)
+
+        # 5. 실행 성공 시 자동 태깅
+        if result.get("success"):
+            try:
+                self.allocator.auto_tag_from_pool_signals(pool_signals)
+            except Exception as e:
+                logger.warning("자동 태깅 실패: %s", e)
+
+        return result
+
+    def dry_run_integrated(
+        self,
+        pool_signals: dict[str, dict[str, float]],
+    ) -> dict:
+        """통합 리밸런싱 시뮬레이션 (실제 주문 없음).
+
+        모든 풀의 시그널을 병합하여 단일 diff를 계산하고,
+        예상 매매 내역과 풀별 분해 정보를 반환한다.
+
+        Args:
+            pool_signals: 풀별 시그널 딕셔너리.
+
+        Returns:
+            시뮬레이션 결과 (dry_run과 동일 구조 + pool_breakdown 추가).
+        """
+        result: dict = {
+            "is_dry_run": True,
+            "integrated": True,
+            "portfolio_value": 0,
+            "current_positions": {},
+            "merged_weights": {},
+            "pool_breakdown": {},
+            "sell_orders": [],
+            "buy_orders": [],
+            "total_sell_amount": 0,
+            "total_buy_amount": 0,
+            "net_cash_flow": 0,
+            "risk_check": {"passed": True, "warnings": []},
+            "turnover_check": {"passed": True, "reason": ""},
+        }
+
+        if self.allocator is None:
+            result["errors"] = ["allocator 미설정"]
+            return result
+
+        merged_weights = self.allocator.merge_pool_targets(pool_signals)
+        result["merged_weights"] = merged_weights
+
+        # 풀별 분해 정보
+        for pool_name, signals in pool_signals.items():
+            pct = self.allocator.get_pool_pct(pool_name)
+            scaled = {t: round(w * pct, 6) for t, w in signals.items()}
+            result["pool_breakdown"][pool_name] = {
+                "original_count": len(signals),
+                "scaled_weights": scaled,
+                "total_weight": round(sum(scaled.values()), 4),
+            }
+
+        logger.info(
+            "통합 DRY RUN 시작: %d개 풀, %d개 종목",
+            len(pool_signals),
+            len(merged_weights),
+        )
+
+        if not merged_weights:
+            return result
+
+        # 포트폴리오 및 포지션
+        current_positions = self.position_manager.get_current_positions()
+        portfolio_value = self.position_manager.get_portfolio_value()
+        result["current_positions"] = current_positions
+        result["portfolio_value"] = portfolio_value
+
+        if portfolio_value <= 0:
+            logger.warning("통합 DRY RUN: 포트폴리오 가치가 0원입니다.")
+            return result
+
+        # 리스크 검증 (병합 비중 기준)
+        risk_passed, risk_warnings = self.risk_guard.check_rebalance(merged_weights)
+        result["risk_check"] = {
+            "passed": risk_passed,
+            "warnings": risk_warnings,
+        }
+
+        # 주문 계산 (integrated=True)
+        sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
+            merged_weights, allocator=self.allocator, pool=None, integrated=True
+        )
+
+        result["sell_orders"] = sell_orders
+        result["buy_orders"] = buy_orders
+        result["total_sell_amount"] = sum(o.get("amount", 0) for o in sell_orders)
+        result["total_buy_amount"] = sum(o.get("amount", 0) for o in buy_orders)
+        result["net_cash_flow"] = (
+            result["total_sell_amount"] - result["total_buy_amount"]
+        )
+
+        # 회전율 검증
+        turnover_passed, turnover_reason = self.risk_guard.check_turnover(
+            sell_orders, buy_orders, portfolio_value
+        )
+        result["turnover_check"] = {
+            "passed": turnover_passed,
+            "reason": turnover_reason,
+        }
+
+        logger.info(
+            "통합 DRY RUN 결과: "
+            "포트폴리오=%s원, 매도=%d건 (%s원), 매수=%d건 (%s원)",
+            f"{portfolio_value:,}",
+            len(sell_orders),
+            f"{result['total_sell_amount']:,}",
+            len(buy_orders),
+            f"{result['total_buy_amount']:,}",
         )
 
         return result
