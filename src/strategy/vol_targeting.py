@@ -66,7 +66,7 @@ class VolTargetingOverlay:
 
         if self.use_downside_only:
             downside = recent[recent < 0]
-            if len(downside) < 3:
+            if len(downside) < 10:
                 return self.target_vol
             vol = downside.std() * np.sqrt(252)
         else:

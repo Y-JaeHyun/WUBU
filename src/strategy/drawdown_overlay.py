@@ -46,10 +46,26 @@ class DrawdownOverlay:
         if thresholds is None:
             thresholds = [(-0.10, 0.75), (-0.15, 0.50), (-0.20, 0.25)]
 
+        # M11: threshold 검증 — 음수 + exposure [0,1] + 단조성
+        for dd_pct, exp_ratio in thresholds:
+            if dd_pct >= 0:
+                raise ValueError(
+                    f"drawdown threshold는 음수여야 합니다: {dd_pct}"
+                )
+            if not (0.0 <= exp_ratio <= 1.0):
+                raise ValueError(
+                    f"exposure_ratio는 0~1 범위여야 합니다: {exp_ratio}"
+                )
+        sorted_thresholds = sorted(thresholds, key=lambda t: t[0])
+        for i in range(len(sorted_thresholds) - 1):
+            if sorted_thresholds[i][1] >= sorted_thresholds[i + 1][1]:
+                raise ValueError(
+                    "thresholds의 exposure는 drawdown이 완화될수록 증가해야 합니다: "
+                    f"{sorted_thresholds}"
+                )
+
         # drawdown_pct 기준 내림차순 정렬 (가장 작은 = 가장 심한 낙폭 먼저)
-        self.thresholds: List[Tuple[float, float]] = sorted(
-            thresholds, key=lambda t: t[0]
-        )
+        self.thresholds: List[Tuple[float, float]] = sorted_thresholds
         self.recovery_buffer = recovery_buffer
 
         # 내부 상태

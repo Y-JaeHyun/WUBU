@@ -236,7 +236,7 @@ class TestHoldingBonusEffect:
         strategy = ThreeFactorStrategy(
             num_stocks=num_stocks,
             turnover_buffer=5,
-            holding_bonus=100.0,  # 매우 큰 보너스
+            holding_bonus=2.0,  # 최대 허용 보너스
         )
         strategy.update_holdings({marginal_ticker})
         signals = strategy.generate_signals("20240102", data)

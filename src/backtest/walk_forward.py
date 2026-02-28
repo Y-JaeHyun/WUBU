@@ -158,6 +158,7 @@ class WalkForwardBacktest:
         current_capital = self.initial_capital
         self._window_results = []
         self._window_histories = []
+        self._failed_windows = 0
 
         for i, window in enumerate(self._windows):
             logger.info(
@@ -176,6 +177,7 @@ class WalkForwardBacktest:
                 logger.error(
                     f"[윈도우 {i + 1}] 전략 생성 실패: {e}. 이 윈도우를 건너뜁니다."
                 )
+                self._failed_windows += 1
                 continue
 
             # 2. 검증 구간에서 백테스트 실행
@@ -199,6 +201,7 @@ class WalkForwardBacktest:
                 logger.error(
                     f"[윈도우 {i + 1}] 백테스트 실행 실패: {e}. 이 윈도우를 건너뜁니다."
                 )
+                self._failed_windows += 1
                 continue
 
             # 3. 결과 수집
@@ -209,6 +212,7 @@ class WalkForwardBacktest:
                 logger.error(
                     f"[윈도우 {i + 1}] 결과 수집 실패: {e}. 이 윈도우를 건너뜁니다."
                 )
+                self._failed_windows += 1
                 continue
 
             result["window_index"] = i + 1
@@ -254,6 +258,9 @@ class WalkForwardBacktest:
                 "Walk-Forward 백테스트가 아직 실행되지 않았습니다. run()을 먼저 호출하세요."
             )
 
+        total_windows = len(self._windows)
+        failed_windows = getattr(self, "_failed_windows", 0)
+
         if not self._window_results:
             return {
                 "sharpe_ratio": 0.0,
@@ -261,6 +268,8 @@ class WalkForwardBacktest:
                 "mdd": 0.0,
                 "total_return": 0.0,
                 "num_windows": 0,
+                "total_windows": total_windows,
+                "failed_windows": failed_windows,
                 "window_results": [],
             }
 
@@ -311,6 +320,8 @@ class WalkForwardBacktest:
             "mdd": round(float(mdd), 2),
             "total_return": round(float(total_return), 2),
             "num_windows": len(self._window_results),
+            "total_windows": total_windows,
+            "failed_windows": failed_windows,
             "window_results": self._window_results,
         }
 

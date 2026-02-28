@@ -83,8 +83,14 @@ class ThreeFactorStrategy(Strategy):
         self.sector_neutral = sector_neutral
         self.max_sector_pct = max_sector_pct
         self.turnover_buffer = turnover_buffer
-        self.holding_bonus = holding_bonus
         self.regime_model = regime_model
+
+        # M8: holding_bonus 범위 검증
+        if not (0 <= holding_bonus <= 2.0):
+            raise ValueError(
+                f"holding_bonus는 0~2.0 범위여야 합니다: {holding_bonus}"
+            )
+        self.holding_bonus = holding_bonus
 
         # Turnover 감소용 보유 종목 추적
         self._current_holdings: set[str] = set()
@@ -384,6 +390,10 @@ class ThreeFactorStrategy(Strategy):
                     for factor_name in weights:
                         if factor_name in regime_weights:
                             weights[factor_name] = regime_weights[factor_name]
+                    # M7: 레짐 가중치 부분 덮어쓰기 후 재정규화
+                    total = sum(weights.values())
+                    if total > 0:
+                        weights = {k: v / total for k, v in weights.items()}
                     logger.info(f"레짐 가중치 적용 ({date}): {weights}")
             except Exception as e:
                 logger.warning(f"레짐 모델 실패 ({date}): {e}. 정적 가중치 사용.")
@@ -447,6 +457,14 @@ class ThreeFactorStrategy(Strategy):
                     if rank_position < exit_threshold:
                         selected.add(ticker)
 
+            # C7: num_stocks 초과 시 순위 낮은 것부터 제거
+            if len(selected) > self.num_stocks:
+                ranked_selected = [
+                    (t, list(ranked.index).index(t)) for t in selected
+                ]
+                ranked_selected.sort(key=lambda x: x[1])
+                selected = set(t for t, _ in ranked_selected[:self.num_stocks])
+
             # 나머지 슬롯은 상위 종목으로 채움
             for ticker in ranked.index:
                 if len(selected) >= self.num_stocks:
@@ -459,6 +477,27 @@ class ThreeFactorStrategy(Strategy):
             # 기본: 상위 N개 선정 (업종/계열사 집중도 제한 적용)
             ranked = combined.sort_values(ascending=False)
             top = self._apply_concentration_filter(ranked, fundamentals, self.num_stocks)
+
+        if top.empty:
+            return {}
+
+        # C5/C6: turnover_buffer/sector_neutral 경로에서도 집중도 필터 적용
+        # (else 경로는 이미 _apply_concentration_filter 호출 완료이므로 스킵)
+        needs_concentration = (
+            self.sector_neutral or
+            (self.turnover_buffer > 0 and self._current_holdings)
+        )
+        has_limits = (
+            self.max_group_weight > 0 or self.max_stocks_per_conglomerate > 0
+        )
+        if needs_concentration and has_limits:
+            # 선정된 종목을 우선 배치 + 나머지 후보를 뒤에 붙여서 필터링
+            remaining = combined.drop(top.index, errors="ignore")
+            remaining_sorted = remaining.sort_values(ascending=False)
+            prioritized = pd.concat([top.sort_values(ascending=False), remaining_sorted])
+            top = self._apply_concentration_filter(
+                prioritized, fundamentals, self.num_stocks
+            )
 
         if top.empty:
             return {}

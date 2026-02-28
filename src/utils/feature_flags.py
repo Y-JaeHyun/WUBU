@@ -180,7 +180,7 @@ class FeatureFlags:
             },
         },
         "enhanced_etf_rotation": {
-            "enabled": True,
+            "enabled": False,
             "description": "Enhanced ETF 로테이션 (복합모멘텀+레짐필터+추세필터)",
             "config": {
                 "cash_ratio_risk_off": 0.7,

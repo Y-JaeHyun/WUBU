@@ -85,6 +85,7 @@ class Backtest:
         vol_targeting: Optional["VolTargetingOverlay"] = None,
         min_rebalance_threshold: float = 0.0,
         lookback_days: int = 400,
+        force_rebalance_every: int = 4,
     ):
         self.strategy = strategy
         self.start_date = start_date.replace("-", "")
@@ -98,6 +99,7 @@ class Backtest:
         self.vol_targeting = vol_targeting
         self.min_rebalance_threshold = min_rebalance_threshold
         self.lookback_days = lookback_days
+        self.force_rebalance_every = force_rebalance_every
 
         # 가격 데이터 수집 시작일: start_date에서 lookback_days만큼 이전
         # 전략이 모멘텀 스코어, 상장기간 필터 등에 충분한 과거 데이터를 사용할 수 있도록 함
@@ -108,6 +110,7 @@ class Backtest:
         self._portfolio_history: list[dict] = []
         self._trades: list[dict] = []
         self._rebalance_dates: list[str] = []
+        self._rebalance_count: int = 0
         self._is_run = False
 
     def _get_rebalance_dates(self) -> list[str]:
@@ -142,6 +145,31 @@ class Backtest:
         """시작일~종료일 사이의 영업일 리스트."""
         dates = pd.date_range(start=self.start_date, end=self.end_date, freq="B")
         return [d.strftime("%Y%m%d") for d in dates]
+
+    def _calc_portfolio_state(
+        self,
+        holdings: dict[str, int],
+        price_cache: dict[str, pd.DataFrame],
+        cash: float,
+        date: str,
+    ) -> tuple[float, dict[str, float]]:
+        """현재 포트폴리오 가치와 종목별 비중을 계산한다."""
+        portfolio_value = cash
+        for ticker, qty in holdings.items():
+            if ticker in price_cache and not price_cache[ticker].empty:
+                price = self._get_price_on_date(price_cache[ticker], date)
+                if price is not None:
+                    portfolio_value += qty * price
+
+        current_weights: dict[str, float] = {}
+        if portfolio_value > 0:
+            for ticker, qty in holdings.items():
+                if ticker in price_cache and not price_cache[ticker].empty:
+                    price = self._get_price_on_date(price_cache[ticker], date)
+                    if price is not None:
+                        current_weights[ticker] = qty * price / portfolio_value
+
+        return portfolio_value, current_weights
 
     def _fetch_price(self, ticker: str) -> pd.DataFrame:
         """종목의 전체 기간 가격 데이터를 가져온다.
@@ -271,23 +299,34 @@ class Backtest:
                     logger.error(f"시그널 생성 실패 ({date}): {e}")
                     signals = {}
 
-                # 마켓 타이밍 오버레이 적용
+                # C4: 마켓 타이밍 오버레이 적용 (전략 내부 MT가 있으면 스킵)
+                strategy_has_mt = (
+                    hasattr(self.strategy, "market_timing")
+                    and self.strategy.market_timing is not None
+                )
                 if signals and self.overlay is not None and not index_prices.empty:
-                    try:
-                        # 현재 날짜까지의 지수 데이터 슬라이싱
-                        target_date = pd.Timestamp(date)
-                        available_prices = index_prices[index_prices.index <= target_date]
-
-                        if not available_prices.empty:
-                            if self.overlay.switch_mode == "gradual":
-                                signals = self.overlay.apply_overlay_gradual(
-                                    signals, available_prices
-                                )
-                            else:
-                                signal = self.overlay.get_signal(available_prices)
-                                signals = self.overlay.apply_overlay(signals, signal)
-                    except Exception as e:
-                        logger.warning(f"오버레이 적용 실패 ({date}): {e}")
+                    if strategy_has_mt:
+                        logger.info(
+                            f"전략 내부 MarketTiming 감지 → 엔진 overlay 스킵 ({date})"
+                        )
+                    else:
+                        try:
+                            target_date = pd.Timestamp(date)
+                            available_prices = index_prices[
+                                index_prices.index <= target_date
+                            ]
+                            if not available_prices.empty:
+                                if self.overlay.switch_mode == "gradual":
+                                    signals = self.overlay.apply_overlay_gradual(
+                                        signals, available_prices
+                                    )
+                                else:
+                                    signal = self.overlay.get_signal(available_prices)
+                                    signals = self.overlay.apply_overlay(
+                                        signals, signal
+                                    )
+                        except Exception as e:
+                            logger.warning(f"오버레이 적용 실패 ({date}): {e}")
 
                 # 드로다운 오버레이 적용
                 if signals and self.drawdown_overlay is not None:
@@ -315,45 +354,61 @@ class Backtest:
                                 ),
                             )
                             signals = self.vol_targeting.apply(signals, pv_series)
+                        # else: 첫 리밸런싱에는 변동성 데이터 없으므로
+                        # 기본 exposure(1.0) 유지 — 의도적 스킵 (M6)
                     except Exception as e:
                         logger.warning(f"변동성 타겟팅 적용 실패 ({date}): {e}")
 
+                # C9: 오버레이 스태킹 최소 노출 하한
+                MIN_COMBINED_EXPOSURE = 0.10
                 if signals:
-                    # 필요한 가격 데이터를 캐시에 로드
-                    for ticker in signals:
+                    total_weight = sum(signals.values())
+                    if 0 < total_weight < MIN_COMBINED_EXPOSURE:
+                        scale = MIN_COMBINED_EXPOSURE / total_weight
+                        signals = {t: w * scale for t, w in signals.items()}
+                        logger.info(
+                            f"최소 노출 하한 적용: {total_weight:.2%} → "
+                            f"{MIN_COMBINED_EXPOSURE:.0%}"
+                        )
+
+                if signals:
+                    # M4: 시그널 종목 + 보유 종목 모두 가격 캐시에 로드
+                    all_tickers = set(signals.keys()) | set(holdings.keys())
+                    for ticker in all_tickers:
                         if ticker not in price_cache:
                             try:
                                 price_cache[ticker] = self._fetch_price(ticker)
                             except Exception as e:
-                                logger.warning(f"가격 데이터 로드 실패: {ticker} - {e}")
-
-                    # 현재 포트폴리오 가치 계산
-                    portfolio_value = cash
-                    current_weights: dict[str, float] = {}
-                    for ticker, qty in holdings.items():
-                        if ticker in price_cache and not price_cache[ticker].empty:
-                            price_df = price_cache[ticker]
-                            price_on_date = self._get_price_on_date(price_df, date)
-                            if price_on_date is not None:
-                                portfolio_value += qty * price_on_date
-
-                    # 현재 보유 비중 계산
-                    if portfolio_value > 0:
-                        for ticker, qty in holdings.items():
-                            if ticker in price_cache and not price_cache[ticker].empty:
-                                price = self._get_price_on_date(
-                                    price_cache[ticker], date
+                                logger.warning(
+                                    f"가격 데이터 로드 실패: {ticker} - {e}"
                                 )
-                                if price is not None:
-                                    current_weights[ticker] = (
-                                        qty * price / portfolio_value
-                                    )
+
+                    # C1: 포트폴리오 가치/비중 계산
+                    portfolio_value, current_weights = (
+                        self._calc_portfolio_state(
+                            holdings, price_cache, cash, date
+                        )
+                    )
+
+                    # M1: 누적 드리프트 보정 — N회마다 강제 리밸런싱
+                    self._rebalance_count += 1
+                    effective_threshold = (
+                        0.0
+                        if (
+                            self.force_rebalance_every > 0
+                            and self._rebalance_count
+                            % self.force_rebalance_every
+                            == 0
+                        )
+                        else self.min_rebalance_threshold
+                    )
 
                     # ── 차등 리밸런싱 ──
                     # 1) 타겟에 없는 종목 전량 매도
                     for ticker in list(holdings.keys()):
                         if ticker not in signals:
                             qty = holdings[ticker]
+                            sold = False
                             if qty > 0 and ticker in price_cache:
                                 price = self._get_price_on_date(
                                     price_cache[ticker], date
@@ -369,7 +424,17 @@ class Backtest:
                                         "price": price,
                                         "cost": qty * price * self.sell_cost,
                                     })
-                            del holdings[ticker]
+                                    sold = True
+                            # C2: 매도 성공 시에만 holdings에서 제거
+                            if sold:
+                                del holdings[ticker]
+
+                    # C1: Step 1 완료 후 재계산
+                    portfolio_value, current_weights = (
+                        self._calc_portfolio_state(
+                            holdings, price_cache, cash, date
+                        )
+                    )
 
                     # 2) 비중 줄여야 할 종목: 차액만 매도
                     for ticker in list(holdings.keys()):
@@ -378,7 +443,7 @@ class Backtest:
                         cur_w = current_weights.get(ticker, 0.0)
                         tgt_w = signals[ticker]
                         delta = cur_w - tgt_w
-                        if delta > self.min_rebalance_threshold:
+                        if delta > effective_threshold:
                             price = self._get_price_on_date(
                                 price_cache[ticker], date
                             )
@@ -403,6 +468,13 @@ class Backtest:
                                         "cost": sell_qty * price * self.sell_cost,
                                     })
 
+                    # C1: Step 2 완료 후 재계산
+                    portfolio_value, current_weights = (
+                        self._calc_portfolio_state(
+                            holdings, price_cache, cash, date
+                        )
+                    )
+
                     # 3) 비중 늘려야 할 종목 + 신규 종목: 차액만 매수
                     for ticker, tgt_w in signals.items():
                         if tgt_w <= 0 or ticker not in price_cache:
@@ -416,7 +488,7 @@ class Backtest:
 
                         cur_w = current_weights.get(ticker, 0.0)
                         delta = tgt_w - cur_w
-                        if delta <= self.min_rebalance_threshold:
+                        if delta <= effective_threshold:
                             continue  # 변화 작으면 스킵
 
                         buy_amount = portfolio_value * delta

@@ -54,6 +54,11 @@ class HybridStrategy(Strategy):
         hedge_lookback_months: int = 12,
         hedge_n_select: int = 1,
     ):
+        # M10: core_weight 범위 검증
+        if not (0.0 <= core_weight <= 1.0):
+            raise ValueError(
+                f"core_weight는 0.0~1.0 범위여야 합니다: {core_weight}"
+            )
         self.core_strategy = core_strategy
         self.core_weight = core_weight
         self.hedge_weight = 1.0 - core_weight

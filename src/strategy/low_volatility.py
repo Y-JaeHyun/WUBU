@@ -105,6 +105,7 @@ class LowVolatilityStrategy(Strategy):
         self,
         ticker: str,
         price_df: pd.DataFrame,
+        date: str = "",
     ) -> Optional[float]:
         """단일 종목의 연율화 실현 변동성을 계산한다.
 
@@ -113,12 +114,20 @@ class LowVolatilityStrategy(Strategy):
         Args:
             ticker: 종목 코드
             price_df: OHLCV DataFrame (DatetimeIndex)
+            date: 기준 날짜 (YYYYMMDD). Look-Ahead Bias 방지용.
 
         Returns:
             연율화 변동성 (float). 데이터 부족 또는 변동성 0이면 None 반환.
         """
         if price_df.empty or "close" not in price_df.columns:
             return None
+
+        # C3: date 기준으로 미래 데이터 제거 (Look-Ahead Bias 방지)
+        if date:
+            target = pd.Timestamp(date)
+            price_df = price_df[price_df.index <= target]
+            if price_df.empty:
+                return None
 
         daily_returns = price_df["close"].pct_change().dropna()
 
@@ -139,6 +148,7 @@ class LowVolatilityStrategy(Strategy):
         self,
         tickers: list[str],
         prices: dict[str, pd.DataFrame],
+        date: str = "",
     ) -> pd.Series:
         """종목별 저변동성 스코어를 계산한다.
 
@@ -148,6 +158,7 @@ class LowVolatilityStrategy(Strategy):
         Args:
             tickers: 대상 종목 리스트
             prices: {ticker: DataFrame(OHLCV)} 가격 캐시
+            date: 기준 날짜 (YYYYMMDD). Look-Ahead Bias 방지용.
 
         Returns:
             pd.Series (index=ticker, values=low_vol_score)
@@ -158,7 +169,7 @@ class LowVolatilityStrategy(Strategy):
             if ticker not in prices or prices[ticker].empty:
                 continue
 
-            vol = self._compute_volatility(ticker, prices[ticker])
+            vol = self._compute_volatility(ticker, prices[ticker], date)
             if vol is not None:
                 scores[ticker] = 1.0 / vol
 
@@ -201,7 +212,7 @@ class LowVolatilityStrategy(Strategy):
             return {}
 
         # 저변동성 스코어 계산
-        scores = self._compute_scores(universe, prices)
+        scores = self._compute_scores(universe, prices, date)
 
         if scores.empty:
             logger.warning(f"저변동성 스코어 계산 실패 ({date})")
@@ -225,13 +236,14 @@ class LowVolatilityStrategy(Strategy):
 
         return signals
 
-    def get_scores(self, data: dict) -> pd.Series:
+    def get_scores(self, data: dict, date: str = "") -> pd.Series:
         """외부에서 저변동성 스코어에 접근할 수 있도록 제공한다.
 
         ThreeFactorStrategy, MultiFactorStrategy 등에서 팩터 결합 시 사용한다.
 
         Args:
             data: {'fundamentals': DataFrame, 'prices': dict[ticker, DataFrame]} 형태
+            date: 기준 날짜 (YYYYMMDD). Look-Ahead Bias 방지용.
 
         Returns:
             pd.Series (index=ticker, values=low_vol_score)
@@ -243,4 +255,4 @@ class LowVolatilityStrategy(Strategy):
         if not universe:
             return pd.Series(dtype=float)
 
-        return self._compute_scores(universe, prices)
+        return self._compute_scores(universe, prices, date)
