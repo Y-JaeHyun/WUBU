@@ -1032,3 +1032,68 @@ class TestPositionManagerWithAllocator:
 
         sig = inspect.signature(PositionManager.calculate_rebalance_orders)
         assert sig.parameters["allocator"].default is None
+
+
+# ===================================================================
+# PositionManager.calculate_target_quantities buy_cost 테스트
+# ===================================================================
+
+class TestCalculateTargetQuantitiesBuyCost:
+    """calculate_target_quantities의 buy_cost 파라미터 동작을 검증한다."""
+
+    def _make_pm(self, prices):
+        """buy_cost 테스트용 PositionManager를 생성한다."""
+        from src.execution.position_manager import PositionManager
+
+        mock_client = MagicMock()
+        mock_client.get_positions.return_value = pd.DataFrame()
+        mock_client.get_balance.return_value = {"total_eval": 0, "cash": 0}
+
+        def _get_price(ticker):
+            return {"price": prices.get(ticker, 0)}
+
+        mock_client.get_current_price.side_effect = _get_price
+        return PositionManager(mock_client)
+
+    def test_buy_cost_zero_same_as_legacy(self):
+        """buy_cost=0이면 기존 공식(price로만 나눔)과 동일하다."""
+        import math
+        pm = self._make_pm({"005930": 70_000})
+        weights = {"005930": 0.5}
+        total_value = 10_000_000
+
+        result = pm.calculate_target_quantities(weights, total_value, buy_cost=0.0)
+        expected_qty = math.floor(total_value * 0.5 / 70_000)
+        assert result["005930"] == expected_qty
+
+    def test_buy_cost_reduces_quantity(self):
+        """buy_cost > 0이면 수량이 줄어든다."""
+        import math
+        pm = self._make_pm({"005930": 70_000})
+        weights = {"005930": 0.5}
+        total_value = 10_000_000
+
+        qty_no_cost = pm.calculate_target_quantities(weights, total_value, buy_cost=0.0)
+        qty_with_cost = pm.calculate_target_quantities(weights, total_value, buy_cost=0.00015)
+
+        assert qty_with_cost["005930"] <= qty_no_cost["005930"]
+
+    def test_buy_cost_default_value(self):
+        """buy_cost 기본값은 0.00015이다."""
+        import inspect
+        from src.execution.position_manager import PositionManager
+
+        sig = inspect.signature(PositionManager.calculate_target_quantities)
+        assert sig.parameters["buy_cost"].default == 0.00015
+
+    def test_buy_cost_formula_correctness(self):
+        """buy_cost 공식이 floor(amount / (price * (1 + cost)))인지 검증."""
+        import math
+        pm = self._make_pm({"005930": 100_000})
+        weights = {"005930": 1.0}
+        total_value = 5_000_000
+        cost = 0.001  # 0.1%
+
+        result = pm.calculate_target_quantities(weights, total_value, buy_cost=cost)
+        expected = math.floor(5_000_000 / (100_000 * (1 + cost)))
+        assert result["005930"] == expected

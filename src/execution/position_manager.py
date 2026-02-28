@@ -123,15 +123,19 @@ class PositionManager:
         self,
         target_weights: dict[str, float],
         total_value: int,
+        buy_cost: float = 0.00015,
     ) -> dict[str, int]:
         """목표 비중을 목표 수량으로 변환한다.
 
         각 종목의 현재가를 조회하여 비중을 수량으로 변환한다.
         소수점 이하는 내림 처리한다.
+        매수 거래비용을 반영하여 실제 매수 가능 수량을 계산한다.
 
         Args:
             target_weights: {ticker: weight} 형태. weight는 0~1 사이 비율.
             total_value: 총 포트폴리오 가치 (원).
+            buy_cost: 매수 거래비용 비율 (기본 0.015%). ETF/주식 모두
+                매수 시에는 수수료만 부과되므로 단일 값으로 충분하다.
 
         Returns:
             {ticker: qty} 형태의 목표 수량 딕셔너리.
@@ -174,7 +178,7 @@ class PositionManager:
                 continue
 
             target_amount = total_value * weight
-            qty = math.floor(target_amount / price)
+            qty = math.floor(target_amount / (price * (1 + buy_cost)))
 
             if qty > 0:
                 target_quantities[ticker] = qty

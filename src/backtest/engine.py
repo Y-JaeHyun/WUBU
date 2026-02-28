@@ -62,6 +62,10 @@ class Backtest:
         buy_cost: 매수 거래비용 비율 (기본 0.015%)
         sell_cost: 매도 거래비용 비율 (기본 0.015% 수수료 + 0.23% 세금 = 0.245%)
         overlay: 마켓 타이밍 오버레이 객체 (선택, 기본 None)
+        pool_strategies: 3-Pool 모드용 전략/비중 매핑 (선택).
+            예: {"long_term": (MultiFactor(), 0.7), "etf_rotation": (ETFRotation(), 0.3)}
+            설정하면 strategy 파라미터는 무시된다.
+        etf_sell_cost: ETF 매도 거래비용 비율 (기본 0.015%, 거래세 면제)
     """
 
     def __init__(
@@ -75,6 +79,8 @@ class Backtest:
         sell_cost: float = 0.00245,
         overlay: Optional["MarketTimingOverlay"] = None,
         lookback_days: int = 400,
+        pool_strategies: Optional[dict[str, tuple[Strategy, float]]] = None,
+        etf_sell_cost: float = 0.00015,
     ):
         self.strategy = strategy
         self.start_date = start_date.replace("-", "")
@@ -85,6 +91,8 @@ class Backtest:
         self.sell_cost = sell_cost
         self.overlay = overlay
         self.lookback_days = lookback_days
+        self.pool_strategies = pool_strategies
+        self.etf_sell_cost = etf_sell_cost
 
         # 가격 데이터 수집 시작일: start_date에서 lookback_days만큼 이전
         # 전략이 모멘텀 스코어, 상장기간 필터 등에 충분한 과거 데이터를 사용할 수 있도록 함
@@ -130,14 +138,44 @@ class Backtest:
         """
         return get_price_data(ticker, self._data_start_date, self.end_date)
 
+    def _get_strategy_name(self) -> str:
+        """전략 이름을 반환한다. 3-Pool 모드이면 풀 구성을 반영한다."""
+        if self.pool_strategies:
+            parts = "+".join(
+                f"{strat.name}({pct:.0%})"
+                for _, (strat, pct) in self.pool_strategies.items()
+            )
+            return f"MultiPool[{parts}]"
+        return self.strategy.name
+
+    def _get_sell_cost(self, ticker: str) -> float:
+        """종목의 매도 거래비용 비율을 반환한다.
+
+        ETF는 거래세가 면제되므로 etf_sell_cost를, 일반 주식은 sell_cost를 적용한다.
+        """
+        from src.utils.market_utils import is_etf
+
+        if is_etf(ticker):
+            return self.etf_sell_cost
+        return self.sell_cost
+
     def run(self) -> None:
         """백테스트를 실행한다.
 
         마켓 타이밍 오버레이가 설정된 경우, 리밸런싱 시점마다
         지수 데이터를 기반으로 오버레이 신호를 생성하고 비중을 조절한다.
         """
+        if self.pool_strategies:
+            pool_desc = ", ".join(
+                f"{name}({strat.name}:{pct:.0%})"
+                for name, (strat, pct) in self.pool_strategies.items()
+            )
+            strategy_name = f"3-Pool[{pool_desc}]"
+        else:
+            strategy_name = self.strategy.name
+
         logger.info(
-            f"백테스트 시작: {self.strategy.name} "
+            f"백테스트 시작: {strategy_name} "
             f"({self.start_date} ~ {self.end_date}, "
             f"자본금={self.initial_capital:,}원, "
             f"리밸런싱={self.rebalance_freq}, "
@@ -227,7 +265,21 @@ class Backtest:
 
                 # 전략 시그널 생성
                 try:
-                    signals = self.strategy.generate_signals(date, data)
+                    if self.pool_strategies:
+                        # 3-Pool 모드: 각 풀 전략 시그널 → 풀 비중 스케일링 → 병합
+                        merged: dict[str, float] = {}
+                        for pool_name, (strat, pct) in self.pool_strategies.items():
+                            if pct <= 0:
+                                continue
+                            pool_signals = strat.generate_signals(date, data)
+                            for ticker, weight in pool_signals.items():
+                                scaled = round(weight * pct, 6)
+                                merged[ticker] = round(
+                                    merged.get(ticker, 0.0) + scaled, 6
+                                )
+                        signals = merged
+                    else:
+                        signals = self.strategy.generate_signals(date, data)
                 except Exception as e:
                     logger.error(f"시그널 생성 실패 ({date}): {e}")
                     signals = {}
@@ -296,7 +348,8 @@ class Backtest:
                         if ticker in price_cache and not price_cache[ticker].empty:
                             price = self._get_price_on_date(price_cache[ticker], date)
                             if price is not None:
-                                proceeds = sell_qty * price * (1 - self.sell_cost)
+                                sell_cost_rate = self._get_sell_cost(ticker)
+                                proceeds = sell_qty * price * (1 - sell_cost_rate)
                                 cash += proceeds
                                 self._trades.append({
                                     "date": date,
@@ -304,7 +357,7 @@ class Backtest:
                                     "action": "sell",
                                     "quantity": sell_qty,
                                     "price": price,
-                                    "cost": sell_qty * price * self.sell_cost,
+                                    "cost": sell_qty * price * sell_cost_rate,
                                 })
                                 if target_qty == 0:
                                     del holdings[ticker]
@@ -471,7 +524,7 @@ class Backtest:
             win_rate = 0.0
 
         results = {
-            "strategy_name": self.strategy.name,
+            "strategy_name": self._get_strategy_name(),
             "start_date": self.start_date,
             "end_date": self.end_date,
             "initial_capital": initial,
