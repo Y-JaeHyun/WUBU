@@ -22,6 +22,8 @@ ETF_UNIVERSE: dict[str, dict[str, str]] = {
     "short_bond": {"ticker": "214980", "name": "KODEX 단기채권PLUS"},
     "gov_bond_3y": {"ticker": "114820", "name": "KODEX 국고채3년"},
     "gold": {"ticker": "132030", "name": "KODEX 골드선물(H)"},
+    "inverse_200": {"ticker": "114800", "name": "KODEX 인버스"},
+    "gov_bond_10y": {"ticker": "148070", "name": "KOSEF 국고채10년"},
 }
 
 

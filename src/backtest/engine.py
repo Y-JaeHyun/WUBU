@@ -16,6 +16,8 @@ from src.utils.logger import get_logger
 
 if TYPE_CHECKING:
     from src.strategy.market_timing import MarketTimingOverlay
+    from src.strategy.drawdown_overlay import DrawdownOverlay
+    from src.strategy.vol_targeting import VolTargetingOverlay
 
 logger = get_logger(__name__)
 
@@ -58,10 +60,14 @@ class Backtest:
         start_date: 백테스트 시작일 ('YYYYMMDD' 또는 'YYYY-MM-DD')
         end_date: 백테스트 종료일
         initial_capital: 초기 자본금 (기본 1억원)
-        rebalance_freq: 리밸런싱 주기 ('monthly' 또는 'quarterly')
+        rebalance_freq: 리밸런싱 주기 ('weekly', 'biweekly', 'monthly', 'quarterly')
         buy_cost: 매수 거래비용 비율 (기본 0.015%)
         sell_cost: 매도 거래비용 비율 (기본 0.015% 수수료 + 0.23% 세금 = 0.245%)
         overlay: 마켓 타이밍 오버레이 객체 (선택, 기본 None)
+        drawdown_overlay: 드로다운 디레버리징 오버레이 객체 (선택, 기본 None)
+        vol_targeting: 변동성 타겟팅 오버레이 객체 (선택, 기본 None)
+        min_rebalance_threshold: 비중 변화 임계값. 이 값 미만의 비중 변화는
+            거래하지 않는다. (기본 0.0 = 모든 변화 거래)
     """
 
     def __init__(
@@ -69,11 +75,14 @@ class Backtest:
         strategy: Strategy,
         start_date: str,
         end_date: str,
-        initial_capital: int = 100_000_000,
+        initial_capital: float = 100_000_000,
         rebalance_freq: str = "monthly",
         buy_cost: float = 0.00015,
         sell_cost: float = 0.00245,
         overlay: Optional["MarketTimingOverlay"] = None,
+        drawdown_overlay: Optional["DrawdownOverlay"] = None,
+        vol_targeting: Optional["VolTargetingOverlay"] = None,
+        min_rebalance_threshold: float = 0.0,
         lookback_days: int = 400,
     ):
         self.strategy = strategy
@@ -84,6 +93,9 @@ class Backtest:
         self.buy_cost = buy_cost
         self.sell_cost = sell_cost
         self.overlay = overlay
+        self.drawdown_overlay = drawdown_overlay
+        self.vol_targeting = vol_targeting
+        self.min_rebalance_threshold = min_rebalance_threshold
         self.lookback_days = lookback_days
 
         # 가격 데이터 수집 시작일: start_date에서 lookback_days만큼 이전
@@ -100,13 +112,21 @@ class Backtest:
     def _get_rebalance_dates(self) -> list[str]:
         """리밸런싱 날짜 리스트를 생성한다.
 
-        각 월(또는 분기) 첫 영업일을 리밸런싱 날짜로 사용한다.
+        지원 주기: weekly, biweekly, monthly, quarterly.
+        각 기간의 첫 영업일을 리밸런싱 날짜로 사용한다.
         """
         dates = pd.date_range(start=self.start_date, end=self.end_date, freq="B")
         if dates.empty:
             return []
 
-        if self.rebalance_freq == "monthly":
+        if self.rebalance_freq == "weekly":
+            # 각 주의 첫 영업일
+            rebal = dates.to_series().groupby(dates.to_period("W")).first()
+        elif self.rebalance_freq == "biweekly":
+            # 각 주의 첫 영업일 중 짝수 주만 선택
+            weekly = dates.to_series().groupby(dates.to_period("W")).first()
+            rebal = weekly.iloc[::2]
+        elif self.rebalance_freq == "monthly":
             # 각 월의 첫 영업일
             rebal = dates.to_series().groupby(dates.to_period("M")).first()
         elif self.rebalance_freq == "quarterly":
@@ -127,8 +147,18 @@ class Backtest:
 
         lookback_days 만큼 start_date 이전부터 데이터를 수집하여,
         모멘텀·상장기간 필터 등이 첫 리밸런싱부터 충분한 과거 데이터를 갖도록 한다.
+        주식 API에서 데이터가 빈 경우 ETF API로 fallback한다.
         """
-        return get_price_data(ticker, self._data_start_date, self.end_date)
+        df = get_price_data(ticker, self._data_start_date, self.end_date)
+        if df.empty:
+            try:
+                from src.data.etf_collector import get_etf_price
+                df = get_etf_price(ticker, self._data_start_date, self.end_date)
+                if not df.empty:
+                    logger.info(f"ETF fallback 성공: {ticker}")
+            except Exception as e:
+                logger.debug(f"ETF fallback 실패: {ticker} - {e}")
+        return df
 
     def run(self) -> None:
         """백테스트를 실행한다.
@@ -184,6 +214,10 @@ class Backtest:
             # 오버레이 상태 초기화
             self.overlay.reset()
 
+        # 드로다운 오버레이 상태 초기화
+        if self.drawdown_overlay is not None:
+            self.drawdown_overlay.reset()
+
         logger.info(f"리밸런싱 날짜: {len(rebalance_dates)}회")
 
         for date in business_dates:
@@ -225,6 +259,10 @@ class Backtest:
                     "index_prices": index_prices,
                 }
 
+                # 현재 보유 종목 정보를 전략에 전달 (Turnover 감소용)
+                if hasattr(self.strategy, "update_holdings"):
+                    self.strategy.update_holdings(set(holdings.keys()))
+
                 # 전략 시그널 생성
                 try:
                     signals = self.strategy.generate_signals(date, data)
@@ -250,6 +288,35 @@ class Backtest:
                     except Exception as e:
                         logger.warning(f"오버레이 적용 실패 ({date}): {e}")
 
+                # 드로다운 오버레이 적용
+                if signals and self.drawdown_overlay is not None:
+                    try:
+                        portfolio_value_now = cash
+                        for t, q in holdings.items():
+                            if t in price_cache and not price_cache[t].empty:
+                                p = self._get_price_on_date(price_cache[t], date)
+                                if p is not None:
+                                    portfolio_value_now += q * p
+                        signals = self.drawdown_overlay.apply_overlay(
+                            signals, portfolio_value_now
+                        )
+                    except Exception as e:
+                        logger.warning(f"드로다운 오버레이 적용 실패 ({date}): {e}")
+
+                # 변동성 타겟팅 적용
+                if signals and self.vol_targeting is not None:
+                    try:
+                        if self._portfolio_history:
+                            pv_series = pd.Series(
+                                [h["portfolio_value"] for h in self._portfolio_history],
+                                index=pd.to_datetime(
+                                    [h["date"] for h in self._portfolio_history]
+                                ),
+                            )
+                            signals = self.vol_targeting.apply(signals, pv_series)
+                    except Exception as e:
+                        logger.warning(f"변동성 타겟팅 적용 실패 ({date}): {e}")
+
                 if signals:
                     # 필요한 가격 데이터를 캐시에 로드
                     for ticker in signals:
@@ -261,6 +328,7 @@ class Backtest:
 
                     # 현재 포트폴리오 가치 계산
                     portfolio_value = cash
+                    current_weights: dict[str, float] = {}
                     for ticker, qty in holdings.items():
                         if ticker in price_cache and not price_cache[ticker].empty:
                             price_df = price_cache[ticker]
@@ -268,10 +336,75 @@ class Backtest:
                             if price_on_date is not None:
                                 portfolio_value += qty * price_on_date
 
-                    # 목표 수량 계산
-                    target_quantities: dict[str, int] = {}
-                    for ticker, weight in signals.items():
-                        if weight <= 0 or ticker not in price_cache:
+                    # 현재 보유 비중 계산
+                    if portfolio_value > 0:
+                        for ticker, qty in holdings.items():
+                            if ticker in price_cache and not price_cache[ticker].empty:
+                                price = self._get_price_on_date(
+                                    price_cache[ticker], date
+                                )
+                                if price is not None:
+                                    current_weights[ticker] = (
+                                        qty * price / portfolio_value
+                                    )
+
+                    # ── 차등 리밸런싱 ──
+                    # 1) 타겟에 없는 종목 전량 매도
+                    for ticker in list(holdings.keys()):
+                        if ticker not in signals:
+                            qty = holdings[ticker]
+                            if qty > 0 and ticker in price_cache:
+                                price = self._get_price_on_date(
+                                    price_cache[ticker], date
+                                )
+                                if price is not None:
+                                    proceeds = qty * price * (1 - self.sell_cost)
+                                    cash += proceeds
+                                    self._trades.append({
+                                        "date": date,
+                                        "ticker": ticker,
+                                        "action": "sell",
+                                        "quantity": qty,
+                                        "price": price,
+                                        "cost": qty * price * self.sell_cost,
+                                    })
+                            del holdings[ticker]
+
+                    # 2) 비중 줄여야 할 종목: 차액만 매도
+                    for ticker in list(holdings.keys()):
+                        if ticker not in signals:
+                            continue
+                        cur_w = current_weights.get(ticker, 0.0)
+                        tgt_w = signals[ticker]
+                        delta = cur_w - tgt_w
+                        if delta > self.min_rebalance_threshold:
+                            price = self._get_price_on_date(
+                                price_cache[ticker], date
+                            )
+                            if price is not None and price > 0:
+                                sell_amount = portfolio_value * delta
+                                sell_qty = int(sell_amount / price)
+                                sell_qty = min(sell_qty, holdings[ticker])
+                                if sell_qty > 0:
+                                    proceeds = (
+                                        sell_qty * price * (1 - self.sell_cost)
+                                    )
+                                    cash += proceeds
+                                    holdings[ticker] -= sell_qty
+                                    if holdings[ticker] <= 0:
+                                        del holdings[ticker]
+                                    self._trades.append({
+                                        "date": date,
+                                        "ticker": ticker,
+                                        "action": "sell",
+                                        "quantity": sell_qty,
+                                        "price": price,
+                                        "cost": sell_qty * price * self.sell_cost,
+                                    })
+
+                    # 3) 비중 늘려야 할 종목 + 신규 종목: 차액만 매수
+                    for ticker, tgt_w in signals.items():
+                        if tgt_w <= 0 or ticker not in price_cache:
                             continue
                         price_df = price_cache[ticker]
                         if price_df.empty:
@@ -279,56 +412,22 @@ class Backtest:
                         price = self._get_price_on_date(price_df, date)
                         if price is None or price <= 0:
                             continue
-                        target_qty = int(
-                            portfolio_value * weight / (price * (1 + self.buy_cost))
-                        )
-                        if target_qty > 0:
-                            target_quantities[ticker] = target_qty
 
-                    # 매도: 대상이 아닌 종목 전량 + 초과분 부분 매도
-                    for ticker, qty in list(holdings.items()):
-                        if qty <= 0:
-                            continue
-                        target_qty = target_quantities.get(ticker, 0)
-                        sell_qty = qty - target_qty
-                        if sell_qty <= 0:
-                            continue
-                        if ticker in price_cache and not price_cache[ticker].empty:
-                            price = self._get_price_on_date(price_cache[ticker], date)
-                            if price is not None:
-                                proceeds = sell_qty * price * (1 - self.sell_cost)
-                                cash += proceeds
-                                self._trades.append({
-                                    "date": date,
-                                    "ticker": ticker,
-                                    "action": "sell",
-                                    "quantity": sell_qty,
-                                    "price": price,
-                                    "cost": sell_qty * price * self.sell_cost,
-                                })
-                                if target_qty == 0:
-                                    del holdings[ticker]
-                                else:
-                                    holdings[ticker] = target_qty
+                        cur_w = current_weights.get(ticker, 0.0)
+                        delta = tgt_w - cur_w
+                        if delta <= self.min_rebalance_threshold:
+                            continue  # 변화 작으면 스킵
 
-                    # 매수: 신규 종목 + 부족분 추가 매수
-                    for ticker, target_qty in target_quantities.items():
-                        current_qty = holdings.get(ticker, 0)
-                        buy_qty = target_qty - current_qty
+                        buy_amount = portfolio_value * delta
+                        buy_qty = int(buy_amount / (price * (1 + self.buy_cost)))
                         if buy_qty <= 0:
-                            continue
-                        if ticker not in price_cache:
-                            continue
-                        price_df = price_cache[ticker]
-                        if price_df.empty:
-                            continue
-                        price = self._get_price_on_date(price_df, date)
-                        if price is None or price <= 0:
                             continue
 
                         cost = buy_qty * price * (1 + self.buy_cost)
                         if cost > cash:
-                            buy_qty = int(cash / (price * (1 + self.buy_cost)))
+                            buy_qty = int(
+                                cash / (price * (1 + self.buy_cost))
+                            )
                             cost = buy_qty * price * (1 + self.buy_cost)
 
                         if buy_qty > 0:

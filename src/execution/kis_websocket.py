@@ -436,7 +436,7 @@ class KISWebSocketClient:
         except json.JSONDecodeError:
             logger.debug("JSON 파싱 실패 (비정형 메시지 무시): %s", raw[:100])
 
-    def _parse_tick(self, raw: str) -> dict | None:
+    def _parse_tick(self, raw: str) -> Optional[dict]:
         """원시 메시지를 파싱하여 체결 데이터 딕셔너리를 반환한다.
 
         H0STCNT0 체결가 필드 (| 구분):

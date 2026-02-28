@@ -630,6 +630,227 @@ class TestETFRotationScheduler:
         bot.execute_etf_rotation_rebalance()
 
 
+class TestEnhancedETFRotationScheduler:
+    """Enhanced ETF 로테이션 스케줄러 통합 테스트."""
+
+    def test_create_etf_strategy_enhanced_on(self):
+        """enhanced_etf_rotation ON이면 EnhancedETFRotationStrategy를 생성한다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n in ("etf_rotation", "enhanced_etf_rotation")
+        )
+        bot.feature_flags.get_config = MagicMock(
+            side_effect=lambda n: {
+                "etf_rotation": {
+                    "lookback_months": 12,
+                    "n_select": 3,
+                    "max_same_sector": 1,
+                },
+                "enhanced_etf_rotation": {
+                    "cash_ratio_risk_off": 0.7,
+                    "use_vol_weight": True,
+                    "use_market_filter": True,
+                    "use_trend_filter": True,
+                    "use_max_drawdown_filter": True,
+                    "max_drawdown_filter": 0.15,
+                    "vol_lookback": 60,
+                    "market_ma_period": 200,
+                    "trend_short_ma": 20,
+                    "trend_long_ma": 60,
+                },
+            }.get(n, {})
+        )
+
+        strategy = bot._create_etf_strategy()
+
+        from src.strategy.enhanced_etf_rotation import (
+            EnhancedETFRotationStrategy,
+        )
+        assert isinstance(strategy, EnhancedETFRotationStrategy)
+        assert strategy.num_etfs == 3
+        assert strategy.cash_ratio_risk_off == 0.7
+        assert strategy.use_vol_weight is True
+        assert strategy.use_market_filter is True
+        assert strategy.use_trend_filter is True
+        assert strategy.max_drawdown_filter == 0.15
+
+    def test_create_etf_strategy_enhanced_off(self):
+        """enhanced_etf_rotation OFF이면 기존 ETFRotationStrategy를 생성한다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n == "etf_rotation"
+        )
+        bot.feature_flags.get_config = MagicMock(
+            side_effect=lambda n: {
+                "etf_rotation": {
+                    "lookback_months": 12,
+                    "n_select": 3,
+                    "max_same_sector": 1,
+                },
+            }.get(n, {})
+        )
+
+        strategy = bot._create_etf_strategy()
+
+        from src.strategy.etf_rotation import ETFRotationStrategy
+        assert isinstance(strategy, ETFRotationStrategy)
+        assert strategy.num_etfs == 3
+        assert strategy.lookback == 252  # 12 * 21
+
+    def test_create_etf_strategy_config_params(self):
+        """Enhanced 전략 생성 시 config 파라미터가 올바르게 전달된다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n in ("etf_rotation", "enhanced_etf_rotation")
+        )
+        bot.feature_flags.get_config = MagicMock(
+            side_effect=lambda n: {
+                "etf_rotation": {
+                    "lookback_months": 9,
+                    "n_select": 2,
+                    "max_same_sector": 2,
+                },
+                "enhanced_etf_rotation": {
+                    "cash_ratio_risk_off": 0.5,
+                    "use_vol_weight": False,
+                    "use_market_filter": False,
+                    "use_trend_filter": False,
+                    "use_max_drawdown_filter": False,
+                    "max_drawdown_filter": 0.20,
+                    "vol_lookback": 90,
+                    "market_ma_period": 100,
+                    "trend_short_ma": 10,
+                    "trend_long_ma": 30,
+                },
+            }.get(n, {})
+        )
+
+        strategy = bot._create_etf_strategy()
+
+        from src.strategy.enhanced_etf_rotation import (
+            EnhancedETFRotationStrategy,
+        )
+        assert isinstance(strategy, EnhancedETFRotationStrategy)
+        assert strategy.num_etfs == 2
+        assert strategy.max_same_sector == 2
+        assert strategy.cash_ratio_risk_off == 0.5
+        assert strategy.use_vol_weight is False
+        assert strategy.use_market_filter is False
+        assert strategy.use_trend_filter is False
+        # max_drawdown_filter disabled → 0.0
+        assert strategy.max_drawdown_filter == 0.0
+        assert strategy.vol_lookback == 90
+        assert strategy.market_ma_period == 100
+        assert strategy.trend_short_ma == 10
+        assert strategy.trend_long_ma == 30
+
+    def test_generate_etf_signals_uses_enhanced(self):
+        """_generate_etf_signals가 enhanced 전략을 사용한다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n in ("etf_rotation", "enhanced_etf_rotation")
+        )
+        bot.feature_flags.get_config = MagicMock(
+            side_effect=lambda n: {
+                "etf_rotation": {
+                    "lookback_months": 12,
+                    "n_select": 3,
+                    "max_same_sector": 1,
+                },
+                "enhanced_etf_rotation": {
+                    "cash_ratio_risk_off": 0.7,
+                    "use_vol_weight": True,
+                    "use_market_filter": True,
+                    "use_trend_filter": True,
+                    "use_max_drawdown_filter": True,
+                },
+            }.get(n, {})
+        )
+
+        with patch.object(bot, "_fetch_etf_prices", return_value={}):
+            result = bot._generate_etf_signals("20260228")
+            # 가격 데이터 없으므로 빈 결과
+            assert result == {}
+
+    def test_get_etf_universe_uses_enhanced(self):
+        """_get_etf_universe_tickers가 enhanced 전략의 유니버스를 반환한다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n in ("etf_rotation", "enhanced_etf_rotation")
+        )
+        bot.feature_flags.get_config = MagicMock(
+            side_effect=lambda n: {
+                "etf_rotation": {
+                    "lookback_months": 12,
+                    "n_select": 3,
+                    "max_same_sector": 1,
+                },
+                "enhanced_etf_rotation": {},
+            }.get(n, {})
+        )
+
+        tickers = bot._get_etf_universe_tickers()
+        # 기본 유니버스: 10개 ETF
+        assert len(tickers) == 10
+        assert "069500" in tickers  # KODEX 200
+        assert "439870" in tickers  # KODEX 단기채권
+
+    def test_backward_compat_etf_rotation_only(self):
+        """etf_rotation ON + enhanced OFF → 기존 전략 하위호환."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n == "etf_rotation"
+        )
+        bot.feature_flags.get_config = MagicMock(
+            side_effect=lambda n: {
+                "etf_rotation": {
+                    "lookback_months": 12,
+                    "n_select": 3,
+                    "max_same_sector": 1,
+                },
+            }.get(n, {})
+        )
+
+        strategy = bot._create_etf_strategy()
+
+        from src.strategy.etf_rotation import ETFRotationStrategy
+        from src.strategy.enhanced_etf_rotation import (
+            EnhancedETFRotationStrategy,
+        )
+        assert isinstance(strategy, ETFRotationStrategy)
+        assert not isinstance(strategy, EnhancedETFRotationStrategy)
+
+    def test_create_long_term_strategy_uses_enhanced(self):
+        """_create_long_term_strategy('etf_rotation')이 enhanced 전략을 사용한다."""
+        bot = _make_bot_with_flag(False)
+        bot.feature_flags.is_enabled = MagicMock(
+            side_effect=lambda n: n in ("etf_rotation", "enhanced_etf_rotation")
+        )
+        bot.feature_flags.get_config = MagicMock(
+            side_effect=lambda n: {
+                "etf_rotation": {
+                    "lookback_months": 12,
+                    "n_select": 3,
+                    "max_same_sector": 1,
+                },
+                "enhanced_etf_rotation": {
+                    "cash_ratio_risk_off": 0.7,
+                    "use_vol_weight": True,
+                    "use_market_filter": True,
+                    "use_trend_filter": True,
+                    "use_max_drawdown_filter": True,
+                },
+            }.get(n, {})
+        )
+
+        strategy = bot._create_long_term_strategy("etf_rotation")
+
+        from src.strategy.enhanced_etf_rotation import (
+            EnhancedETFRotationStrategy,
+        )
+        assert isinstance(strategy, EnhancedETFRotationStrategy)
+
+
 # ===================================================================
 # 전략 데이터 수집 테스트
 # ===================================================================

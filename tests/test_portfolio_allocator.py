@@ -6,6 +6,7 @@ KIS 클라이언트는 Mock으로 대체하며, tmp_path로 격리된 환경에�
 
 import json
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,7 +29,7 @@ def _read_json(path: str) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def _mock_kis(total_eval: int = 1_000_000, cash: int = 500_000, holdings: list | None = None):
+def _mock_kis(total_eval: int = 1_000_000, cash: int = 500_000, holdings: Optional[list] = None):
     """KIS 클라이언트 Mock을 생성한다."""
     kis = MagicMock()
     kis.get_balance.return_value = {

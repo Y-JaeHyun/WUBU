@@ -93,7 +93,7 @@ class DualMomentumStrategy:
     def calculate_momentum(
         self,
         prices: dict[str, pd.Series],
-        lookback_months: int | None = None,
+        lookback_months: Optional[int] = None,
     ) -> dict[str, float]:
         """각 자산의 모멘텀(lookback 수익률)을 계산한다.
 
@@ -146,7 +146,7 @@ class DualMomentumStrategy:
     def get_relative_signal(
         self,
         momentum: dict[str, float],
-        n: int | None = None,
+        n: Optional[int] = None,
     ) -> list[str]:
         """상대 모멘텀: 수익률 상위 n개 자산을 선택한다.
 

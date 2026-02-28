@@ -7,15 +7,22 @@
 - **3-Pool 포트폴리오**: 장기(70%) + ETF 로테이션(30%) + 단기(0%) 동적 배분
 - **16종 투자 전략**: 장기 11종 + 단기 4종 + ETF 로테이션
 - **멀티팩터 전략**: 밸류 + 모멘텀 Z-Score 결합, 업종 비중 제한(25%) + 계열사 집중도(2종목) + 회전율 페널티
+- **하이브리드 전략**: 코어 팩터(75%) + ETF 듀얼 모멘텀 헤지(25%) 결합으로 하방 리스크 관리
 - **안전 필터**: 모멘텀 캡(300%), 업종 비중 상한, 계열사 탐지(하이브리드)
 - **마켓 타이밍**: KOSPI vs MA200 기반 시장 진입/이탈 오버레이
+- **리스크 오버레이 3중 레이어**: 마켓 타이밍 → 드로다운 디레버리징 → 변동성 타겟팅
 - **ETF 로테이션**: 모멘텀 기반 상위 N개 ETF 월간 리밸런싱
-- **백테스트 엔진**: diff-based 리밸런싱, 수수료/슬리피지 반영, 장기/단기 분리 엔진
+- **차등 리밸런싱**: 유지 종목은 매도하지 않고 차액만 거래 → 불필요한 매도세 제거 (연 ~2%pp 비용 절감)
+- **백테스트 엔진**: diff-based 리밸런싱, 수수료/슬리피지 반영, 장기/단기 분리 엔진, weekly/biweekly/monthly/quarterly 리밸런싱, ETF 자동 fallback
+- **섹터 중립화**: WICS 업종 분류 기반 라운드로빈 선정 (Phase 7에서 역효과 확인, 기본 비활성)
+- **레짐 감지**: 시장 변동성·모멘텀 기반 4개 레짐 분류, 팩터 가중치 동적 조절
+- **Turnover 감소**: Buffer zone + holding bonus로 불필요한 매매 축소
+- **Walk-Forward 백테스트**: 롤링 학습/테스트 구간으로 OOS(Out-of-Sample) Sharpe 추정
 - **한국투자증권 KIS API 연동**: 모의/실전 듀얼모드, WebSocket 실시간 시세
 - **Telegram 실시간 알림**: 매매 시그널, 포트폴리오 현황, 커맨드 제어
 - **긴급 모니터링**: 30분 간격 급등락(±5%)/시장급변(±3%)/공시 감지 + 자동매도 옵션
 - **EOD 공시 교육**: 8개 카테고리별 영향 분석 + 투자 학습 팁 자동 제공
-- **Feature Flag 시스템**: 11개 플래그, 런타임 토글 (재시작 없이 즉시 반영)
+- **Feature Flag 시스템**: 18개 플래그, 런타임 토글 (재시작 없이 즉시 반영)
 - **일일 시뮬레이션**: 매일 가상 리밸런싱으로 전략 검증
 - **뉴스/공시 수집**: DART 공시, 매크로(ECOS/FRED) 데이터 수집
 - **성과 DB**: SQLite 기반 NAV/포지션/거래 기록 추적
@@ -27,7 +34,7 @@
 |------|------|
 | 언어 | Python 3.12 |
 | 데이터 | pandas, numpy, pyarrow |
-| 수집 | pykrx, FinanceDataReader, DART OpenAPI, yfinance |
+| 수집 | pykrx, DART OpenAPI |
 | 기술분석 | ta (Technical Analysis Library) |
 | ML | scikit-learn |
 | 증권사 API | 한국투자증권 KIS OpenAPI (REST + WebSocket) |
@@ -50,6 +57,11 @@ src/
 │   ├── conglomerate.py      # 계열사 탐지 (정적매핑 + 접두사 + 블랙리스트)
 │   ├── three_factor.py      # 3팩터 모델
 │   ├── market_timing.py     # KOSPI MA200 오버레이
+│   ├── drawdown_overlay.py  # 드로다운 디레버리징 오버레이
+│   ├── vol_targeting.py     # 변동성 타겟팅 오버레이
+│   ├── low_volatility.py    # 저변동성 팩터 (1/실현변동성)
+│   ├── sector_neutral.py    # 섹터 중립 스코어링/선정
+│   ├── hybrid_strategy.py   # 코어 팩터 + ETF 헤지 하이브리드
 │   ├── dual_momentum.py     # 듀얼 모멘텀 (변동성 타깃 + ETF 확대)
 │   ├── risk_parity.py       # 리스크 패리티
 │   ├── ml_factor.py         # ML 기반 팩터
@@ -70,6 +82,7 @@ src/
 │   ├── dart_collector.py    # DART 재무제표 수집
 │   ├── etf_collector.py     # ETF 데이터 수집
 │   ├── global_collector.py  # 글로벌 시장 데이터 (S&P500, VIX)
+│   ├── sector_collector.py  # WICS 섹터 분류 수집
 │   ├── news_collector.py    # DART 공시/뉴스 수집
 │   ├── macro_collector.py   # 매크로 데이터 (ECOS/FRED)
 │   ├── daily_simulator.py   # 일일 리밸런싱 시뮬레이션
@@ -79,6 +92,7 @@ src/
 ├── execution/         # 실전 매매
 │   ├── kis_client.py        # KIS API 클라이언트
 │   ├── kis_websocket.py     # KIS WebSocket 실시간
+│   ├── realtime_manager.py  # 실시간 매니저
 │   ├── executor.py          # 주문 실행기
 │   ├── order_manager.py     # 주문 관리
 │   ├── position_manager.py  # 포지션 관리
@@ -87,7 +101,8 @@ src/
 │   ├── short_term_trader.py # 단기 트레이딩 실행
 │   └── short_term_risk.py   # 단기 리스크 관리
 ├── backtest/          # 백테스팅
-│   ├── engine.py            # 장기 백테스트 엔진
+│   ├── engine.py            # 백테스트 엔진 (차등 리밸런싱, 다중 오버레이, ETF fallback)
+│   ├── walk_forward.py      # Walk-Forward 백테스트 (OOS 분리)
 │   ├── short_term_backtest.py # 단기 전략 백테스트
 │   └── auto_runner.py       # 자동 백테스트 실행기
 ├── report/            # 리포트/분석
@@ -96,26 +111,30 @@ src/
 │   ├── stock_reviewer.py    # 보유종목 리뷰
 │   ├── night_research.py    # 야간 리서치
 │   ├── risk_metrics.py      # VaR/CVaR 리스크
-│   ├── portfolio_tracker.py # 포트폴리오 추적
+│   ├── metrics.py           # 성과 지표
+│   ├── charts.py            # matplotlib 차트
 │   ├── plotly_charts.py     # Plotly 인터랙티브 차트
+│   ├── portfolio_tracker.py # 포트폴리오 추적
 │   └── scanner.py           # 종목 스캐너
 ├── optimization/      # 포트폴리오 최적화
-│   ├── covariance.py        # 공분산 추정
-│   └── risk_parity.py       # 리스크 패리티 최적화
+│   ├── covariance.py        # 공분산 추정 (Ledoit-Wolf, EWM)
+│   └── risk_parity.py       # ERC 리스크 패리티 최적화
 ├── ml/                # 머신러닝
 │   ├── features.py          # 피처 엔지니어링
-│   └── pipeline.py          # ML 파이프라인
+│   ├── pipeline.py          # ML 파이프라인
+│   └── regime_model.py      # 레짐 감지 + 팩터 가중치 조절
 ├── alert/             # 알림 시스템
 │   ├── telegram_bot.py      # Telegram 봇
 │   ├── telegram_commander.py # Telegram 커맨드 처리
 │   ├── alert_manager.py     # 알림 관리자
-│   └── conditions.py        # 긴급 조건 (급등락/시장급변/공시)
+│   ├── conditions.py        # 긴급 조건 (급등락/시장급변/공시)
+│   └── email_sender.py      # 이메일 발송
 ├── scheduler/         # 자동 스케줄링
 │   ├── main.py              # APScheduler 메인 (19개 작업)
 │   └── holidays.py          # 한국 공휴일/휴장일
 └── utils/             # 유틸리티
     ├── config.py            # 설정 관리
-    ├── feature_flags.py     # Feature Flag 시스템 (11개)
+    ├── feature_flags.py     # Feature Flag 시스템 (18개)
     └── logger.py            # 로깅
 ```
 
@@ -127,7 +146,7 @@ src/
 git clone https://github.com/Y-JaeHyun/WUBU.git
 cd WUBU
 
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -153,7 +172,7 @@ cp .env.example .env
 python3 src/scheduler/main.py
 
 # systemd 서비스로 배포
-sudo bash install.sh
+sudo bash scripts/install.sh
 systemctl status quant-bot
 ```
 
@@ -198,6 +217,44 @@ journalctl -u quant-bot -f    # 로그 확인
 | LowVolQuality | 저변동성 + 퀄리티 결합 |
 | Accrual | 발생액 이상(low accrual) |
 | ETFRotation | 12M 모멘텀 기반 상위 3개 ETF 선택 + 모멘텀 캡(300%) (10개 유니버스) |
+
+### N팩터 모델 상세 (ThreeFactor)
+
+밸류 + 모멘텀 + 퀄리티(+ 저변동성) 팩터를 Z-Score/Rank로 결합하여 상위 종목에 동일비중 투자. 3중 리스크 오버레이 적용.
+
+**팩터 구성:**
+- 밸류: 1/PBR + 1/PER
+- 모멘텀: 12개월 수익률 (skip 1개월)
+- 퀄리티: ROE, 부채비율
+- 저변동성 (선택): 1/실현변동성 (60일)
+
+**리스크 오버레이 (순서대로 적용):**
+1. 마켓 타이밍: KOSPI vs MA200 → 현금 전환
+2. 드로다운 디레버리징: DD -10%→75%, -15%→50%, -20%→25% 포지션 축소
+3. 변동성 타겟팅: 실현변동성 > 목표(15%) 시 비중 축소
+
+**추가 기능:**
+- 차등 리밸런싱: 유지 종목 매도 없이 차액만 거래, min_rebalance_threshold로 소액 변화 스킵
+- 섹터 중립화: WICS 업종 분류 기반 라운드로빈 선정 (Phase 7에서 역효과 확인, 기본 비활성)
+- Turnover 감소: Buffer zone(Top N+buffer 유지) + holding bonus
+- 레짐 감지: 시장 상태에 따라 팩터 가중치 동적 조절
+- Walk-Forward 백테스트: 5년 학습 → 1년 테스트 롤링 OOS 검증
+
+### 하이브리드 전략: 코어 팩터 + ETF 헤지
+
+N팩터 모델(코어)과 듀얼 모멘텀 ETF(헤지)를 결합한 복합 전략.
+
+```
+HybridStrategy (Strategy ABC 상속)
+├── 코어 (75%): ThreeFactorStrategy → 개별 종목 팩터 스코어링
+└── 헤지 (25%): DualMomentum 로직 → ETF 자산배분
+    ├── 리스크온: KODEX200 / TIGER S&P500 / KODEX 골드 중 모멘텀 최고
+    └── 리스크오프: KODEX 단기채권 100%
+```
+
+- 코어/헤지 비중 조절 가능 (75/25, 70/30 등)
+- ETF 데이터 없을 시 자동으로 안전자산 fallback
+- 기존 Backtest/WalkForward 엔진과 100% 호환
 
 ### 단기 전략 (4종)
 
@@ -263,6 +320,22 @@ journalctl -u quant-bot -f    # 로그 확인
 | 19:00 | 이브닝 리포트 | 포트폴리오 성과, 시장 동향 |
 | 22:00 | 야간 리서치 | 글로벌 동향, 시사점 |
 
+## 테스트
+
+```bash
+# 전체 테스트 실행
+python3 -m pytest tests/ -v
+
+# 특정 모듈 테스트
+python3 -m pytest tests/test_multi_factor.py -v
+python3 -m pytest tests/test_etf_rotation.py -v
+python3 -m pytest tests/test_hybrid_strategy.py -v
+python3 -m pytest tests/test_walk_forward.py -v
+
+# 커버리지
+python3 -m pytest tests/ --cov=src --cov-report=html
+```
+
 ## Telegram 커맨드
 
 | 커맨드 | 설명 |
@@ -292,20 +365,13 @@ journalctl -u quant-bot -f    # 로그 확인
 | `macro_monitor` | ON | 매크로 데이터 (ECOS/FRED) |
 | `etf_rotation` | ON | ETF 로테이션 전략 |
 | `emergency_monitor` | ON | 긴급 모니터링 (급등락/시장급변/공시) |
-
-## 테스트
-
-```bash
-# 전체 테스트 실행
-python3 -m pytest tests/ -v
-
-# 특정 모듈 테스트
-python3 -m pytest tests/test_multi_factor.py -v
-python3 -m pytest tests/test_etf_rotation.py -v
-
-# 커버리지
-python3 -m pytest tests/ --cov=src --cov-report=html
-```
+| `walk_forward_backtest` | OFF | Walk-Forward OOS 백테스트 |
+| `low_volatility_factor` | OFF | 저변동성 팩터 (4팩터 확장) |
+| `drawdown_overlay` | OFF | 드로다운 디레버리징 오버레이 |
+| `sector_neutral` | OFF | 섹터 중립 종목 선정 |
+| `vol_targeting` | OFF | 변동성 타겟팅 오버레이 |
+| `turnover_reduction` | OFF | Turnover 감소 (Buffer zone) |
+| `regime_meta_model` | OFF | 레짐 기반 팩터 가중치 조절 |
 
 ## 개발 이력
 
@@ -320,6 +386,7 @@ python3 -m pytest tests/ --cov=src --cov-report=html
 | Phase 6 | 전략 고도화 + 신규 전략 5종 + 인프라 확장 (뉴스/매크로/성과DB/시뮬레이션) | ✅ |
 | Phase 6-B | 안전 필터: 모멘텀 캡, 업종 비중 제한, 계열사 집중도, 섹터 데이터 수집 | ✅ |
 | Phase 6-C | 긴급 모니터링, EOD 공시 교육, 리밸런싱 시뮬레이션, 백테스트 diff-based 개선 | ✅ |
+| Phase 7 | Sharpe 실전 투입: 차등 리밸런싱(매도세 절감), 하이브리드 전략(코어+ETF 헤지), weekly/biweekly 리밸런싱, ETF fallback, 8개 전략 비교 백테스트 | ✅ |
 
 ## Disclaimer
 

@@ -5,9 +5,17 @@
 
 from src.ml.features import build_factor_features, build_forward_returns  # noqa: F401
 from src.ml.pipeline import MLPipeline  # noqa: F401
+from src.ml.regime_model import (  # noqa: F401
+    detect_market_regime,
+    get_regime_weights,
+    RuleBasedRegimeModel,
+)
 
 __all__ = [
     "build_factor_features",
     "build_forward_returns",
     "MLPipeline",
+    "detect_market_regime",
+    "get_regime_weights",
+    "RuleBasedRegimeModel",
 ]

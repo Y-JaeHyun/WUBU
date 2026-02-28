@@ -9,6 +9,8 @@ Equal Risk Contribution(ERC) 방식으로 각 자산의 리스크 기여도가
     risk_decomp = optimizer.get_risk_decomposition(weights)
 """
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
@@ -36,7 +38,7 @@ class RiskParityOptimizer:
     def __init__(
         self,
         covariance: pd.DataFrame,
-        budget: dict[str, float] | None = None,
+        budget: Optional[dict] = None,
     ):
         if covariance.empty:
             raise ValueError("공분산 행렬이 비어 있습니다.")
