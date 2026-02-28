@@ -381,6 +381,168 @@ class PortfolioAllocator:
         return result
 
     # ──────────────────────────────────────────────────────────
+    # 통합 리밸런싱
+    # ──────────────────────────────────────────────────────────
+
+    def get_pool_pct(self, pool_name: str) -> float:
+        """풀 이름에 해당하는 할당 비율을 반환한다.
+
+        Args:
+            pool_name: 'long_term', 'short_term', 또는 'etf_rotation'.
+
+        Returns:
+            해당 풀의 할당 비율 (0~1).
+        """
+        return {
+            "long_term": self._long_term_pct,
+            "etf_rotation": self._etf_rotation_pct,
+            "short_term": self._short_term_pct,
+        }.get(pool_name, 0.0)
+
+    def merge_pool_targets(
+        self,
+        pool_signals: dict[str, dict[str, float]],
+    ) -> dict[str, float]:
+        """풀별 시그널을 통합 포트폴리오 목표 비중으로 병합한다.
+
+        각 풀의 시그널에 해당 풀 비율을 곱한 후 합산한다.
+        동일 종목이 여러 풀에 포함되면 비중을 합산한다.
+
+        Args:
+            pool_signals: {
+                "long_term": {ticker: weight, ...},
+                "etf_rotation": {ticker: weight, ...},
+            }
+            각 풀의 weight 합은 ~1.0 (100% 기준).
+
+        Returns:
+            통합 {ticker: weight} 딕셔너리. weight 합은 ~1.0 이하.
+        """
+        pool_pct_map = {
+            "long_term": self._long_term_pct,
+            "etf_rotation": self._etf_rotation_pct,
+            "short_term": self._short_term_pct,
+        }
+
+        merged: dict[str, float] = {}
+        for pool_name, signals in pool_signals.items():
+            pct = pool_pct_map.get(pool_name, 0.0)
+            if pct <= 0 or not signals:
+                continue
+            for ticker, weight in signals.items():
+                scaled = round(weight * pct, 6)
+                merged[ticker] = round(merged.get(ticker, 0.0) + scaled, 6)
+
+        return merged
+
+    def auto_tag_from_pool_signals(
+        self,
+        pool_signals: dict[str, dict[str, float]],
+    ) -> None:
+        """통합 리밸런싱 후 풀별 시그널 기반으로 포지션을 태깅한다.
+
+        각 풀의 시그널에 포함된 종목을 해당 풀로 태깅한다.
+        여러 풀에 동시 포함된 종목은 비중이 큰 풀에 배정한다.
+        기존 시그널에 없는 종목의 태그는 제거한다.
+
+        Args:
+            pool_signals: merge_pool_targets()에 전달한 것과 동일한 구조.
+        """
+        pool_pct_map = {
+            "long_term": self._long_term_pct,
+            "etf_rotation": self._etf_rotation_pct,
+            "short_term": self._short_term_pct,
+        }
+
+        # 종목별로 어떤 풀에서 가장 큰 비중을 차지하는지 결정
+        ticker_best_pool: dict[str, tuple[str, float]] = {}
+        for pool_name, signals in pool_signals.items():
+            pct = pool_pct_map.get(pool_name, 0.0)
+            for ticker, weight in signals.items():
+                scaled = weight * pct
+                current = ticker_best_pool.get(ticker)
+                if current is None or scaled > current[1]:
+                    ticker_best_pool[ticker] = (pool_name, scaled)
+
+        # 시그널에 포함된 종목 태깅
+        tagged_count = 0
+        for ticker, (pool_name, _) in ticker_best_pool.items():
+            self.tag_position(
+                ticker, pool_name,
+                metadata={"strategy": pool_name, "auto_tagged": True},
+            )
+            tagged_count += 1
+
+        # 시그널에 없는 기존 태그 정리
+        with self._lock:
+            positions = self._data.get("positions", {})
+            stale = [
+                t for t in positions
+                if t not in ticker_best_pool
+                and positions[t].get("pool") != "short_term"
+            ]
+            for t in stale:
+                del positions[t]
+            if stale:
+                self._data["positions"] = positions
+                self._save()
+                logger.info("자동 태그 정리: %d개 종목 태그 제거", len(stale))
+
+        logger.info("자동 태깅 완료: %d개 종목", tagged_count)
+
+    def backfill_untagged_positions(
+        self,
+        etf_tickers: Optional[set[str]] = None,
+        default_pool: str = "long_term",
+    ) -> int:
+        """태깅되지 않은 기존 보유 종목을 기본 풀로 태깅한다.
+
+        통합 리밸런싱 도입 시 한 번 실행하여 기존 포지션을 마이그레이션한다.
+        이미 태깅된 종목은 건너뛴다.
+
+        Args:
+            etf_tickers: ETF 유니버스 종목 코드 집합. 이 종목은 etf_rotation으로 태깅.
+            default_pool: 미태깅 종목의 기본 풀 (기본 "long_term").
+
+        Returns:
+            태깅된 종목 수.
+        """
+        try:
+            balance = self._kis_client.get_balance()
+            holdings = balance.get("holdings", [])
+        except Exception as e:
+            logger.warning("backfill 중 잔고 조회 실패: %s", e)
+            return 0
+
+        count = 0
+        for h in holdings:
+            ticker = h.get("ticker", "")
+            if not ticker:
+                continue
+            existing_pool = self.get_position_pool(ticker)
+            if existing_pool is not None:
+                continue
+            # ETF 유니버스 종목은 etf_rotation으로 태깅
+            if etf_tickers and ticker in etf_tickers:
+                self.tag_position(
+                    ticker, "etf_rotation",
+                    metadata={"backfilled": True},
+                )
+            else:
+                self.tag_position(
+                    ticker, default_pool,
+                    metadata={"backfilled": True},
+                )
+            count += 1
+
+        if count > 0:
+            logger.info(
+                "backfill 완료: %d개 미태깅 종목 태깅 (기본=%s)",
+                count, default_pool,
+            )
+        return count
+
+    # ──────────────────────────────────────────────────────────
     # 영속화
     # ──────────────────────────────────────────────────────────
 

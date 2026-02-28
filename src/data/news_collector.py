@@ -2,6 +2,7 @@
 
 DART OpenAPI를 사용하여 최근 공시를 수집하고,
 중요 공시 필터링, 포트폴리오 영향도 스코어링, 뉴스레터 생성 기능을 제공한다.
+감성 분류(긍정/부정/중립)로 공시별 주가 영향 방향을 라벨링한다.
 DART_API_KEY가 없으면 graceful하게 빈 결과를 반환한다.
 """
 
@@ -41,6 +42,64 @@ CATEGORY_SCORES: dict[str, int] = {
     "dividend": 5,
     "delisting": 10,
     "investment": 4,
+}
+
+# 감성 분류 키워드 사전 (공시 제목 기반)
+# "positive": 주가 상승 요인, "negative": 주가 하락 요인
+SENTIMENT_KEYWORDS: dict[str, list[str]] = {
+    "positive": [
+        # 실적 호전
+        "실적호전", "실적개선", "매출증가", "영업이익증가",
+        "흑자전환", "흑자", "실적 호전",
+        # 주주환원
+        "자기주식취득", "자사주매입", "자사주취득", "자기주식소각",
+        "배당", "현금ㆍ현물배당", "중간배당",
+        "무상증자",
+        # 사업 확장
+        "신규사업", "신규투자", "시설투자", "해외진출",
+        "수주", "계약체결", "공급계약",
+        "특허취득", "기술이전",
+        # 지분 매수
+        "주식등의대량보유상황보고서",  # 5% 이상 매수 신고
+    ],
+    "negative": [
+        # 실적 악화
+        "실적악화", "매출감소", "영업이익감소", "영업손실",
+        "적자전환", "적자", "적자지속",
+        # 가치 희석
+        "유상증자", "전환사채", "신주인수권부사채",
+        "주식매수선택권부여",
+        # 리스크
+        "상장폐지", "관리종목", "투자주의", "불성실공시",
+        "횡령", "배임", "소송", "과징금", "행정처분",
+        "감사의견거절", "감사의견한정", "감사범위제한",
+        # 지분 매도
+        "최대주주변경", "대주주지분매도",
+        # 영업양수도/분할 (불확실성)
+        "영업양수도", "분할",
+    ],
+    "neutral": [
+        # 정기 보고
+        "사업보고서", "분기보고서", "반기보고서",
+        # 경영 변동
+        "임원ㆍ주요주주", "대표이사변경", "감사변경",
+        "정관변경", "주주총회",
+        # 기타
+        "타법인주식", "투자판단",
+        "합병등종료", "합병보고",
+    ],
+}
+
+# 카테고리 기반 기본 감성 매핑 (키워드 매칭 실패 시 fallback)
+CATEGORY_DEFAULT_SENTIMENT: dict[str, str] = {
+    "earnings": "neutral",       # 실적은 내용에 따라 다름 → 중립 기본
+    "rights_issue": "negative",  # 유상증자는 희석 → 부정
+    "buyback": "positive",       # 자사주 매입 → 긍정
+    "major_shareholder": "neutral",  # 대주주 변동 → 중립
+    "merger": "neutral",         # 합병은 양면성 → 중립
+    "dividend": "positive",      # 배당 → 긍정
+    "delisting": "negative",     # 상장폐지 → 부정
+    "investment": "neutral",     # 투자판단 → 중립
 }
 
 
@@ -241,6 +300,73 @@ class NewsCollector:
 
         return base_score
 
+    @staticmethod
+    def classify_sentiment(report_nm: str, category: Optional[str] = None) -> str:
+        """공시 제목으로 감성(상승/하락/중립)을 분류한다.
+
+        키워드 기반으로 긍정(positive), 부정(negative), 중립(neutral)을 판별한다.
+        키워드 매칭이 되지 않으면 카테고리 기본 감성을 반환한다.
+
+        Args:
+            report_nm: 공시 제목.
+            category: 공시 카테고리 (fallback 용).
+
+        Returns:
+            "positive", "negative", "neutral" 중 하나.
+        """
+        # 키워드 매칭: negative 우선 체크 (리스크 보수적 판단)
+        for kw in SENTIMENT_KEYWORDS.get("negative", []):
+            if kw in report_nm:
+                return "negative"
+
+        for kw in SENTIMENT_KEYWORDS.get("positive", []):
+            if kw in report_nm:
+                return "positive"
+
+        for kw in SENTIMENT_KEYWORDS.get("neutral", []):
+            if kw in report_nm:
+                return "neutral"
+
+        # 카테고리 기반 fallback
+        if category:
+            return CATEGORY_DEFAULT_SENTIMENT.get(category, "neutral")
+
+        return "neutral"
+
+    @staticmethod
+    def sentiment_label(sentiment: str) -> str:
+        """감성 코드를 한글 라벨로 변환한다.
+
+        Args:
+            sentiment: "positive", "negative", "neutral" 중 하나.
+
+        Returns:
+            한글 라벨 문자열 (예: "+상승요인").
+        """
+        labels = {
+            "positive": "+상승요인",
+            "negative": "-하락요인",
+            "neutral": "~중립",
+        }
+        return labels.get(sentiment, "~중립")
+
+    @staticmethod
+    def sentiment_icon(sentiment: str) -> str:
+        """감성 코드를 텔레그램용 아이콘으로 변환한다.
+
+        Args:
+            sentiment: "positive", "negative", "neutral" 중 하나.
+
+        Returns:
+            텍스트 아이콘 문자열.
+        """
+        icons = {
+            "positive": "[+]",
+            "negative": "[-]",
+            "neutral": "[=]",
+        }
+        return icons.get(sentiment, "[=]")
+
     def generate_newsletter(
         self,
         date: Optional[str] = None,
@@ -356,12 +482,17 @@ class NewsCollector:
         self,
         disclosures: Optional[list[dict[str, Any]]] = None,
         holdings: Optional[list[str]] = None,
+        watchlist: Optional[list[str]] = None,
     ) -> str:
         """15:40 장 마감 뉴스를 생성한다.
 
+        포트폴리오 보유종목 > 전략 시그널 관심종목 > 기타 순으로 우선 표시하며,
+        각 공시에 감성 분류(상승/하락/중립) 아이콘을 표시한다.
+
         Args:
             disclosures: 공시 리스트. None이면 자동 수집.
-            holdings: 보유 종목코드 리스트.
+            holdings: 보유 종목코드(stock_code) 리스트.
+            watchlist: 전략 시그널 상위 종목코드 리스트 (관심종목).
 
         Returns:
             포매팅된 장 마감 뉴스.
@@ -380,32 +511,81 @@ class NewsCollector:
             lines.append("오늘의 중요 공시 없음")
             return "\n".join(lines)
 
-        # 보유종목 관련 우선
+        holdings_set = set(holdings) if holdings else set()
+        watchlist_set = set(watchlist) if watchlist else set()
+        # 관심종목에서 보유종목은 제외 (중복 방지)
+        watchlist_set -= holdings_set
+
+        # 3그룹 분류: 보유종목 > 관심종목 > 기타
         holding_news: list[dict] = []
+        watchlist_news: list[dict] = []
         other_news: list[dict] = []
 
         for disc in disclosures:
             stock_code = disc.get("stock_code", "")
-            if holdings and stock_code in holdings:
+            if stock_code in holdings_set:
                 holding_news.append(disc)
+            elif stock_code in watchlist_set:
+                watchlist_news.append(disc)
             else:
                 other_news.append(disc)
+
+        # 감성 요약 통계
+        sentiment_counts = {"positive": 0, "negative": 0, "neutral": 0}
+        for disc in disclosures:
+            report_nm = disc.get("report_nm", "")
+            category = disc.get("category")
+            s = self.classify_sentiment(report_nm, category)
+            sentiment_counts[s] = sentiment_counts.get(s, 0) + 1
+
+        lines.append(
+            f"총 {len(disclosures)}건 "
+            f"([+]{sentiment_counts['positive']} "
+            f"[-]{sentiment_counts['negative']} "
+            f"[=]{sentiment_counts['neutral']})"
+        )
 
         if holding_news:
             lines.append(f"\n[보유종목 관련] {len(holding_news)}건")
             for disc in holding_news:
-                corp_name = disc.get("corp_name", "?")
-                report_nm = disc.get("report_nm", "?")
-                lines.append(f"  * {corp_name}: {report_nm}")
+                lines.append(self._format_disc_with_sentiment(disc, tag="보유"))
+
+        if watchlist_news:
+            lines.append(f"\n[관심종목 관련] {len(watchlist_news)}건")
+            for disc in watchlist_news:
+                lines.append(self._format_disc_with_sentiment(disc, tag="관심"))
 
         if other_news:
             lines.append(f"\n[기타 주요 공시] {len(other_news)}건")
             for disc in other_news[:10]:
-                corp_name = disc.get("corp_name", "?")
-                report_nm = disc.get("report_nm", "?")
-                lines.append(f"  - {corp_name}: {report_nm}")
+                lines.append(self._format_disc_with_sentiment(disc))
 
         return "\n".join(lines)
+
+    def _format_disc_with_sentiment(
+        self,
+        disc: dict[str, Any],
+        tag: Optional[str] = None,
+    ) -> str:
+        """개별 공시를 감성 아이콘 포함 1~2줄로 포매팅한다.
+
+        Args:
+            disc: 공시 딕셔너리.
+            tag: 접두 태그 (예: "보유", "관심"). None이면 생략.
+
+        Returns:
+            포매팅된 문자열.
+        """
+        corp_name = disc.get("corp_name", "?")
+        report_nm = disc.get("report_nm", "?")
+        category = disc.get("category")
+        sentiment = self.classify_sentiment(report_nm, category)
+        icon = self.sentiment_icon(sentiment)
+        label = self.sentiment_label(sentiment)
+
+        tag_str = f"[{tag}]" if tag else ""
+        prefix = f"  {icon}{tag_str} " if tag_str else f"  {icon} "
+        return f"{prefix}{corp_name}: {report_nm} ({label})"
 
     # ------------------------------------------------------------------
     # EOD 공시 모니터링 + 투자 교육

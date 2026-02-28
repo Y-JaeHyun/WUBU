@@ -201,6 +201,7 @@ class PositionManager:
         target_weights: dict[str, float],
         allocator=None,
         pool: str | None = None,
+        integrated: bool = False,
     ) -> tuple[list[dict], list[dict]]:
         """현재 포지션과 목표 비중을 비교하여 리밸런싱 주문을 생성한다.
 
@@ -212,6 +213,7 @@ class PositionManager:
             allocator: PortfolioAllocator 인스턴스 (선택).
                 있으면 다른 풀의 포지션을 리밸런싱 대상에서 제외한다.
             pool: 리밸런싱 대상 풀. None이면 "long_term"으로 동작.
+            integrated: True이면 통합 모드로 풀 제외 로직을 바이패스한다.
 
         Returns:
             (sell_orders, buy_orders) 튜플.
@@ -226,7 +228,8 @@ class PositionManager:
             return [], []
 
         # 1-1. allocator가 있으면 다른 풀의 포지션을 현재 포지션에서 제외
-        if allocator is not None:
+        # 통합 모드에서는 전체 포트폴리오를 대상으로 하므로 제외하지 않음
+        if allocator is not None and not integrated:
             all_pools = {"long_term", "short_term", "etf_rotation"}
             target_pool = pool or "long_term"
             exclude_pools = all_pools - {target_pool}

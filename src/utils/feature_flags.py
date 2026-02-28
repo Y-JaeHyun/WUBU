@@ -179,6 +179,22 @@ class FeatureFlags:
                 "update_freq": "monthly",
             },
         },
+        "enhanced_etf_rotation": {
+            "enabled": True,
+            "description": "Enhanced ETF 로테이션 (복합모멘텀+레짐필터+추세필터)",
+            "config": {
+                "cash_ratio_risk_off": 0.7,
+                "use_vol_weight": True,
+                "use_market_filter": True,
+                "use_trend_filter": True,
+                "use_max_drawdown_filter": True,
+                "max_drawdown_filter": 0.15,
+                "vol_lookback": 60,
+                "trend_short_ma": 20,
+                "trend_long_ma": 60,
+                "market_ma_period": 200,
+            },
+        },
     }
 
     def __init__(self, flags_path: Optional[str] = None) -> None:

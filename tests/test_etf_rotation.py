@@ -1005,55 +1005,23 @@ class TestETFRotationRebalanceE2E:
 
         return bot
 
-    def test_full_flow_monthly_first_day(self):
-        """월초 거래일에 정상 리밸런싱이 실행된다."""
+    def test_rebalance_day_logs_momentum_only(self):
+        """리밸런싱일: 09:05 통합 실행으로 전환. 모멘텀 순위만 로깅."""
         from src.scheduler.main import TradingBot
 
         bot = self._make_mock_bot(is_rebalance_day=True)
 
-        # 실행
+        # 실행 (모니터링 전용)
         TradingBot.execute_etf_rotation_rebalance(bot)
 
-        # 검증: executor.execute_rebalance가 호출되었다
-        bot.executor.execute_rebalance.assert_called_once()
-        call_args = bot.executor.execute_rebalance.call_args
-        signals = call_args[0][0]
-        pool = call_args[1].get("pool") or call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("pool")
+        # executor.execute_rebalance는 호출되지 않는다 (09:05에서 통합)
+        bot.executor.execute_rebalance.assert_not_called()
 
-        # 시그널이 dict이고 비어있지 않다
-        assert isinstance(signals, dict)
-        assert len(signals) > 0
+        # ETF 가격은 조회한다 (모멘텀 순위 로깅용)
+        bot._fetch_etf_prices.assert_called_once()
 
-        # pool은 etf_rotation이다
-        assert pool == "etf_rotation"
-
-        # 비중 합이 1.0이다
-        total_weight = sum(signals.values())
-        assert abs(total_weight - 1.0) < 1e-6
-
-        # tag_position이 시그널 수만큼 호출되었다
-        assert bot.allocator.tag_position.call_count == len(signals)
-
-        # 알림이 발송되었다 (시작 + 완료 = 최소 2회)
-        assert bot._send_notification.call_count >= 2
-
-    def test_top_momentum_selected(self):
-        """모멘텀 상위 2개 ETF가 선정된다."""
-        from src.scheduler.main import TradingBot
-
-        bot = self._make_mock_bot(is_rebalance_day=True)
-
-        TradingBot.execute_etf_rotation_rebalance(bot)
-
-        call_args = bot.executor.execute_rebalance.call_args
-        signals = call_args[0][0]
-
-        # 069500(+30%)과 133690(+20%)이 상위 2개
-        assert "069500" in signals
-        assert "133690" in signals
-
-    def test_skipped_non_rebalance_day(self):
-        """리밸런싱일이 아니면 executor가 호출되지 않는다."""
+    def test_non_rebalance_day_logs_momentum(self):
+        """비 리밸런싱일: 모멘텀 순위만 로깅."""
         from src.scheduler.main import TradingBot
 
         bot = self._make_mock_bot(is_rebalance_day=False)
@@ -1061,6 +1029,7 @@ class TestETFRotationRebalanceE2E:
         TradingBot.execute_etf_rotation_rebalance(bot)
 
         bot.executor.execute_rebalance.assert_not_called()
+        bot._fetch_etf_prices.assert_called_once()
 
     def test_flag_disabled_skips(self):
         """etf_rotation 플래그 OFF 시 즉시 리턴한다."""
@@ -1073,8 +1042,8 @@ class TestETFRotationRebalanceE2E:
         bot.executor.execute_rebalance.assert_not_called()
         bot._fetch_etf_prices.assert_not_called()
 
-    def test_empty_prices_skips(self):
-        """ETF 가격 데이터가 없으면 스킵한다."""
+    def test_empty_prices_skips_gracefully(self):
+        """ETF 가격 데이터가 없으면 모멘텀 순위 로깅도 스킵."""
         from src.scheduler.main import TradingBot
 
         bot = self._make_mock_bot(is_rebalance_day=True)
@@ -1083,48 +1052,6 @@ class TestETFRotationRebalanceE2E:
         TradingBot.execute_etf_rotation_rebalance(bot)
 
         bot.executor.execute_rebalance.assert_not_called()
-
-    def test_all_negative_momentum_uses_safe_asset(self):
-        """모든 ETF가 하락 시 안전자산(단기채권)으로 전환한다."""
-        from src.scheduler.main import TradingBot
-
-        bot = self._make_mock_bot(is_rebalance_day=True)
-        # 모든 ETF 하락
-        bot._fetch_etf_prices.return_value = {
-            "069500": self._make_etf_price(10000, 8000),   # -20%
-            "133690": self._make_etf_price(10000, 7000),   # -30%
-            "371460": self._make_etf_price(10000, 9000),   # -10%
-            "091160": self._make_etf_price(10000, 8500),   # -15%
-            "091170": self._make_etf_price(10000, 7500),   # -25%
-            "117700": self._make_etf_price(10000, 8200),   # -18%
-            "132030": self._make_etf_price(10000, 9500),   # -5%
-            "464310": self._make_etf_price(10000, 8800),   # -12%
-            "469150": self._make_etf_price(10000, 9200),   # -8%
-        }
-
-        TradingBot.execute_etf_rotation_rebalance(bot)
-
-        call_args = bot.executor.execute_rebalance.call_args
-        signals = call_args[0][0]
-
-        # 안전자산(439870)이 포함되어야 한다
-        assert "439870" in signals
-        # 안전자산 비중이 1.0이어야 한다
-        assert abs(signals["439870"] - 1.0) < 1e-6
-
-    def test_notification_contains_result_info(self):
-        """알림에 결과 정보가 포함된다."""
-        from src.scheduler.main import TradingBot
-
-        bot = self._make_mock_bot(is_rebalance_day=True)
-
-        TradingBot.execute_etf_rotation_rebalance(bot)
-
-        # 완료 알림 검증
-        calls = bot._send_notification.call_args_list
-        messages = [str(c) for c in calls]
-        combined = " ".join(messages)
-        assert "ETF 로테이션" in combined
 
 
 # ===================================================================

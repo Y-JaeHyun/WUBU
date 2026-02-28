@@ -68,6 +68,7 @@ class Backtest:
         vol_targeting: 변동성 타겟팅 오버레이 객체 (선택, 기본 None)
         min_rebalance_threshold: 비중 변화 임계값. 이 값 미만의 비중 변화는
             거래하지 않는다. (기본 0.0 = 모든 변화 거래)
+        lookback_days: 가격 데이터 수집 시 start_date 이전 영업일 수 (기본 400)
     """
 
     def __init__(
@@ -83,6 +84,7 @@ class Backtest:
         drawdown_overlay: Optional["DrawdownOverlay"] = None,
         vol_targeting: Optional["VolTargetingOverlay"] = None,
         min_rebalance_threshold: float = 0.0,
+        lookback_days: int = 400,
     ):
         self.strategy = strategy
         self.start_date = start_date.replace("-", "")
@@ -95,6 +97,12 @@ class Backtest:
         self.drawdown_overlay = drawdown_overlay
         self.vol_targeting = vol_targeting
         self.min_rebalance_threshold = min_rebalance_threshold
+        self.lookback_days = lookback_days
+
+        # 가격 데이터 수집 시작일: start_date에서 lookback_days만큼 이전
+        # 전략이 모멘텀 스코어, 상장기간 필터 등에 충분한 과거 데이터를 사용할 수 있도록 함
+        data_start = pd.Timestamp(self.start_date) - pd.tseries.offsets.BDay(lookback_days)
+        self._data_start_date = data_start.strftime("%Y%m%d")
 
         # 결과 저장
         self._portfolio_history: list[dict] = []
@@ -138,13 +146,15 @@ class Backtest:
     def _fetch_price(self, ticker: str) -> pd.DataFrame:
         """종목의 전체 기간 가격 데이터를 가져온다.
 
+        lookback_days 만큼 start_date 이전부터 데이터를 수집하여,
+        모멘텀·상장기간 필터 등이 첫 리밸런싱부터 충분한 과거 데이터를 갖도록 한다.
         주식 API에서 데이터가 빈 경우 ETF API로 fallback한다.
         """
-        df = get_price_data(ticker, self.start_date, self.end_date)
+        df = get_price_data(ticker, self._data_start_date, self.end_date)
         if df.empty:
             try:
                 from src.data.etf_collector import get_etf_price
-                df = get_etf_price(ticker, self.start_date, self.end_date)
+                df = get_etf_price(ticker, self._data_start_date, self.end_date)
                 if not df.empty:
                     logger.info(f"ETF fallback 성공: {ticker}")
             except Exception as e:
@@ -179,24 +189,29 @@ class Backtest:
         holdings: dict[str, int] = {}  # ticker -> 보유 수량
         price_cache: dict[str, pd.DataFrame] = {}  # ticker -> 가격 DataFrame
 
-        # 마켓 타이밍 오버레이용 지수 데이터 로드
+        # 지수 데이터 로드 (마켓 타이밍 오버레이 + 잔차 모멘텀 등 전략용)
         index_prices: pd.Series = pd.Series(dtype=float)
-        if self.overlay is not None:
-            try:
-                from src.data.index_collector import get_index_data
-                index_df = get_index_data(
-                    self.overlay.reference_index,
-                    self.start_date,
-                    self.end_date,
+        try:
+            from src.data.index_collector import get_index_data
+            reference_index = (
+                self.overlay.reference_index if self.overlay is not None
+                else "KOSPI"
+            )
+            index_df = get_index_data(
+                reference_index,
+                self._data_start_date,
+                self.end_date,
+            )
+            if not index_df.empty and "close" in index_df.columns:
+                index_prices = index_df["close"]
+                logger.info(
+                    f"지수 데이터 로드 완료: {reference_index}, "
+                    f"{len(index_prices)}일"
                 )
-                if not index_df.empty and "close" in index_df.columns:
-                    index_prices = index_df["close"]
-                    logger.info(
-                        f"지수 데이터 로드 완료: {self.overlay.reference_index}, "
-                        f"{len(index_prices)}일"
-                    )
-            except Exception as e:
-                logger.warning(f"지수 데이터 로드 실패: {e}. 오버레이 미적용.")
+        except Exception as e:
+            logger.warning(f"지수 데이터 로드 실패: {e}.")
+
+        if self.overlay is not None:
             # 오버레이 상태 초기화
             self.overlay.reset()
 
@@ -217,6 +232,27 @@ class Backtest:
                 except Exception as e:
                     logger.warning(f"펀더멘탈 데이터 조회 실패 ({date}): {e}")
                     fundamentals = pd.DataFrame()
+
+                # 유니버스 종목의 가격 데이터를 사전 로드한다.
+                # 모멘텀 등 가격 기반 필터/스코어링이 필요한 전략을 위해,
+                # generate_signals 호출 전에 price_cache를 채운다.
+                if not fundamentals.empty and "ticker" in fundamentals.columns:
+                    universe_tickers = fundamentals["ticker"].tolist()
+                    loaded_count = 0
+                    for ticker in universe_tickers:
+                        if ticker not in price_cache:
+                            try:
+                                price_cache[ticker] = self._fetch_price(ticker)
+                                loaded_count += 1
+                            except Exception as e:
+                                logger.debug(
+                                    f"유니버스 가격 사전 로드 실패: {ticker} - {e}"
+                                )
+                    if loaded_count > 0:
+                        logger.info(
+                            f"유니버스 가격 사전 로드: {loaded_count}개 신규 "
+                            f"(캐시 총 {len(price_cache)}개)"
+                        )
 
                 data = {
                     "fundamentals": fundamentals,

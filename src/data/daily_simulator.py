@@ -38,6 +38,8 @@ class DailySimulator:
         self.strategy_data: dict = {}
         self.etf_prices: dict = {}
         self.dry_run_results: dict[str, dict] = {}
+        self.integrated_dry_run: Optional[dict] = None
+        self.pool_allocation: Optional[dict[str, float]] = None
         self._ticker_names: dict[str, str] = {}
 
     def run_daily_simulation(self, date: Optional[str] = None) -> dict[str, Any]:
@@ -372,6 +374,105 @@ class DailySimulator:
         except Exception as e:
             logger.debug("리밸런싱 카운트다운 계산 실패: %s", e)
             return -1
+
+    def format_integrated_report(self, date: Optional[str] = None) -> str:
+        """통합 포트폴리오 리포트를 포맷한다.
+
+        기존 전략별 리포트에 통합 포트폴리오 섹션을 추가한다.
+        풀 배분, 병합 매도/매수 예상을 포함한다.
+
+        Args:
+            date: 리포트 날짜. None이면 가장 최근.
+
+        Returns:
+            포매팅된 텔레그램 메시지 문자열.
+        """
+        # 기존 전략별 리포트
+        base_report = self.format_telegram_report(date)
+
+        # 통합 정보가 없으면 기존 리포트만 반환
+        if not self.integrated_dry_run:
+            return base_report
+
+        dry = self.integrated_dry_run
+        lines: list[str] = [base_report]
+        lines.append("")
+        lines.append("[통합 포트폴리오 (병합)]")
+        lines.append("=" * 35)
+
+        # 풀 배분 표시
+        if self.pool_allocation:
+            lines.append("풀 배분:")
+            for pool_name, pct in self.pool_allocation.items():
+                lines.append(f"  {pool_name}: {pct:.0%}")
+
+        # 풀별 분해 정보
+        pool_breakdown = dry.get("pool_breakdown", {})
+        if pool_breakdown:
+            lines.append("")
+            lines.append("풀별 종목:")
+            for pool_name, info in pool_breakdown.items():
+                count = info.get("original_count", 0)
+                total_w = info.get("total_weight", 0)
+                lines.append(
+                    f"  {pool_name}: {count}종목 (비중 {total_w:.1%})"
+                )
+
+        # 통합 매도/매수 예상
+        sell_orders = dry.get("sell_orders", [])
+        buy_orders = dry.get("buy_orders", [])
+        total_sell = dry.get("total_sell_amount", 0)
+        total_buy = dry.get("total_buy_amount", 0)
+        portfolio_value = dry.get("portfolio_value", 0)
+
+        lines.append("")
+        if portfolio_value > 0:
+            lines.append(f"포트폴리오: {portfolio_value:,}원")
+
+        if not sell_orders and not buy_orders:
+            lines.append("변경 없음 (현재 = 목표)")
+        else:
+            if sell_orders:
+                lines.append(
+                    f"매도 예상: {len(sell_orders)}건 ({total_sell:,}원)"
+                )
+                for order in sell_orders[:5]:
+                    ticker = order.get("ticker", "?")
+                    name = self._ticker_names.get(ticker, ticker)
+                    qty = order.get("qty", 0)
+                    amount = order.get("amount", 0)
+                    lines.append(
+                        f"  {name}({ticker}) {qty}주 ({amount:,}원)"
+                    )
+                if len(sell_orders) > 5:
+                    lines.append(f"  ... 외 {len(sell_orders) - 5}건")
+
+            if buy_orders:
+                lines.append(
+                    f"매수 예상: {len(buy_orders)}건 ({total_buy:,}원)"
+                )
+                for order in buy_orders[:5]:
+                    ticker = order.get("ticker", "?")
+                    name = self._ticker_names.get(ticker, ticker)
+                    qty = order.get("qty", 0)
+                    amount = order.get("amount", 0)
+                    lines.append(
+                        f"  {name}({ticker}) {qty}주 ({amount:,}원)"
+                    )
+                if len(buy_orders) > 5:
+                    lines.append(f"  ... 외 {len(buy_orders) - 5}건")
+
+        # 리스크 체크 표시
+        risk = dry.get("risk_check", {})
+        if not risk.get("passed", True):
+            lines.append("")
+            lines.append("리스크 경고:")
+            for w in risk.get("warnings", []):
+                lines.append(f"  - {w}")
+
+        lines.append("")
+        lines.append("=" * 35)
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # 내부 헬퍼

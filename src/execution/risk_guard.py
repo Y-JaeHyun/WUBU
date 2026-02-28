@@ -39,12 +39,13 @@ class RiskGuard:
 
     # 모의투자 기본 한도
     DEFAULT_MAX_ORDER_PCT = 0.10
-    DEFAULT_MAX_DAILY_TURNOVER = 0.30
+    DEFAULT_MAX_DAILY_TURNOVER = 1.50
     DEFAULT_MAX_SINGLE_STOCK_PCT = 0.15
 
-    # 실전투자 기본 한도 (보수적)
+    # 실전투자 기본 한도
+    # 월 1회 통합 리밸런싱: (매도+매수)/총액 기준 60~100% 정상 범위
     LIVE_MAX_ORDER_PCT = 0.05
-    LIVE_MAX_DAILY_TURNOVER = 0.20
+    LIVE_MAX_DAILY_TURNOVER = 1.00
     LIVE_MAX_SINGLE_STOCK_PCT = 0.10
 
     def __init__(
