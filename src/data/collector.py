@@ -10,14 +10,9 @@ from typing import Optional
 
 import pandas as pd
 
-from src.data import krx_provider as _krx
+from src.data.data_proxy import create_stock_api
 
-if _krx.is_available():
-    pykrx_stock = _krx  # type: ignore[assignment]
-else:
-    from src.data import krx_session
-    krx_session.init()  # KRX_DATA_ID/PW 설정 시 세션 쿠키 주입
-    from pykrx import stock as pykrx_stock
+pykrx_stock = create_stock_api()
 
 from src.utils.logger import get_logger
 

@@ -68,6 +68,16 @@ def is_available() -> bool:
     return _init_api(key)
 
 
+def _has_api_key() -> bool:
+    """KRX_API_KEY가 설정되어 있고 초기화 가능한지 확인한다 (feature flag 무관)."""
+    if _initialized:
+        return True
+    key = os.environ.get("KRX_API_KEY", "").strip()
+    if not key:
+        return False
+    return _init_api(key)
+
+
 def _ensure_api() -> KRXOpenAPI:
     """API 클라이언트가 초기화되었는지 확인하고 반환한다."""
     if _api is None:

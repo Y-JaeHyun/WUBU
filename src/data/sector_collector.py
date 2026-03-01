@@ -7,17 +7,12 @@ WICS 데이터는 KRX Open API 미지원이므로 pykrx fallback을 사용한다
 from typing import Dict, List, Optional
 import pandas as pd
 
-from src.data import krx_provider as _krx
+from src.data.data_proxy import create_stock_api
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-if _krx.is_available():
-    stock = _krx  # type: ignore[assignment]
-else:
-    from src.data import krx_session
-    krx_session.init()
-    from pykrx import stock  # type: ignore[assignment]
+stock = create_stock_api()
 
 
 def get_sector_classification(date: str, market: str = "ALL") -> pd.DataFrame:
