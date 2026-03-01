@@ -13,6 +13,8 @@ from src.data import krx_provider as _krx
 if _krx.is_available():
     pykrx_stock = _krx  # type: ignore[assignment]
 else:
+    from src.data import krx_session
+    krx_session.init()
     from pykrx import stock as pykrx_stock
 
 from src.data.collector import _format_date, _retry_on_failure

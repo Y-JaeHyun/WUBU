@@ -15,6 +15,8 @@ from src.data import krx_provider as _krx
 if _krx.is_available():
     pykrx_stock = _krx  # type: ignore[assignment]
 else:
+    from src.data import krx_session
+    krx_session.init()  # KRX_DATA_ID/PW 설정 시 세션 쿠키 주입
     from pykrx import stock as pykrx_stock
 
 from src.utils.logger import get_logger

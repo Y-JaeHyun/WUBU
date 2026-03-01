@@ -15,6 +15,8 @@ logger = get_logger(__name__)
 if _krx.is_available():
     stock = _krx  # type: ignore[assignment]
 else:
+    from src.data import krx_session
+    krx_session.init()
     from pykrx import stock  # type: ignore[assignment]
 
 
