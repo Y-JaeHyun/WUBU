@@ -1,6 +1,6 @@
 """ETF 가격 데이터 수집 모듈.
 
-pykrx를 활용하여 한국 상장 ETF의 가격(OHLCV) 데이터와
+pykrx 또는 KRX Open API를 활용하여 한국 상장 ETF의 가격(OHLCV) 데이터와
 종목 리스트를 수집한다. 듀얼 모멘텀 등 ETF 기반 자산배분 전략에서 사용한다.
 """
 
@@ -8,7 +8,13 @@ import time
 from typing import Optional
 
 import pandas as pd
-from pykrx import stock as pykrx_stock
+
+from src.data import krx_provider as _krx
+
+if _krx.is_available():
+    pykrx_stock = _krx  # type: ignore[assignment]
+else:
+    from pykrx import stock as pykrx_stock
 
 from src.utils.logger import get_logger
 

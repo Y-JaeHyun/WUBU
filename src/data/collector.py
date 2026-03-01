@@ -1,6 +1,7 @@
 """한국 주식 데이터 수집 모듈.
 
-pykrx를 사용하여 KOSPI/KOSDAQ 종목의 OHLCV, 시가총액, 기본 지표 데이터를 수집한다.
+pykrx 또는 KRX Open API를 사용하여 KOSPI/KOSDAQ 종목의 OHLCV, 시가총액, 기본 지표 데이터를 수집한다.
+KRX_API_KEY 환경변수 + krx_openapi 플래그 설정 시 KRX Open API 사용, 아니면 pykrx fallback.
 """
 
 import functools
@@ -8,7 +9,13 @@ import time
 from typing import Optional
 
 import pandas as pd
-from pykrx import stock as pykrx_stock
+
+from src.data import krx_provider as _krx
+
+if _krx.is_available():
+    pykrx_stock = _krx  # type: ignore[assignment]
+else:
+    from pykrx import stock as pykrx_stock
 
 from src.utils.logger import get_logger
 

@@ -179,6 +179,14 @@ class FeatureFlags:
                 "update_freq": "monthly",
             },
         },
+        "krx_openapi": {
+            "enabled": False,
+            "description": "KRX Open API 사용 (pykrx 대체)",
+            "config": {
+                "rate_limit_per_second": 5,
+                "daily_quota": 10000,
+            },
+        },
         "enhanced_etf_rotation": {
             "enabled": False,
             "description": "Enhanced ETF 로테이션 (복합모멘텀+레짐필터+추세필터)",
