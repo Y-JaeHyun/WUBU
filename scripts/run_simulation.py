@@ -16,7 +16,7 @@ import pandas as pd
 from src.data.collector import get_all_fundamentals, get_price_data
 from src.data.index_collector import get_index_data
 from src.data.daily_simulator import DailySimulator
-from src.strategy.multi_factor import MultiFactorStrategy
+from src.strategy.strategy_config import create_multi_factor
 from src.strategy.etf_rotation import ETFRotationStrategy
 from src.strategy.three_factor import ThreeFactorStrategy
 from src.utils.logger import get_logger
@@ -200,16 +200,7 @@ def main():
     print("[3/4] 전략 시뮬레이션 실행 중...")
 
     strategies = {
-        "multi_factor": MultiFactorStrategy(
-            factors=["value", "momentum"],
-            weights=[0.5, 0.5],
-            combine_method="zscore",
-            num_stocks=7,
-            apply_market_timing=True,
-            turnover_penalty=0.1,
-            max_group_weight=0.25,
-            max_stocks_per_conglomerate=2,
-        ),
+        "multi_factor": create_multi_factor("live"),
         "three_factor": ThreeFactorStrategy(num_stocks=10),
     }
 

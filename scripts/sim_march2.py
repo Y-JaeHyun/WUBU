@@ -13,7 +13,7 @@ from datetime import datetime, date
 # 데이터 수집
 from src.data.collector import get_all_fundamentals, get_price_data
 from src.data.index_collector import get_index_data
-from src.strategy.multi_factor import MultiFactorStrategy
+from src.strategy.strategy_config import create_multi_factor
 from src.strategy.etf_rotation import ETFRotationStrategy
 from src.execution.portfolio_allocator import PortfolioAllocator
 from src.execution.position_manager import PositionManager
@@ -70,13 +70,7 @@ strategy_data = {
 
 # 2. 장기 시그널 생성
 print(f"\n[2] 장기 전략 시그널 생성 (MultiFactor)...")
-strategy = MultiFactorStrategy(
-    value_weight=0.4,
-    momentum_weight=0.6,
-    num_stocks=10,
-    turnover_penalty=0.1,
-    apply_market_timing=True,
-)
+strategy = create_multi_factor("live", num_stocks=10)
 
 today_str = "20260302"
 long_signals = strategy.generate_signals(today_str, strategy_data)

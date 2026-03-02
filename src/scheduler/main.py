@@ -2492,13 +2492,8 @@ class TradingBot:
         """
         try:
             if name == "multi_factor":
-                from src.strategy.multi_factor import MultiFactorStrategy
-                return MultiFactorStrategy(
-                    factors=["value", "momentum"],
-                    weights=[0.5, 0.5],
-                    combine_method="zscore",
-                    num_stocks=7,
-                )
+                from src.strategy.strategy_config import create_multi_factor
+                return create_multi_factor("live", apply_market_timing=False)
             elif name == "three_factor":
                 from src.strategy.three_factor import ThreeFactorStrategy
 
@@ -2958,16 +2953,9 @@ def main() -> None:
 
     # 전략 설정 (실제 운영 시 원하는 전략으로 교체)
     try:
-        from src.strategy.multi_factor import MultiFactorStrategy
+        from src.strategy.strategy_config import create_multi_factor
 
-        strategy = MultiFactorStrategy(
-            factors=["value", "momentum"],
-            weights=[0.5, 0.5],
-            combine_method="zscore",
-            num_stocks=7,
-            apply_market_timing=True,
-            turnover_penalty=0.1,
-        )
+        strategy = create_multi_factor("live")
         bot.set_strategy(strategy)
     except Exception as e:
         logger.warning("기본 전략 로드 실패: %s. 전략 없이 시작합니다.", e)

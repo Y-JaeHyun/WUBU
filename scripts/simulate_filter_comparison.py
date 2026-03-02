@@ -32,7 +32,7 @@ def run_comparison(
     """3/3 리밸런싱 필터 비교 시뮬레이션을 실행한다."""
     from src.data.collector import get_all_fundamentals, get_price_data
     from src.data.index_collector import get_index_data
-    from src.strategy.multi_factor import MultiFactorStrategy
+    from src.strategy.strategy_config import create_multi_factor
 
     print(f"\n{'='*70}")
     print("  MultiFactor 필터 비교 시뮬레이션")
@@ -104,27 +104,15 @@ def run_comparison(
 
     # ── 2. Original 시그널 ──
     print("[2/3] Original MultiFactor(V+M) 시그널 생성...")
-    original_strategy = MultiFactorStrategy(
-        factors=["value", "momentum"],
-        weights=[0.5, 0.5],
-        combine_method="zscore",
-        num_stocks=10,
-        turnover_penalty=0.1,
-    )
+    original_strategy = create_multi_factor("backtest", spike_filter=False)
     original_signals = original_strategy.generate_signals(data_date, strategy_data)
     print(f"  -> {len(original_signals)}종목 선정")
 
     # ── 3. Filtered 시그널 ──
     print("[3/3] Filtered MultiFactor(V+M) 시그널 생성...")
-    filtered_strategy = MultiFactorStrategy(
-        factors=["value", "momentum"],
-        weights=[0.5, 0.5],
-        combine_method="zscore",
-        num_stocks=10,
-        turnover_penalty=0.1,
+    filtered_strategy = create_multi_factor(
+        "backtest",
         spike_filter=True,
-        spike_threshold_1d=0.15,
-        spike_threshold_5d=0.25,
         value_trap_filter=True,
         min_roe=0.0,
         min_f_score=1,

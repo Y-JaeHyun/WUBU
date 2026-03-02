@@ -94,15 +94,10 @@ def build_long_term_strategies() -> list[tuple[str, object, dict]]:
     ))
 
     # 5. MultiFactor (V+M, 회전율 페널티)
+    from src.strategy.strategy_config import create_multi_factor
     strategies.append((
         "MultiFactor(V+M)",
-        MultiFactorStrategy(
-            factors=["value", "momentum"],
-            weights=[0.5, 0.5],
-            combine_method="zscore",
-            num_stocks=10,
-            turnover_penalty=0.1,
-        ),
+        create_multi_factor("backtest"),
         {},
     ))
 
@@ -113,12 +108,7 @@ def build_long_term_strategies() -> list[tuple[str, object, dict]]:
     )
     strategies.append((
         "MultiFactor+MT",
-        MultiFactorStrategy(
-            factors=["value", "momentum"],
-            weights=[0.5, 0.5],
-            combine_method="zscore",
-            num_stocks=10,
-        ),
+        create_multi_factor("backtest"),
         {"overlay": overlay},
     ))
 
@@ -161,11 +151,7 @@ def build_long_term_strategies() -> list[tuple[str, object, dict]]:
     ))
 
     # 12. RiskParity(MultiFactor)
-    base_strategy = MultiFactorStrategy(
-        factors=["value", "momentum"],
-        weights=[0.5, 0.5],
-        num_stocks=10,
-    )
+    base_strategy = create_multi_factor("backtest", turnover_penalty=0.0)
     strategies.append((
         "RiskParity(MF)",
         RiskParityStrategy(stock_selector=base_strategy, max_weight=0.15),

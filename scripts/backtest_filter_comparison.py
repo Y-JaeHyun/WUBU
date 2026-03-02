@@ -33,41 +33,24 @@ END_DATE = "20260227"  # 마지막 영업일 (토요일 제외)
 
 def build_filter_variants():
     """필터 조합별 전략 인스턴스를 생성한다."""
-    from src.strategy.multi_factor import MultiFactorStrategy
-
-    base_params = dict(
-        factors=["value", "momentum"],
-        weights=[0.5, 0.5],
-        combine_method="zscore",
-        num_stocks=10,
-        turnover_penalty=0.1,
-    )
+    from src.strategy.strategy_config import create_multi_factor
 
     return [
-        ("1. baseline", MultiFactorStrategy(**base_params)),
-        ("2. +spike(15/25)", MultiFactorStrategy(
-            **base_params,
-            spike_filter=True, spike_threshold_1d=0.15, spike_threshold_5d=0.25)),
-        ("3. +vtrap(roe>=0)", MultiFactorStrategy(
-            **base_params,
-            value_trap_filter=True, min_roe=0.0)),
-        ("4. +vtrap(f1)", MultiFactorStrategy(
-            **base_params,
+        ("1. baseline", create_multi_factor("backtest", spike_filter=False)),
+        ("2. +spike(15/25)", create_multi_factor("backtest")),
+        ("3. +vtrap(roe>=0)", create_multi_factor(
+            "backtest", spike_filter=False, value_trap_filter=True, min_roe=0.0)),
+        ("4. +vtrap(f1)", create_multi_factor(
+            "backtest", spike_filter=False,
             value_trap_filter=True, min_roe=0.0, min_f_score=1)),
-        ("5. +spike+vtrap", MultiFactorStrategy(
-            **base_params,
-            spike_filter=True, spike_threshold_1d=0.15, spike_threshold_5d=0.25,
-            value_trap_filter=True, min_roe=0.0)),
-        ("6. +spike+vtrap(f1)", MultiFactorStrategy(
-            **base_params,
-            spike_filter=True, spike_threshold_1d=0.15, spike_threshold_5d=0.25,
-            value_trap_filter=True, min_roe=0.0, min_f_score=1)),
-        ("7. +spike(10/20)", MultiFactorStrategy(
-            **base_params,
-            spike_filter=True, spike_threshold_1d=0.10, spike_threshold_5d=0.20)),
-        ("8. +spike(20/30)", MultiFactorStrategy(
-            **base_params,
-            spike_filter=True, spike_threshold_1d=0.20, spike_threshold_5d=0.30)),
+        ("5. +spike+vtrap", create_multi_factor(
+            "backtest", value_trap_filter=True, min_roe=0.0)),
+        ("6. +spike+vtrap(f1)", create_multi_factor(
+            "backtest", value_trap_filter=True, min_roe=0.0, min_f_score=1)),
+        ("7. +spike(10/20)", create_multi_factor(
+            "backtest", spike_threshold_1d=0.10, spike_threshold_5d=0.20)),
+        ("8. +spike(20/30)", create_multi_factor(
+            "backtest", spike_threshold_1d=0.20, spike_threshold_5d=0.30)),
     ]
 
 

@@ -16,7 +16,7 @@ load_dotenv()
 import pandas as pd
 from pykrx import stock as pykrx_stock
 
-from src.strategy.multi_factor import MultiFactorStrategy
+from src.strategy.strategy_config import create_multi_factor
 from src.strategy.etf_rotation import ETFRotationStrategy
 from src.execution.portfolio_allocator import PortfolioAllocator
 from src.execution.position_manager import PositionManager
@@ -109,14 +109,8 @@ strategy_data = {
 }
 
 # ── 4. 장기 전략 시그널 (MultiFactor) ──
-print(f"\n[4] 장기 전략 시그널 생성 (MultiFactor V0.4+M0.6, top10, MT)...")
-long_strategy = MultiFactorStrategy(
-    factors=["value", "momentum"],
-    weights=[0.4, 0.6],
-    num_stocks=10,
-    turnover_penalty=0.1,
-    apply_market_timing=True,
-)
+print(f"\n[4] 장기 전략 시그널 생성 (MultiFactor, top10, MT)...")
+long_strategy = create_multi_factor("live", num_stocks=10)
 
 long_signals = long_strategy.generate_signals(NEXT_TRADING_DATE, strategy_data)
 print(f"  장기 종목 수: {len(long_signals)}개")

@@ -11,7 +11,7 @@ sys.path.insert(0, "/mnt/data/quant")
 from src.backtest.engine import Backtest
 from src.strategy.value import ValueStrategy
 from src.strategy.momentum import MomentumStrategy
-from src.strategy.multi_factor import MultiFactorStrategy
+from src.strategy.strategy_config import create_multi_factor
 from src.strategy.market_timing import MarketTimingOverlay
 
 # 백테스트 설정
@@ -34,12 +34,7 @@ strategies.append(("Momentum(12M)", MomentumStrategy(
 )))
 
 # 4. 멀티팩터 (밸류+모멘텀)
-strategies.append(("MultiFactor(V+M)", MultiFactorStrategy(
-    factors=["value", "momentum"],
-    weights=[0.5, 0.5],
-    combine_method="zscore",
-    num_stocks=20,
-)))
+strategies.append(("MultiFactor(V+M)", create_multi_factor("backtest", num_stocks=20)))
 
 # 5. 멀티팩터 + 마켓타이밍
 overlay = MarketTimingOverlay(
@@ -48,12 +43,7 @@ overlay = MarketTimingOverlay(
     switch_mode="gradual",
     reference_index="KOSPI",
 )
-strategies.append(("MultiFactor+MT", MultiFactorStrategy(
-    factors=["value", "momentum"],
-    weights=[0.5, 0.5],
-    combine_method="zscore",
-    num_stocks=20,
-)))
+strategies.append(("MultiFactor+MT", create_multi_factor("backtest", num_stocks=20)))
 
 print("=" * 80)
 print(f"  실데이터 백테스트: {START_DATE} ~ {END_DATE}")

@@ -101,15 +101,9 @@ class AutoBacktester:
 
                 return MomentumStrategy()
             elif name == "multi_factor":
-                from src.strategy.multi_factor import MultiFactorStrategy
+                from src.strategy.strategy_config import create_multi_factor
 
-                return MultiFactorStrategy(
-                    factors=["value", "momentum"],
-                    weights=[0.5, 0.5],
-                    combine_method="zscore",
-                    num_stocks=10,
-                    apply_market_timing=True,
-                )
+                return create_multi_factor("backtest", apply_market_timing=True)
             elif name == "quality":
                 from src.strategy.quality import QualityStrategy
 

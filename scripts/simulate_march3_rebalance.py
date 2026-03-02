@@ -33,7 +33,7 @@ def run_simulation(
     from src.data.collector import get_all_fundamentals, get_price_data
     from src.data.index_collector import get_index_data
     from src.data.etf_collector import get_etf_price
-    from src.strategy.multi_factor import MultiFactorStrategy
+    from src.strategy.strategy_config import create_multi_factor
     from src.strategy.enhanced_etf_rotation import EnhancedETFRotationStrategy
     from src.strategy.drawdown_overlay import DrawdownOverlay
     from src.strategy.etf_rotation import DEFAULT_ETF_UNIVERSE, DEFAULT_SAFE_ASSET
@@ -134,13 +134,7 @@ def run_simulation(
 
     # ── 3. 장기 전략 시그널 (MultiFactor V+M) ──
     print("[5/6] 장기 전략 시그널 생성 중...")
-    long_strategy = MultiFactorStrategy(
-        factors=["value", "momentum"],
-        weights=[0.5, 0.5],
-        combine_method="zscore",
-        num_stocks=10,
-        turnover_penalty=0.1,
-    )
+    long_strategy = create_multi_factor("live", num_stocks=10)
     try:
         long_signals = long_strategy.generate_signals(data_date, strategy_data)
         print(f"  -> MultiFactor: {len(long_signals)}종목 선정")

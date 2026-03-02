@@ -51,7 +51,7 @@ def build_long_strategies():
     from src.strategy.value import ValueStrategy
     from src.strategy.momentum import MomentumStrategy
     from src.strategy.quality import QualityStrategy
-    from src.strategy.multi_factor import MultiFactorStrategy
+    from src.strategy.strategy_config import create_multi_factor
     from src.strategy.three_factor import ThreeFactorStrategy
     from src.strategy.risk_parity import RiskParityStrategy
     from src.strategy.shareholder_yield import ShareholderYieldStrategy
@@ -66,9 +66,7 @@ def build_long_strategies():
             lookback_months=[12], skip_month=True, num_stocks=10,
             residual=True, min_market_cap=0)),
         ("Quality", QualityStrategy(num_stocks=10, min_market_cap=0, strict_accrual=True)),
-        ("MultiFactor(V+M)", MultiFactorStrategy(
-            factors=["value", "momentum"], weights=[0.5, 0.5],
-            combine_method="zscore", num_stocks=10, turnover_penalty=0.1)),
+        ("MultiFactor(V+M)", create_multi_factor("backtest")),
         ("ThreeFactor(V+M+Q)", ThreeFactorStrategy(
             num_stocks=10, min_market_cap=0,
             value_weight=0.33, momentum_weight=0.33, quality_weight=0.34)),
@@ -77,8 +75,7 @@ def build_long_strategies():
         ("LowVolQuality", LowVolQualityStrategy(num_stocks=10, min_market_cap=0)),
         ("Accrual", AccrualStrategy(num_stocks=10, min_market_cap=0)),
         ("RiskParity(MF)", RiskParityStrategy(
-            stock_selector=MultiFactorStrategy(
-                factors=["value", "momentum"], weights=[0.5, 0.5], num_stocks=10),
+            stock_selector=create_multi_factor("backtest", turnover_penalty=0.0),
             max_weight=0.15)),
     ]
 
@@ -308,9 +305,8 @@ def phase3_pool_allocation(all_results):
     print(f"  Phase 3: 풀 배분 비율별 백테스트 ({len(ratios)}비율 x {len(PERIODS)}기간)")
     print(f"{'#'*70}")
 
-    long_strategy = MultiFactorStrategy(
-        factors=["value", "momentum"], weights=[0.5, 0.5],
-        combine_method="zscore", num_stocks=10, turnover_penalty=0.1)
+    from src.strategy.strategy_config import create_multi_factor
+    long_strategy = create_multi_factor("backtest")
     etf_strategy = EnhancedETFRotationStrategy(
         cash_ratio_risk_off=0.7)
 
@@ -374,12 +370,10 @@ def phase3_pool_allocation(all_results):
 
 def phase4_overlay_combos(all_results):
     """Phase 4: 오버레이 조합별 백테스트."""
-    from src.strategy.multi_factor import MultiFactorStrategy
+    from src.strategy.strategy_config import create_multi_factor
 
     overlays = build_overlay_combos()
-    strategy = MultiFactorStrategy(
-        factors=["value", "momentum"], weights=[0.5, 0.5],
-        combine_method="zscore", num_stocks=10, turnover_penalty=0.1)
+    strategy = create_multi_factor("backtest")
 
     print(f"\n{'#'*70}")
     print(f"  Phase 4: 오버레이 조합별 백테스트 ({len(overlays)}조합 x {len(PERIODS)}기간)")
@@ -434,14 +428,12 @@ def phase4_overlay_combos(all_results):
 
 def phase5_pool_plus_overlay(all_results):
     """Phase 5: 현재 설정(70/30 + drawdown) vs 주요 조합."""
-    from src.strategy.multi_factor import MultiFactorStrategy
+    from src.strategy.strategy_config import create_multi_factor
     from src.strategy.enhanced_etf_rotation import EnhancedETFRotationStrategy
     from src.strategy.drawdown_overlay import DrawdownOverlay
     from src.strategy.market_timing import MarketTimingOverlay
 
-    long_strat = MultiFactorStrategy(
-        factors=["value", "momentum"], weights=[0.5, 0.5],
-        combine_method="zscore", num_stocks=10, turnover_penalty=0.1)
+    long_strat = create_multi_factor("backtest")
     etf_strat = EnhancedETFRotationStrategy(cash_ratio_risk_off=0.7)
 
     combos = [
@@ -616,14 +608,12 @@ def phase6_extended_periods(all_results):
 
 def _phase5_extended(all_results):
     """Phase 5 결과 중 상위 조합을 5yr/10yr로 확장."""
-    from src.strategy.multi_factor import MultiFactorStrategy
+    from src.strategy.strategy_config import create_multi_factor
     from src.strategy.enhanced_etf_rotation import EnhancedETFRotationStrategy
     from src.strategy.drawdown_overlay import DrawdownOverlay
     from src.strategy.market_timing import MarketTimingOverlay
 
-    long_strat = MultiFactorStrategy(
-        factors=["value", "momentum"], weights=[0.5, 0.5],
-        combine_method="zscore", num_stocks=10, turnover_penalty=0.1)
+    long_strat = create_multi_factor("backtest")
     etf_strat = EnhancedETFRotationStrategy(cash_ratio_risk_off=0.7)
 
     # 핵심 조합만 확장
