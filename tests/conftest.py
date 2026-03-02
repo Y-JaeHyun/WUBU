@@ -8,6 +8,15 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _clear_backtest_shared_cache():
+    """각 테스트 전후로 Backtest 공유 캐시를 초기화한다."""
+    from src.backtest.engine import Backtest
+    Backtest.clear_shared_cache()
+    yield
+    Backtest.clear_shared_cache()
+
+
 # ---------------------------------------------------------------------------
 # 샘플 가격 데이터 (OHLCV)
 # ---------------------------------------------------------------------------

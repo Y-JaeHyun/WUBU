@@ -22,16 +22,34 @@ _MAX_RETRIES = 3
 _RETRY_DELAY = 2.0  # seconds
 
 
+_REQUEST_TIMEOUT = 30  # seconds per pykrx request
+
+
 def _retry_on_failure(func):
-    """pykrx API 호출 실패 시 재시도하는 데코레이터."""
+    """pykrx API 호출 실패 시 재시도하는 데코레이터 (timeout 포함)."""
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        import signal as _sig
+
+        def _alarm_handler(signum, frame):
+            raise TimeoutError(f"{func.__name__} timeout ({_REQUEST_TIMEOUT}s)")
+
         last_exc = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                return func(*args, **kwargs)
+                old_handler = _sig.signal(_sig.SIGALRM, _alarm_handler)
+                _sig.alarm(_REQUEST_TIMEOUT)
+                result = func(*args, **kwargs)
+                _sig.alarm(0)
+                _sig.signal(_sig.SIGALRM, old_handler)
+                return result
             except Exception as e:
+                _sig.alarm(0)
+                try:
+                    _sig.signal(_sig.SIGALRM, old_handler)
+                except Exception:
+                    pass
                 last_exc = e
                 if attempt < _MAX_RETRIES:
                     delay = _RETRY_DELAY * attempt
