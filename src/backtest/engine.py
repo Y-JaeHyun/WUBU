@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from src.strategy.market_timing import MarketTimingOverlay
     from src.strategy.drawdown_overlay import DrawdownOverlay
     from src.strategy.vol_targeting import VolTargetingOverlay
+    from src.data.price_store import PriceStore
 
 logger = get_logger(__name__)
 
@@ -80,6 +81,26 @@ class Backtest:
 
     _shared_price_cache: dict[tuple[str, str, str], pd.DataFrame] = {}
     _shared_fundamentals_cache: dict[str, pd.DataFrame] = {}
+    _use_price_store: bool = True
+    _price_store: Optional["PriceStore"] = None
+
+    @classmethod
+    def get_price_store(cls) -> "PriceStore":
+        """PriceStore 싱글톤 인스턴스를 반환한다."""
+        if cls._price_store is None:
+            from src.data.price_store import get_price_store
+            cls._price_store = get_price_store()
+        return cls._price_store
+
+    @classmethod
+    def disable_price_store(cls) -> None:
+        """PriceStore를 비활성화한다 (테스트에서 mock 호환용)."""
+        cls._use_price_store = False
+
+    @classmethod
+    def enable_price_store(cls) -> None:
+        """PriceStore를 활성화한다."""
+        cls._use_price_store = True
 
     def __init__(
         self,
@@ -192,12 +213,38 @@ class Backtest:
         모멘텀·상장기간 필터 등이 첫 리밸런싱부터 충분한 과거 데이터를 갖도록 한다.
         주식 API에서 데이터가 빈 경우 ETF API로 fallback한다.
 
-        프로세스 내 공유 캐시를 활용하여 동일 종목의 반복 다운로드를 방지한다.
+        PriceStore가 활성화되어 있으면 영구 캐시를 경유한다.
+        비활성화 시 기존 in-memory 캐시만 사용한다.
         """
         cache_key = (ticker, self._data_start_date, self.end_date)
         if cache_key in Backtest._shared_price_cache:
             return Backtest._shared_price_cache[cache_key]
 
+        if Backtest._use_price_store:
+            try:
+                store = Backtest.get_price_store()
+
+                def _fetcher(t, s, e):
+                    df = get_price_data(t, s, e)
+                    if df.empty:
+                        try:
+                            from src.data.etf_collector import get_etf_price
+                            df = get_etf_price(t, s, e)
+                            if not df.empty:
+                                logger.info(f"ETF fallback 성공: {t}")
+                        except Exception as ex:
+                            logger.debug(f"ETF fallback 실패: {t} - {ex}")
+                    return df
+
+                df = store.get_price(
+                    ticker, self._data_start_date, self.end_date, fetcher=_fetcher
+                )
+                Backtest._shared_price_cache[cache_key] = df
+                return df
+            except Exception as e:
+                logger.warning(f"PriceStore 사용 실패, 직접 fetch: {ticker} - {e}")
+
+        # PriceStore 비활성화 또는 실패 시 기존 로직
         df = get_price_data(ticker, self._data_start_date, self.end_date)
         if df.empty:
             try:
@@ -215,6 +262,7 @@ class Backtest:
         """공유 가격/펀더멘탈 캐시를 초기화한다."""
         cls._shared_price_cache.clear()
         cls._shared_fundamentals_cache.clear()
+        cls._price_store = None
 
     def _collect_etf_tickers(self) -> set[str]:
         """전략(들)에서 ETF 유니버스 티커를 수집한다.
@@ -297,17 +345,25 @@ class Backtest:
 
         # 지수 데이터 로드 (마켓 타이밍 오버레이 + 잔차 모멘텀 등 전략용)
         index_prices: pd.Series = pd.Series(dtype=float)
+        reference_index = (
+            self.overlay.reference_index if self.overlay is not None
+            else "KOSPI"
+        )
         try:
-            from src.data.index_collector import get_index_data
-            reference_index = (
-                self.overlay.reference_index if self.overlay is not None
-                else "KOSPI"
-            )
-            index_df = get_index_data(
-                reference_index,
-                self._data_start_date,
-                self.end_date,
-            )
+            if Backtest._use_price_store:
+                store = Backtest.get_price_store()
+                index_df = store.get_index(
+                    reference_index,
+                    self._data_start_date,
+                    self.end_date,
+                )
+            else:
+                from src.data.index_collector import get_index_data
+                index_df = get_index_data(
+                    reference_index,
+                    self._data_start_date,
+                    self.end_date,
+                )
             if not index_df.empty and "close" in index_df.columns:
                 index_prices = index_df["close"]
                 logger.info(
@@ -354,9 +410,22 @@ class Backtest:
             if date in rebalance_dates:
                 logger.info(f"리밸런싱 실행: {date}")
 
-                # 전략에 전달할 데이터 수집 (공유 캐시 활용)
+                # 전략에 전달할 데이터 수집 (공유 캐시 → PriceStore → API)
                 if date in Backtest._shared_fundamentals_cache:
                     fundamentals = Backtest._shared_fundamentals_cache[date]
+                elif Backtest._use_price_store:
+                    try:
+                        store = Backtest.get_price_store()
+                        fundamentals = store.get_fundamentals(date)
+                        Backtest._shared_fundamentals_cache[date] = fundamentals
+                    except Exception as e:
+                        logger.warning(f"PriceStore fundamentals 실패, 직접 fetch: {date} - {e}")
+                        try:
+                            fundamentals = get_all_fundamentals(date)
+                            Backtest._shared_fundamentals_cache[date] = fundamentals
+                        except Exception as e2:
+                            logger.warning(f"펀더멘탈 데이터 조회 실패 ({date}): {e2}")
+                            fundamentals = pd.DataFrame()
                 else:
                     try:
                         fundamentals = get_all_fundamentals(date)

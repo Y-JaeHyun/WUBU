@@ -48,6 +48,7 @@ data/short_term_signals.json
 data/feature_flags.json
 data/short_term_backtest_results.json
 data/backtest_cache/
+data/price_store/
 docs_cache/
 
 # 산출물

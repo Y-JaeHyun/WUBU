@@ -10,11 +10,16 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _clear_backtest_shared_cache():
-    """각 테스트 전후로 Backtest 공유 캐시를 초기화한다."""
+    """각 테스트 전후로 Backtest 공유 캐시를 초기화하고 PriceStore를 비활성화한다."""
     from src.backtest.engine import Backtest
+    from src.data.price_store import reset_price_store
     Backtest.clear_shared_cache()
+    Backtest.disable_price_store()
+    reset_price_store()
     yield
     Backtest.clear_shared_cache()
+    Backtest.disable_price_store()
+    reset_price_store()
 
 
 # ---------------------------------------------------------------------------
