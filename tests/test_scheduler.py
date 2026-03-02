@@ -160,12 +160,13 @@ class TestKRXHolidays:
         KRXHolidays = _import_krx_holidays()
         holidays = KRXHolidays()
 
-        # 2026-03-02 (월요일) -> 3월 첫 영업일
-        first_trading_day = datetime.date(2026, 3, 2)
+        # 2026-03-03 (화요일) -> 3월 첫 거래일
+        # 03-01(삼일절, 일) → 03-02(대체공휴일, 월) → 03-03(화)이 첫 거래일
+        first_trading_day = datetime.date(2026, 3, 3)
         result = holidays.is_rebalance_day(first_trading_day, freq="monthly")
 
         assert result is True, (
-            f"2026-03-02은 3월 첫 거래일이므로 리밸런싱일이어야 합니다."
+            "2026-03-03은 3월 첫 거래일이므로 리밸런싱일이어야 합니다."
         )
 
     def test_is_rebalance_day_not_first(self):
@@ -179,6 +180,116 @@ class TestKRXHolidays:
 
         assert result is False, (
             "월 중간 날짜는 리밸런싱일이 아닙니다."
+        )
+
+    # ── 대체공휴일 테스트 ────────────────────────────────────
+
+    def test_substitute_holiday_march_2026(self):
+        """2026-03-02는 삼일절(03-01 일요일) 대체공휴일이다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        substitute = datetime.date(2026, 3, 2)
+
+        assert holidays.is_holiday(substitute) is True, (
+            "2026-03-02는 삼일절 대체공휴일이어야 합니다."
+        )
+        assert holidays.is_trading_day(substitute) is False, (
+            "2026-03-02(대체공휴일)는 거래일이 아닙니다."
+        )
+
+    def test_substitute_holiday_not_rebalance_day(self):
+        """대체공휴일인 03-02는 리밸런싱일이 아니다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        substitute = datetime.date(2026, 3, 2)
+        result = holidays.is_rebalance_day(substitute, freq="monthly")
+
+        assert result is False, (
+            "2026-03-02(대체공휴일)는 리밸런싱일이 아닙니다."
+        )
+
+    def test_march_2026_first_trading_day(self):
+        """2026년 3월 첫 거래일은 03-03(화)이다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 2월 마지막 거래일에서 다음 거래일 조회
+        feb_27 = datetime.date(2026, 2, 27)  # 금요일
+        next_td = holidays.next_trading_day(feb_27)
+
+        assert next_td == datetime.date(2026, 3, 3), (
+            f"2026-02-27 다음 거래일은 2026-03-03이어야 합니다: {next_td}"
+        )
+
+    def test_substitute_holiday_saturday_gwangbok(self):
+        """2026-08-17은 광복절(08-15 토요일) 대체공휴일이다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 08-15(토) → 08-16(일, 주말) → 08-17(월, 대체공휴일)
+        substitute = datetime.date(2026, 8, 17)
+
+        assert holidays.is_holiday(substitute) is True, (
+            "2026-08-17은 광복절 대체공휴일이어야 합니다."
+        )
+        assert holidays.is_trading_day(substitute) is False, (
+            "2026-08-17(대체공휴일)는 거래일이 아닙니다."
+        )
+
+    def test_substitute_holiday_gaecheonjeol_2026(self):
+        """2026-10-05는 개천절(10-03 토요일) 대체공휴일이다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 10-03(토) → 10-04(일, 주말) → 10-05(월, 대체공휴일)
+        substitute = datetime.date(2026, 10, 5)
+
+        assert holidays.is_holiday(substitute) is True, (
+            "2026-10-05은 개천절 대체공휴일이어야 합니다."
+        )
+        assert holidays.is_trading_day(substitute) is False, (
+            "2026-10-05(대체공휴일)는 거래일이 아닙니다."
+        )
+
+    def test_substitute_holiday_overlap_2025(self):
+        """2025-05-06은 어린이날+부처님오신날 겹침의 대체공휴일이다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 2025-05-05: 어린이날(고정) + 부처님오신날(음력) → 겹침 → 대체
+        substitute = datetime.date(2025, 5, 6)
+
+        assert holidays.is_holiday(substitute) is True, (
+            "2025-05-06은 어린이날/부처님오신날 대체공휴일이어야 합니다."
+        )
+
+    def test_substitute_holiday_buddha_birthday_2026(self):
+        """2026-05-25는 부처님오신날(05-24 일요일) 대체공휴일이다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # LUNAR_HOLIDAYS에 수동 등록된 대체공휴일
+        substitute = datetime.date(2026, 5, 25)
+
+        assert holidays.is_holiday(substitute) is True, (
+            "2026-05-25는 부처님오신날 대체공휴일이어야 합니다."
+        )
+        assert holidays.is_trading_day(substitute) is False, (
+            "2026-05-25(대체공휴일)는 거래일이 아닙니다."
+        )
+
+    def test_no_substitute_for_new_year(self):
+        """신정(01-01)은 대체공휴일 적용 대상이 아니다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 2028-01-01은 토요일이지만 신정은 대체공휴일 미적용
+        jan_3 = datetime.date(2028, 1, 3)  # 월요일
+
+        assert holidays.is_trading_day(jan_3) is True, (
+            "2028-01-03(월)은 거래일이어야 합니다 (신정은 대체 미적용)."
         )
 
 
