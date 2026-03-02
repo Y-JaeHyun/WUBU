@@ -1,19 +1,24 @@
 """섹터(업종) 분류 데이터 수집 모듈.
 
-pykrx를 활용하여 KRX WICS 업종 분류 정보를 수집한다.
+pykrx 또는 KRX Open API를 활용하여 KRX WICS 업종 분류 정보를 수집한다.
+WICS 데이터는 KRX Open API 미지원이므로 pykrx fallback을 사용한다.
 """
 
 from typing import Dict, List, Optional
 import pandas as pd
+
+from src.data.data_proxy import create_stock_api
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+stock = create_stock_api()
 
 
 def get_sector_classification(date: str, market: str = "ALL") -> pd.DataFrame:
     """특정 일자의 섹터 분류 정보를 조회한다.
 
-    pykrx의 WICS 업종 분류를 사용.
+    WICS 업종 분류를 사용 (KRX API 미지원 시 pykrx fallback).
 
     Args:
         date: 조회 날짜 (YYYYMMDD 형식)
@@ -23,8 +28,6 @@ def get_sector_classification(date: str, market: str = "ALL") -> pd.DataFrame:
         DataFrame with columns: [ticker, sector]
     """
     try:
-        from pykrx import stock
-
         # WICS 업종 코드 목록 조회
         sector_codes = stock.get_index_ticker_list(date, market="WICS")
 

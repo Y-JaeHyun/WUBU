@@ -141,3 +141,29 @@ class PortfolioTracker:
     def get_history_count(self) -> int:
         """저장된 이력 건수를 반환한다."""
         return len(self._history)
+
+    def get_values_series(self) -> "pd.Series":
+        """이력을 pd.Series로 반환한다 (변동성 타겟팅 오버레이용).
+
+        Returns:
+            index=datetime, values=평가금액 의 pd.Series.
+            이력이 없으면 빈 Series.
+        """
+        import pandas as pd
+
+        if not self._history:
+            return pd.Series(dtype=float)
+
+        timestamps = []
+        values = []
+        for record in self._history:
+            try:
+                timestamps.append(pd.to_datetime(record["ts"]))
+                values.append(float(record["eval"]))
+            except (KeyError, ValueError):
+                continue
+
+        if not timestamps:
+            return pd.Series(dtype=float)
+
+        return pd.Series(values, index=timestamps)

@@ -38,6 +38,18 @@ class KRXHolidays:
         "12-25",  # 성탄절
     ]
 
+    # 대체공휴일 적용 대상 고정 공휴일 (관공서의 공휴일에 관한 규정 제3조)
+    # 토/일 또는 다른 공휴일과 겹치면 다음 첫 번째 비공휴일이 대체공휴일
+    # 신정(01-01), 현충일(06-06)은 대체공휴일 적용 제외
+    SUBSTITUTE_ELIGIBLE_FIXED: list[str] = [
+        "03-01",  # 삼일절
+        "05-05",  # 어린이날
+        "08-15",  # 광복절
+        "10-03",  # 개천절
+        "10-09",  # 한글날
+        "12-25",  # 성탄절
+    ]
+
     # 음력 공휴일 (연도별 MM-DD 리스트)
     # 설날 연휴, 부처님오신날, 추석 연휴 (대체공휴일 포함)
     LUNAR_HOLIDAYS: dict[int, list[str]] = {
@@ -53,7 +65,7 @@ class KRXHolidays:
         ],
         2026: [
             "02-16", "02-17", "02-18",              # 설날 연휴
-            "05-24",                                # 부처님오신날
+            "05-24", "05-25",                        # 부처님오신날(일) + 대체(월)
             "09-24", "09-25", "09-26", "09-28",  # 추석 연휴 + 대체(토→월)
         ],
         2027: [
@@ -90,6 +102,8 @@ class KRXHolidays:
     def _build_holiday_set(self, year: int) -> set[datetime.date]:
         """특정 연도의 전체 휴장일 set을 구축한다.
 
+        고정 공휴일 + 음력 공휴일 + 대체공휴일(자동 계산)을 포함한다.
+
         Args:
             year: 연도.
 
@@ -100,12 +114,15 @@ class KRXHolidays:
             return self._holiday_cache[year]
 
         holidays: set[datetime.date] = set()
+        raw_holidays: list[datetime.date] = []  # 중복 감지용
 
         # 고정 공휴일 추가
         for md in self.FIXED_HOLIDAYS:
             try:
                 month, day = md.split("-")
-                holidays.add(datetime.date(year, int(month), int(day)))
+                d = datetime.date(year, int(month), int(day))
+                holidays.add(d)
+                raw_holidays.append(d)
             except ValueError:
                 logger.warning("잘못된 고정 공휴일 형식: %s", md)
 
@@ -114,9 +131,36 @@ class KRXHolidays:
         for md in lunar_dates:
             try:
                 month, day = md.split("-")
-                holidays.add(datetime.date(year, int(month), int(day)))
+                d = datetime.date(year, int(month), int(day))
+                holidays.add(d)
+                raw_holidays.append(d)
             except ValueError:
                 logger.warning("잘못된 음력 공휴일 형식: %s (연도: %d)", md, year)
+
+        # 대체공휴일 자동 계산 (관공서의 공휴일에 관한 규정 제3조 1항)
+        # 대상: SUBSTITUTE_ELIGIBLE_FIXED에 해당하는 고정 공휴일
+        # 조건: 토/일에 해당하거나 다른 공휴일과 겹칠 때
+        # 방식: 다음 첫 번째 비공휴일 평일을 대체공휴일로 지정
+        for md in self.SUBSTITUTE_ELIGIBLE_FIXED:
+            try:
+                month, day = md.split("-")
+                holiday = datetime.date(year, int(month), int(day))
+
+                is_weekend = holiday.weekday() >= 5
+                is_overlapping = raw_holidays.count(holiday) > 1
+
+                if is_weekend or is_overlapping:
+                    candidate = holiday + datetime.timedelta(days=1)
+                    for _ in range(7):
+                        if candidate.weekday() < 5 and candidate not in holidays:
+                            holidays.add(candidate)
+                            logger.debug(
+                                "대체공휴일 추가: %s (%s 대체)", candidate, md
+                            )
+                            break
+                        candidate += datetime.timedelta(days=1)
+            except ValueError:
+                logger.warning("대체공휴일 계산 실패: %s (연도: %d)", md, year)
 
         self._holiday_cache[year] = holidays
         return holidays

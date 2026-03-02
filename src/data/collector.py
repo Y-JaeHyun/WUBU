@@ -1,6 +1,7 @@
 """한국 주식 데이터 수집 모듈.
 
-pykrx를 사용하여 KOSPI/KOSDAQ 종목의 OHLCV, 시가총액, 기본 지표 데이터를 수집한다.
+pykrx 또는 KRX Open API를 사용하여 KOSPI/KOSDAQ 종목의 OHLCV, 시가총액, 기본 지표 데이터를 수집한다.
+KRX_API_KEY 환경변수 + krx_openapi 플래그 설정 시 KRX Open API 사용, 아니면 pykrx fallback.
 """
 
 import functools
@@ -8,7 +9,10 @@ import time
 from typing import Optional
 
 import pandas as pd
-from pykrx import stock as pykrx_stock
+
+from src.data.data_proxy import create_stock_api
+
+pykrx_stock = create_stock_api()
 
 from src.utils.logger import get_logger
 
@@ -18,16 +22,34 @@ _MAX_RETRIES = 3
 _RETRY_DELAY = 2.0  # seconds
 
 
+_REQUEST_TIMEOUT = 30  # seconds per pykrx request
+
+
 def _retry_on_failure(func):
-    """pykrx API 호출 실패 시 재시도하는 데코레이터."""
+    """pykrx API 호출 실패 시 재시도하는 데코레이터 (timeout 포함)."""
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        import signal as _sig
+
+        def _alarm_handler(signum, frame):
+            raise TimeoutError(f"{func.__name__} timeout ({_REQUEST_TIMEOUT}s)")
+
         last_exc = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                return func(*args, **kwargs)
+                old_handler = _sig.signal(_sig.SIGALRM, _alarm_handler)
+                _sig.alarm(_REQUEST_TIMEOUT)
+                result = func(*args, **kwargs)
+                _sig.alarm(0)
+                _sig.signal(_sig.SIGALRM, old_handler)
+                return result
             except Exception as e:
+                _sig.alarm(0)
+                try:
+                    _sig.signal(_sig.SIGALRM, old_handler)
+                except Exception:
+                    pass
                 last_exc = e
                 if attempt < _MAX_RETRIES:
                     delay = _RETRY_DELAY * attempt

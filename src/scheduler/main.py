@@ -136,6 +136,43 @@ class TradingBot:
         self.stock_reviewer: StockReviewer = StockReviewer()
         self.night_researcher: NightResearcher = NightResearcher()
 
+        # 오버레이 (feature flag 기반 초기화)
+        self._drawdown_overlay = None
+        self._vol_targeting_overlay = None
+
+        if self.feature_flags.is_enabled("drawdown_overlay"):
+            from src.strategy.drawdown_overlay import DrawdownOverlay
+
+            dd_cfg = self.feature_flags.get_config("drawdown_overlay")
+            thresholds = [
+                (t[0], t[1])
+                for t in dd_cfg.get(
+                    "thresholds",
+                    [[-0.10, 0.75], [-0.15, 0.50], [-0.20, 0.25]],
+                )
+            ]
+            self._drawdown_overlay = DrawdownOverlay(
+                thresholds=thresholds,
+                recovery_buffer=dd_cfg.get("recovery_buffer", 0.02),
+            )
+            # PortfolioTracker의 고점을 DrawdownOverlay에 동기화 (재시작 시 보존)
+            if self.portfolio_tracker.peak > 0:
+                self._drawdown_overlay._peak = self.portfolio_tracker.peak
+                logger.info(
+                    "DrawdownOverlay peak 동기화: %s",
+                    f"{self.portfolio_tracker.peak:,.0f}",
+                )
+
+        if self.feature_flags.is_enabled("vol_targeting"):
+            from src.strategy.vol_targeting import VolTargetingOverlay
+
+            vt_cfg = self.feature_flags.get_config("vol_targeting")
+            self._vol_targeting_overlay = VolTargetingOverlay(
+                target_vol=vt_cfg.get("target_vol", 0.15),
+                lookback_days=vt_cfg.get("lookback_days", 20),
+                use_downside_only=vt_cfg.get("use_downside_only", True),
+            )
+
         # 전략 (외부에서 주입 가능)
         self._strategy = None
 
@@ -716,10 +753,11 @@ class TradingBot:
         return etf_prices
 
     def execute_etf_rotation_rebalance(self) -> None:
-        """09:10 - ETF 로테이션 모니터링.
+        """09:10 - ETF 로테이션 모멘텀 순위 모니터링 (진단 전용).
 
-        리밸런싱일: 09:05 통합 리밸런싱에서 이미 실행됨 → 모멘텀 순위만 로깅.
-        비 리밸런싱일: 모멘텀 순위 로깅만 수행.
+        실제 ETF 매매는 09:05 execute_rebalance()에서 통합 수행된다.
+        이 메서드는 모멘텀 순위를 로깅하여 운영 모니터링을 돕는다.
+        리밸런싱일/비 리밸런싱일 공통으로 순위만 기록한다.
         """
         if not self.feature_flags.is_enabled("etf_rotation"):
             return
@@ -794,6 +832,62 @@ class TradingBot:
         except Exception as e:
             logger.warning("ETF 모멘텀 순위 로깅 실패: %s", e)
 
+    def _apply_live_overlays(
+        self, signals: dict[str, float]
+    ) -> dict[str, float]:
+        """라이브 리밸런싱에 drawdown/vol_targeting 오버레이를 적용한다.
+
+        Args:
+            signals: {ticker: weight} 포트폴리오 비중.
+
+        Returns:
+            오버레이 적용 후 {ticker: weight}.
+        """
+        if not signals:
+            return signals
+
+        # 1. 드로다운 오버레이
+        if self._drawdown_overlay is not None:
+            try:
+                balance = self.kis_client.get_balance()
+                pv = balance.get("total_eval", 0)
+                if pv > 0:
+                    signals = self._drawdown_overlay.apply_overlay(
+                        signals, pv
+                    )
+                    logger.info(
+                        "드로다운 오버레이 적용: %d종목", len(signals)
+                    )
+            except Exception as e:
+                logger.warning("드로다운 오버레이 실패: %s", e)
+
+        # 2. 변동성 타겟팅
+        if self._vol_targeting_overlay is not None:
+            try:
+                pv_series = self.portfolio_tracker.get_values_series()
+                if len(pv_series) > 0:
+                    signals = self._vol_targeting_overlay.apply(
+                        signals, pv_series
+                    )
+                    logger.info(
+                        "변동성 타겟팅 적용: %d종목", len(signals)
+                    )
+            except Exception as e:
+                logger.warning("변동성 타겟팅 실패: %s", e)
+
+        # 최소 노출 하한 (10%) — 백테스트 엔진과 동일
+        if signals:
+            total_w = sum(signals.values())
+            if 0 < total_w < 0.10:
+                scale = 0.10 / total_w
+                signals = {t: w * scale for t, w in signals.items()}
+                logger.info(
+                    "최소 노출 하한 적용: %.1f%% → 10%%",
+                    total_w * 100,
+                )
+
+        return signals
+
     def execute_rebalance(self) -> None:
         """09:05 - 통합 리밸런싱 실행 (해당일만).
 
@@ -844,6 +938,17 @@ class TradingBot:
             date_str = today.strftime("%Y%m%d")
             logger.info("리밸런싱 시그널 생성 중: %s", date_str)
 
+            # turnover_reduction: 현재 보유 종목을 전략에 전달
+            if hasattr(self._strategy, "update_holdings"):
+                try:
+                    balance = self.kis_client.get_balance()
+                    current_tickers = {
+                        h["ticker"] for h in balance.get("holdings", [])
+                    }
+                    self._strategy.update_holdings(current_tickers)
+                except Exception as e:
+                    logger.warning("보유 종목 업데이트 실패: %s", e)
+
             try:
                 long_signals = self._strategy.generate_signals(
                     date_str, strategy_data
@@ -855,6 +960,10 @@ class TradingBot:
                     level="CRITICAL",
                 )
                 return
+
+            # 오버레이 적용 (drawdown + vol_targeting)
+            if long_signals:
+                long_signals = self._apply_live_overlays(long_signals)
 
             # EOD 뉴스 관심종목용 시그널 캐시
             if long_signals:
@@ -1445,9 +1554,76 @@ class TradingBot:
             text = backtester.run_all()
             self._send_notification(text)
             logger.info("자동 백테스트 완료")
+
+            # Walk-Forward 검증 (옵셔널)
+            if self.feature_flags.is_enabled("walk_forward_backtest"):
+                try:
+                    self._run_walk_forward(config)
+                except Exception as wf_err:
+                    logger.error("Walk-Forward 실패: %s", wf_err)
+                    logger.debug(traceback.format_exc())
+
         except Exception as e:
             logger.error("자동 백테스트 실패: %s", e)
             logger.debug(traceback.format_exc())
+
+    def _run_walk_forward(self, backtest_config: dict) -> None:
+        """Walk-Forward 백테스트를 실행하고 결과를 발송한다."""
+        from src.backtest.walk_forward import WalkForwardBacktest
+
+        wf_cfg = self.feature_flags.get_config("walk_forward_backtest")
+        strategies = backtest_config.get(
+            "strategies", ["value", "momentum", "multi_factor"]
+        )
+
+        results_lines = ["[Walk-Forward 검증 결과]", ""]
+
+        for strategy_name in strategies[:3]:  # 상위 3개만 (실행시간 제한)
+            try:
+                strategy = self._create_long_term_strategy(strategy_name)
+                if strategy is None:
+                    continue
+
+                def strategy_factory(train_start, train_end, s=strategy):
+                    return s
+
+                wf = WalkForwardBacktest(
+                    strategy_factory=strategy_factory,
+                    full_start_date=(
+                        datetime.now(KST)
+                        - timedelta(
+                            days=365 * (
+                                wf_cfg.get("train_years", 5)
+                                + wf_cfg.get("test_years", 1)
+                            )
+                        )
+                    ).strftime("%Y%m%d"),
+                    full_end_date=datetime.now(KST).strftime("%Y%m%d"),
+                    train_years=wf_cfg.get("train_years", 5),
+                    test_years=wf_cfg.get("test_years", 1),
+                    step_months=wf_cfg.get("step_months", 12),
+                )
+                wf.run()
+                oos = wf.get_oos_results()
+
+                if oos:
+                    avg_sharpe = sum(
+                        r.get("sharpe", 0) for r in oos
+                    ) / len(oos)
+                    results_lines.append(
+                        f"  {strategy_name}: OOS Sharpe={avg_sharpe:.2f} "
+                        f"({len(oos)}구간)"
+                    )
+                else:
+                    results_lines.append(f"  {strategy_name}: 결과 없음")
+
+            except Exception as e:
+                results_lines.append(f"  {strategy_name}: 실패 ({e})")
+                logger.warning("Walk-Forward %s 실패: %s", strategy_name, e)
+
+        if len(results_lines) > 2:
+            self._send_notification("\n".join(results_lines))
+            logger.info("Walk-Forward 검증 완료")
 
     def night_research_job(self) -> None:
         """22:00 평일 - 야간 리서치 리포트.
@@ -2273,6 +2449,9 @@ class TradingBot:
             if total_eval <= 0:
                 return
 
+            # EOD 포트폴리오 트래커 스냅샷
+            self.portfolio_tracker.update(total_eval)
+
             today = datetime.now(KST).strftime("%Y-%m-%d")
 
             # NAV 기록
@@ -2322,7 +2501,45 @@ class TradingBot:
                 )
             elif name == "three_factor":
                 from src.strategy.three_factor import ThreeFactorStrategy
-                return ThreeFactorStrategy(num_stocks=10)
+
+                tf_kwargs: dict = {"num_stocks": 10}
+
+                # low_volatility_factor 연동
+                if self.feature_flags.is_enabled("low_volatility_factor"):
+                    lv_cfg = self.feature_flags.get_config("low_volatility_factor")
+                    tf_kwargs["low_vol_weight"] = lv_cfg.get("weight", 0.15)
+                    tf_kwargs["low_vol_params"] = {
+                        "vol_period": lv_cfg.get("vol_period", 60),
+                    }
+
+                # sector_neutral 연동
+                if self.feature_flags.is_enabled("sector_neutral"):
+                    sn_cfg = self.feature_flags.get_config("sector_neutral")
+                    tf_kwargs["sector_neutral"] = True
+                    tf_kwargs["max_sector_pct"] = sn_cfg.get("max_sector_pct", 0.25)
+
+                # turnover_reduction 연동
+                if self.feature_flags.is_enabled("turnover_reduction"):
+                    tr_cfg = self.feature_flags.get_config("turnover_reduction")
+                    tf_kwargs["turnover_buffer"] = tr_cfg.get("buffer_size", 5)
+                    tf_kwargs["holding_bonus"] = tr_cfg.get("holding_bonus", 0.1)
+
+                # regime_meta_model 연동
+                if self.feature_flags.is_enabled("regime_meta_model"):
+                    try:
+                        from src.ml.regime_model import RuleBasedRegimeModel
+
+                        rm_cfg = self.feature_flags.get_config("regime_meta_model")
+                        factor_names = ["value", "momentum", "quality"]
+                        if tf_kwargs.get("low_vol_weight", 0) > 0:
+                            factor_names.append("low_vol")
+                        tf_kwargs["regime_model"] = RuleBasedRegimeModel(
+                            factor_names=factor_names,
+                        )
+                    except Exception as e:
+                        logger.warning("레짐 모델 초기화 실패: %s", e)
+
+                return ThreeFactorStrategy(**tf_kwargs)
             elif name == "shareholder_yield":
                 from src.strategy.shareholder_yield import ShareholderYieldStrategy
                 return ShareholderYieldStrategy(num_stocks=10)
@@ -2362,14 +2579,7 @@ class TradingBot:
         긴급 매도를 트리거한다.
 
         Feature Flag 'emergency_monitor'로 제어.
-
-        # 스케줄 등록 예시:
-        # scheduler.add_job(
-        #     self.emergency_monitor_check,
-        #     'interval',
-        #     minutes=30,
-        #     id='emergency_monitor',
-        # )
+        setup_schedule()에서 CronTrigger(minute="*/30", hour="9-15")로 등록됨.
         """
         if not self.feature_flags.is_enabled("emergency_monitor"):
             return
@@ -2657,6 +2867,15 @@ class TradingBot:
             CronTrigger(hour=15, minute=20, day_of_week="mon-fri"),
             id="daytrading_close",
             name="데이트레이딩 청산",
+            misfire_grace_time=300,
+        )
+
+        # 긴급 리밸런싱 모니터 (장중 30분 간격)
+        self.scheduler.add_job(
+            self.emergency_monitor_check,
+            CronTrigger(minute="*/30", hour="9-15", day_of_week="mon-fri"),
+            id="emergency_monitor",
+            name="긴급 리밸런싱 모니터",
             misfire_grace_time=300,
         )
 

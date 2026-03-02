@@ -30,7 +30,7 @@ class PositionManager:
     """
 
     # 최소 주문 금액 (이 금액 이하의 차이는 무시)
-    MIN_ORDER_AMOUNT = 50_000  # 5만원
+    MIN_ORDER_AMOUNT = 70_000  # 7만원 (SmallCapitalConfig과 동일)
 
     def __init__(self, kis_client: KISClient) -> None:
         """PositionManager를 초기화한다.

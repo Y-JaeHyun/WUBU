@@ -7,7 +7,7 @@
 - Python 3.12
 - pandas, numpy (데이터 처리)
 - 증권사 API: 한국투자증권 KIS OpenAPI (REST + WebSocket) - 1순위
-- 데이터 수집: pykrx, FinanceDataReader, DART OpenAPI
+- 데이터 수집: KRX Open API (공식, AUTH_KEY 기반), pykrx (fallback), FinanceDataReader, DART OpenAPI
 - 기술적 분석: ta
 - 스케줄링: APScheduler
 - 추가 라이브러리는 필요시 설치
@@ -18,7 +18,7 @@
 ├── CLAUDE.md          # 프로젝트 설명
 ├── .env               # 환경변수 (API 키 등)
 ├── src/               # 소스 코드
-│   ├── data/          # 데이터 수집/처리 (collector, index_collector)
+│   ├── data/          # 데이터 수집/처리 (collector, index_collector, krx_api, krx_provider)
 │   ├── strategy/      # 트레이딩 전략 (value, momentum, quality, three_factor, dual_momentum, risk_parity, ml_factor, factor_combiner, multi_factor, market_timing)
 │   ├── optimization/  # 포트폴리오 최적화 (covariance, risk_parity)
 │   ├── ml/            # ML 팩터 모델 (features, pipeline)
