@@ -142,11 +142,15 @@ class PriceStore:
 
         # 요청 시작 < 캐시 시작 → 앞쪽 부족
         if start_date < cache_min:
-            ranges.append((start_date, self._prev_bday(cache_min)))
+            prev = self._prev_bday(cache_min)
+            if start_date <= prev:
+                ranges.append((start_date, prev))
 
         # 요청 끝 > 캐시 끝 → 뒤쪽 부족
         if end_date > cache_max:
-            ranges.append((self._next_bday(cache_max), end_date))
+            nxt = self._next_bday(cache_max)
+            if nxt <= end_date:
+                ranges.append((nxt, end_date))
 
         return ranges
 
