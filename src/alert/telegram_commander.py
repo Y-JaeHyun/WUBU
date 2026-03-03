@@ -150,10 +150,15 @@ class TelegramCommander:
     # ────────────────────────────────────────────
 
     def _cmd_help(self, args: str) -> str:
-        """사용 가능한 커맨드 목록."""
+        """사용 가능한 커맨드 목록 또는 피처 상세 도움말."""
+        feature_name = args.strip()
+        if feature_name:
+            return self.feature_flags.get_help(feature_name)
+
         lines = [
             "[사용 가능한 커맨드]",
             "/features - 피처 플래그 목록",
+            "/help <name> - 피처 상세 도움말",
             "/toggle <name> - 피처 on/off 토글",
             "/config <name> [key=val] - 설정 조회/변경",
             "/status - 봇 상태 요약",
