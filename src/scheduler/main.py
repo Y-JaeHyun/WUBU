@@ -657,6 +657,21 @@ class TradingBot:
                 top_tickers = sorted(
                     signals.items(), key=lambda x: x[1], reverse=True
                 )[:10]
+
+                # 종목명 매핑: fundamentals + ETF universe
+                name_map: dict[str, str] = {}
+                fund = strategy_data.get("fundamentals")
+                if (
+                    fund is not None
+                    and hasattr(fund, "empty")
+                    and not fund.empty
+                    and "ticker" in fund.columns
+                    and "name" in fund.columns
+                ):
+                    name_map.update(
+                        dict(zip(fund["ticker"], fund["name"]))
+                    )
+
                 lines = [
                     f"[장 전 시그널 체크] {today.strftime('%Y-%m-%d')}",
                     "─" * 30,
@@ -665,7 +680,11 @@ class TradingBot:
                     "Top 10 비중:",
                 ]
                 for ticker, weight in top_tickers:
-                    lines.append(f"  {ticker}: {weight:.1%}")
+                    name = name_map.get(ticker, ticker)
+                    label = (
+                        f"{name}({ticker})" if name != ticker else ticker
+                    )
+                    lines.append(f"  {label}: {weight:.1%}")
 
                 # 통합 Dry run (allocator 활성 시)
                 if self.allocator:
@@ -676,7 +695,23 @@ class TradingBot:
                     if etf_signals:
                         pool_signals["etf_rotation"] = etf_signals
                         self._last_etf_signals = dict(etf_signals)
-                        lines.append(f"\nETF 종목 수: {len(etf_signals)}개")
+                        # ETF universe 이름 매핑 추가
+                        etf_strategy = self._create_etf_strategy()
+                        if hasattr(etf_strategy, "etf_universe"):
+                            name_map.update(etf_strategy.etf_universe)
+                        etf_lines = []
+                        for t, w in sorted(
+                            etf_signals.items(),
+                            key=lambda x: x[1],
+                            reverse=True,
+                        ):
+                            ename = name_map.get(t, t)
+                            elabel = (
+                                f"{ename}({t})" if ename != t else t
+                            )
+                            etf_lines.append(f"  {elabel}: {w:.1%}")
+                        lines.append(f"\nETF 종목 ({len(etf_signals)}개):")
+                        lines.extend(etf_lines)
 
                     dry_result = self.executor.dry_run_integrated(
                         pool_signals
@@ -2604,11 +2639,21 @@ class TradingBot:
 
             price_shocks = []
             for h in holdings:
-                change_pct = float(h.get("change_pct", 0))
+                ticker = h.get("ticker", "")
+                if not ticker:
+                    continue
+                # get_balance()는 pnl_pct(매입 대비)만 제공하므로
+                # get_current_price()로 당일 등락률을 별도 조회한다.
+                try:
+                    price_info = self.kis_client.get_current_price(ticker)
+                    change_pct = float(price_info.get("change_pct", 0))
+                except Exception as e:
+                    logger.debug("종목 %s 현재가 조회 실패: %s", ticker, e)
+                    continue
                 if abs(change_pct) >= price_shock_pct:
                     price_shocks.append({
                         "name": h.get("name", ""),
-                        "ticker": h.get("ticker", ""),
+                        "ticker": ticker,
                         "change": change_pct,
                     })
             state["price_shocks"] = price_shocks

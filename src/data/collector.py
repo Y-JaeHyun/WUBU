@@ -26,30 +26,35 @@ _REQUEST_TIMEOUT = 30  # seconds per pykrx request
 
 
 def _retry_on_failure(func):
-    """pykrx API 호출 실패 시 재시도하는 데코레이터 (timeout 포함)."""
+    """pykrx API 호출 실패 시 재시도하는 데코레이터 (timeout 포함).
+
+    signal.alarm() 대신 concurrent.futures를 사용하여
+    APScheduler 스레드 워커에서도 안전하게 동작한다.
+    """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        import signal as _sig
-
-        def _alarm_handler(signum, frame):
-            raise TimeoutError(f"{func.__name__} timeout ({_REQUEST_TIMEOUT}s)")
+        import concurrent.futures
 
         last_exc = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                old_handler = _sig.signal(_sig.SIGALRM, _alarm_handler)
-                _sig.alarm(_REQUEST_TIMEOUT)
-                result = func(*args, **kwargs)
-                _sig.alarm(0)
-                _sig.signal(_sig.SIGALRM, old_handler)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(func, *args, **kwargs)
+                    result = future.result(timeout=_REQUEST_TIMEOUT)
                 return result
+            except concurrent.futures.TimeoutError:
+                last_exc = TimeoutError(
+                    f"{func.__name__} timeout ({_REQUEST_TIMEOUT}s)"
+                )
+                if attempt < _MAX_RETRIES:
+                    delay = _RETRY_DELAY * attempt
+                    logger.warning(
+                        "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
+                        func.__name__, attempt, _MAX_RETRIES, last_exc, delay,
+                    )
+                    time.sleep(delay)
             except Exception as e:
-                _sig.alarm(0)
-                try:
-                    _sig.signal(_sig.SIGALRM, old_handler)
-                except Exception:
-                    pass
                 last_exc = e
                 if attempt < _MAX_RETRIES:
                     delay = _RETRY_DELAY * attempt
