@@ -1295,10 +1295,16 @@ class TradingBot:
                     pool_signals["long_term"] = long_signals
 
                 # ETF 시그널 생성 (ETF 로테이션 활성 + 리밸런싱일)
+                # 참고: ETF 풀은 채권/안전자산 포함이므로 드로다운 오버레이 미적용 (의도적 제외)
                 etf_signals = self._generate_etf_signals(date_str)
                 if etf_signals:
                     pool_signals["etf_rotation"] = etf_signals
                     self._last_etf_signals = dict(etf_signals)
+                    logger.info(
+                        "ETF 시그널 %d개 (드로다운 오버레이 미적용 — "
+                        "채권/안전자산 포함 풀)",
+                        len(etf_signals),
+                    )
 
                 if not pool_signals:
                     logger.warning("시그널이 없습니다. 리밸런싱을 스킵합니다.")
@@ -3066,12 +3072,14 @@ class TradingBot:
 
                     if has_critical and self.kis_client.is_configured():
                         self._send_notification(
-                            "[긴급 매도] CRITICAL 조건 감지 — "
-                            "자동 매도를 시도합니다.",
+                            "[긴급 알림] CRITICAL 조건 감지 — "
+                            "수동 매도 검토가 필요합니다.\n"
+                            "자동 매도는 미구현 상태입니다.",
                             level="CRITICAL",
                         )
                         logger.warning(
-                            "긴급 자동 매도 트리거 (auto_exit_enabled=True)"
+                            "긴급 CRITICAL 감지 (auto_exit_enabled=True, "
+                            "자동 매도 미구현 — 수동 조치 필요)"
                         )
             else:
                 logger.debug("긴급 모니터 정상: 이상 없음")

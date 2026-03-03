@@ -55,7 +55,17 @@ class DataProxy:
 
         def _with_fallback(*args, **kwargs):
             try:
-                return primary_fn(*args, **kwargs)
+                result = primary_fn(*args, **kwargs)
+                # 빈 DataFrame 반환 시에도 fallback 발동
+                if hasattr(result, "empty") and result.empty:
+                    logger.warning(
+                        "%s.%s 빈 결과 → %s fallback",
+                        primary_name, name, fallback_name,
+                    )
+                    cnt = object.__getattribute__(self, "_fallback_count")
+                    object.__setattr__(self, "_fallback_count", cnt + 1)
+                    return fallback_fn(*args, **kwargs)
+                return result
             except Exception as e:
                 logger.warning(
                     "%s.%s 실패 → %s fallback: %s",

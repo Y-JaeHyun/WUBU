@@ -145,6 +145,23 @@ class KRXOpenAPI:
                 if resp.status_code == 429:
                     raise KRXQuotaExceeded()
 
+                # 서버 일시 장애(5xx)는 재시도 대상
+                if resp.status_code in (500, 502, 503, 504):
+                    last_exc = KRXAPIError(
+                        resp.status_code, resp.text[:200]
+                    )
+                    if attempt < self._max_retries:
+                        delay = 2.0 * attempt
+                        logger.warning(
+                            "KRX API 서버 오류 %d (시도 %d/%d) "
+                            "— %.1f초 후 재시도",
+                            resp.status_code, attempt,
+                            self._max_retries, delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    raise last_exc
+
                 if resp.status_code != 200:
                     raise KRXAPIError(resp.status_code, resp.text[:200])
 

@@ -343,7 +343,7 @@ class MultiFactorStrategy(Strategy):
             if ticker not in prices or prices[ticker].empty:
                 continue
 
-            close = prices[ticker]["close"]
+            close = prices[ticker]["close"].dropna()
             if len(close) < 2:
                 continue
 
@@ -406,6 +406,14 @@ class MultiFactorStrategy(Strategy):
             if "eps" in fund_by_ticker.columns and "bps" in fund_by_ticker.columns:
                 eps_val = row.get("eps", 0)
                 bps_val = row.get("bps", 0)
+                # BPS <= 0 (자본잠식) → 즉시 제외
+                if bps_val is not None and float(bps_val) <= 0:
+                    excluded.append(ticker)
+                    logger.info(
+                        f"밸류트랩 필터(자본잠식) 제외: {ticker} "
+                        f"(BPS={float(bps_val):,.0f})"
+                    )
+                    continue
                 if bps_val and float(bps_val) > 0:
                     roe = float(eps_val) / float(bps_val)
                     if roe < self.min_roe:
@@ -525,6 +533,10 @@ class MultiFactorStrategy(Strategy):
             ranked, fundamentals, select_count,
             target_num_stocks=self.num_stocks,
         )
+
+        if top.empty:
+            logger.warning(f"집중도 필터 후 후보 종목 없음 ({date})")
+            return {}
 
         # 동일 비중 할당
         weight = 1.0 / len(top)

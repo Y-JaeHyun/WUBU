@@ -21,6 +21,8 @@
     config = get_multi_factor_config("live")
 """
 
+import copy
+
 # 모든 프로필이 공유하는 기본값
 MULTI_FACTOR_BASE: dict = {
     "factors": ["value", "momentum"],
@@ -62,9 +64,9 @@ def get_multi_factor_config(profile: str = "live", **overrides) -> dict:
     Returns:
         :class:`MultiFactorStrategy` 생성용 kwargs dict.
     """
-    config = {**MULTI_FACTOR_BASE}
+    config = copy.deepcopy(MULTI_FACTOR_BASE)
     if profile in MULTI_FACTOR_PROFILES:
-        config.update(MULTI_FACTOR_PROFILES[profile])
+        config.update(copy.deepcopy(MULTI_FACTOR_PROFILES[profile]))
     config.update(overrides)
     return config
 

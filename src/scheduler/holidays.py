@@ -26,12 +26,13 @@ class KRXHolidays:
     """
 
     # 고정 공휴일 (MM-DD)
-    # 신정, 삼일절, 어린이날, 현충일, 광복절, 개천절, 한글날, 성탄절
+    # 신정, 삼일절, 어린이날, 현충일, 제헌절, 광복절, 개천절, 한글날, 성탄절
     FIXED_HOLIDAYS: list[str] = [
         "01-01",  # 신정
         "03-01",  # 삼일절
         "05-05",  # 어린이날
         "06-06",  # 현충일
+        "07-17",  # 제헌절 (2026년부터 공휴일 재지정)
         "08-15",  # 광복절
         "10-03",  # 개천절
         "10-09",  # 한글날
@@ -44,6 +45,7 @@ class KRXHolidays:
     SUBSTITUTE_ELIGIBLE_FIXED: list[str] = [
         "03-01",  # 삼일절
         "05-05",  # 어린이날
+        "07-17",  # 제헌절
         "08-15",  # 광복절
         "10-03",  # 개천절
         "10-09",  # 한글날
@@ -90,6 +92,13 @@ class KRXHolidays:
         ],
     }
 
+    # 특별 공휴일 (선거일, 임시공휴일 등 — 연도별 MM-DD 리스트)
+    SPECIAL_HOLIDAYS: dict[int, list[str]] = {
+        2026: [
+            "06-03",  # 제8회 전국 동시 지방선거일
+        ],
+    }
+
     # 연말 휴장일 (12-31은 KRX 정규 마감일이 아닐 수 있음)
     # 필요 시 여기에 추가
 
@@ -125,6 +134,17 @@ class KRXHolidays:
                 raw_holidays.append(d)
             except ValueError:
                 logger.warning("잘못된 고정 공휴일 형식: %s", md)
+
+        # 특별 공휴일 추가 (선거일, 임시공휴일 등)
+        special_dates = self.SPECIAL_HOLIDAYS.get(year, [])
+        for md in special_dates:
+            try:
+                month, day = md.split("-")
+                d = datetime.date(year, int(month), int(day))
+                holidays.add(d)
+                raw_holidays.append(d)
+            except ValueError:
+                logger.warning("잘못된 특별 공휴일 형식: %s (연도: %d)", md, year)
 
         # 음력 공휴일 추가
         lunar_dates = self.LUNAR_HOLIDAYS.get(year, [])

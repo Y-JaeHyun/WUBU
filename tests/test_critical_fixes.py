@@ -87,11 +87,11 @@ class TestEmergencyMonitorSchedule:
         assert "emergency_monitor" in job_ids
 
     def test_total_job_count_increased(self):
-        """스케줄 등록 후 20개 작업이 존재한다 (기존 19 + emergency_monitor)."""
+        """스케줄 등록 후 21개 작업이 존재한다."""
         bot = _make_bot()
         bot.setup_schedule()
 
-        assert len(bot.scheduler.get_jobs()) == 20
+        assert len(bot.scheduler.get_jobs()) == 21
 
 
 # ── C2: 오버레이 라이브 적용 ─────────────────────────────

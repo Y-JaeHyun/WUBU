@@ -82,7 +82,6 @@ def login(login_id: str, login_pw: str) -> bool:
     _login_pw = login_pw
 
     _session = requests.Session()
-    _patch_webio()
 
     headers = {"User-Agent": _UA}
 
@@ -130,6 +129,7 @@ def login(login_id: str, login_pw: str) -> bool:
         success = error_code == "CD001"
         if success:
             _last_login = time.monotonic()
+            _patch_webio()
             logger.info("KRX 데이터 포털 로그인 성공")
         else:
             logger.warning("KRX 로그인 실패: error_code=%s", error_code)
