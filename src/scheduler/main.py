@@ -5,7 +5,7 @@ systemd 서비스로 등록하여 무인 운영할 수 있다.
 
 스케줄:
     07:00 - 모닝 브리핑 (마켓 요약 + 포트폴리오 현황)
-    08:00 - 헬스 체크
+    07:10 - 헬스 체크
     07:30 - 장 전 시그널 체크 (리밸런싱 대상일 판별)
     09:05 - 리밸런싱 실행 (해당일에만)
     매시 정각(09~15) - 포트폴리오 모니터링
@@ -2879,7 +2879,7 @@ class TradingBot:
 
         self.scheduler.add_job(
             self.health_check,
-            CronTrigger(hour=8, minute=0, day_of_week="mon-fri"),
+            CronTrigger(hour=7, minute=10, day_of_week="mon-fri"),
             id="health_check",
             name="헬스 체크",
             misfire_grace_time=300,
