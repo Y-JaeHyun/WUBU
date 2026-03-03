@@ -6,7 +6,7 @@ systemd 서비스로 등록하여 무인 운영할 수 있다.
 스케줄:
     07:00 - 모닝 브리핑 (마켓 요약 + 포트폴리오 현황)
     08:00 - 헬스 체크
-    08:50 - 장 전 시그널 체크 (리밸런싱 대상일 판별)
+    07:30 - 장 전 시그널 체크 (리밸런싱 대상일 판별)
     09:05 - 리밸런싱 실행 (해당일에만)
     매시 정각(09~15) - 포트폴리오 모니터링
     15:35 - 장 마감 후 일일 리뷰
@@ -253,6 +253,7 @@ class TradingBot:
             start_date = start_dt.strftime("%Y%m%d")
 
             prices: dict = {}
+            failed_tickers: list[str] = []
             for ticker in top_tickers:
                 cache_key_p = DataCache.make_key("price", ticker, start_date, date_str)
                 price_df = None
@@ -269,11 +270,24 @@ class TradingBot:
                         prices[ticker] = price_df
                         if use_cache:
                             self.data_cache.put(cache_key_p, price_df)
-                except Exception:
-                    pass  # 개별 종목 실패는 무시
+                except Exception as e:
+                    failed_tickers.append(ticker)
+                    logger.warning("가격 수집 실패 (%s): %s", ticker, e)
 
             data["prices"] = prices
+            data["_meta"] = {
+                "price_requested": len(top_tickers),
+                "price_collected": len(prices),
+                "price_failed": len(failed_tickers),
+                "failed_tickers": failed_tickers[:10],
+            }
             logger.info("가격 데이터 수집: %d/%d종목", len(prices), len(top_tickers))
+            if failed_tickers:
+                logger.warning(
+                    "가격 수집 실패: %d종목 (예: %s)",
+                    len(failed_tickers),
+                    ", ".join(failed_tickers[:5]),
+                )
 
         # 3. KOSPI 지수 ────────────────────────────────────
         try:
@@ -509,6 +523,51 @@ class TradingBot:
             return BBSqueezeStrategy()
         return factory()
 
+    @staticmethod
+    def _validate_signal_data(
+        strategy_data: dict, fail_rate_threshold: float = 0.2,
+    ) -> tuple[bool, list[str]]:
+        """전략 데이터 품질을 검증한다.
+
+        Args:
+            strategy_data: _collect_strategy_data() 반환값.
+            fail_rate_threshold: 가격 수집 실패율 허용 상한 (기본 20%).
+
+        Returns:
+            (is_valid, issues): 유효 여부와 문제 목록.
+        """
+        issues: list[str] = []
+
+        # 펀더멘탈 검증
+        fund = strategy_data.get("fundamentals")
+        if fund is None or (hasattr(fund, "empty") and fund.empty):
+            issues.append("펀더멘탈 데이터 수집 실패")
+
+        # 가격 데이터 검증
+        meta = strategy_data.get("_meta", {})
+        requested = meta.get("price_requested", 0)
+        collected = meta.get("price_collected", 0)
+        failed = meta.get("price_failed", 0)
+
+        if collected == 0 and requested > 0:
+            issues.append(f"가격 데이터 전량 실패 (0/{requested}종목)")
+        elif requested > 0 and failed / requested > fail_rate_threshold:
+            issues.append(
+                f"가격 수집 실패율 초과: {failed}/{requested}종목 "
+                f"({failed / requested:.0%} > {fail_rate_threshold:.0%})"
+            )
+
+        # KOSPI 지수 (경고만, 실패 판정하지 않음)
+        idx = strategy_data.get("index_prices")
+        if idx is None or (hasattr(idx, "empty") and idx.empty):
+            issues.append("(경고) KOSPI 지수 데이터 없음")
+
+        # 경고만 있는 경우는 유효
+        fatal_issues = [i for i in issues if not i.startswith("(경고)")]
+        is_valid = len(fatal_issues) == 0
+
+        return is_valid, issues
+
     def _is_trading_day(self) -> bool:
         """오늘이 거래일인지 확인한다.
 
@@ -604,9 +663,10 @@ class TradingBot:
             logger.debug(traceback.format_exc())
 
     def premarket_check(self) -> None:
-        """08:50 - 장 전 시그널 체크.
+        """07:30 - 장 전 시그널 체크.
 
         리밸런싱 대상일이면 전략 시그널을 미리 생성하여 알림한다.
+        데이터 품질 검증에 실패하면 CRITICAL 알림을 발송한다.
         """
         if not self._is_trading_day():
             return
@@ -629,17 +689,21 @@ class TradingBot:
             # 전략 시그널 미리보기 (dry run)
             logger.info("리밸런싱 사전 시그널 체크 시작")
 
-            # T-1 기준 데이터 수집 (08:50에는 당일 데이터 미완성)
+            # T-1 기준 데이터 수집 (장 전에는 당일 데이터 미완성)
             prev_day = self.holidays.prev_trading_day(today)
             data_date = prev_day.strftime("%Y%m%d")
             logger.info("전략 데이터 수집 (기준일: %s)", data_date)
             strategy_data = self._collect_strategy_data(data_date)
 
-            if strategy_data["fundamentals"].empty:
+            # 데이터 품질 검증
+            is_valid, issues = self._validate_signal_data(strategy_data)
+            if not is_valid:
+                issue_text = "\n".join(f"  - {i}" for i in issues)
                 self._send_notification(
-                    f"[장 전 체크] {today.strftime('%Y-%m-%d')}\n"
-                    "펀더멘탈 데이터 수집 실패. 시그널 생성 불가.",
-                    level="WARNING",
+                    f"[시그널 생성 실패] {today.strftime('%Y-%m-%d')}\n"
+                    f"리밸런싱일 데이터 품질 검증 실패:\n{issue_text}\n"
+                    "09:05 리밸런싱이 중단될 수 있습니다.",
+                    level="CRITICAL",
                 )
                 return
 
@@ -647,8 +711,15 @@ class TradingBot:
             try:
                 signals = self._strategy.generate_signals(date_str, strategy_data)
             except Exception as e:
-                logger.warning("시그널 생성 중 오류: %s", e)
-                signals = {}
+                logger.error("시그널 생성 예외: %s", e)
+                logger.debug(traceback.format_exc())
+                self._send_notification(
+                    f"[시그널 생성 실패] {today.strftime('%Y-%m-%d')}\n"
+                    f"전략 시그널 생성 중 예외 발생: {e}\n"
+                    "09:05 리밸런싱이 중단될 수 있습니다.",
+                    level="CRITICAL",
+                )
+                return
 
             # EOD 뉴스 관심종목용 시그널 캐시
             if signals:
@@ -742,7 +813,8 @@ class TradingBot:
             else:
                 self._send_notification(
                     f"[장 전 시그널 체크] {today.strftime('%Y-%m-%d')}\n"
-                    "시그널이 없습니다."
+                    "시그널이 없습니다. 전략 로직을 확인하세요.",
+                    level="WARNING",
                 )
 
             logger.info("장 전 시그널 체크 완료")
@@ -956,16 +1028,19 @@ class TradingBot:
                 )
                 return
 
-            # T-1 데이터 수집 (08:50 캐시 히트 기대)
+            # T-1 데이터 수집 (07:30 프리워밍 캐시 히트 기대)
             prev_day = self.holidays.prev_trading_day(today)
             data_date = prev_day.strftime("%Y%m%d")
             logger.info("리밸런싱 데이터 수집 (기준일: %s)", data_date)
             strategy_data = self._collect_strategy_data(data_date)
 
-            if strategy_data["fundamentals"].empty:
-                logger.error("펀더멘탈 데이터 수집 실패. 리밸런싱을 중단합니다.")
+            # 데이터 품질 검증
+            is_valid, issues = self._validate_signal_data(strategy_data)
+            if not is_valid:
+                issue_text = "\n".join(f"  - {i}" for i in issues)
+                logger.error("데이터 품질 검증 실패. 리밸런싱을 중단합니다.")
                 self._send_notification(
-                    "[리밸런싱 오류] 펀더멘탈 데이터 수집 실패.",
+                    f"[리밸런싱 중단] 데이터 품질 검증 실패:\n{issue_text}",
                     level="CRITICAL",
                 )
                 return
@@ -2812,7 +2887,7 @@ class TradingBot:
 
         self.scheduler.add_job(
             self.premarket_check,
-            CronTrigger(hour=8, minute=50, day_of_week="mon-fri"),
+            CronTrigger(hour=7, minute=30, day_of_week="mon-fri"),
             id="premarket_check",
             name="장 전 시그널 체크",
             misfire_grace_time=300,

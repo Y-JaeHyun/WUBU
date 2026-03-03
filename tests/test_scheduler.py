@@ -1132,7 +1132,7 @@ class TestPremarketWithData:
         bot._collect_strategy_data.assert_called_once_with("20260225")
 
     def test_skips_on_empty_fundamentals(self):
-        """펀더멘탈 비어있으면 WARNING 알림 후 스킵한다."""
+        """펀더멘탈 비어있으면 CRITICAL 알림 후 스킵한다."""
         bot = _make_bot_with_flag(False)
         bot._is_trading_day = MagicMock(return_value=True)
         bot.holidays.is_rebalance_day = MagicMock(return_value=True)
@@ -1152,10 +1152,11 @@ class TestPremarketWithData:
 
         # strategy.generate_signals가 호출되지 않아야 함
         bot._strategy.generate_signals.assert_not_called()
-        # WARNING 알림이 발송됨
+        # CRITICAL 알림이 발송됨
         bot._send_notification.assert_called()
         call_text = bot._send_notification.call_args[0][0]
-        assert "수집 실패" in call_text
+        assert "시그널 생성 실패" in call_text
+        assert bot._send_notification.call_args[1].get("level") == "CRITICAL"
 
 
 class TestRebalanceWithData:
@@ -1313,3 +1314,246 @@ class TestPrewarmStrategyCache:
 
         job_ids = [j.id for j in bot.scheduler.get_jobs()]
         assert "prewarm_cache" in job_ids
+
+
+class TestValidateSignalData:
+    """_validate_signal_data 데이터 품질 검증 테스트."""
+
+    def _import_bot_cls(self):
+        return _import_trading_bot()
+
+    def test_valid_data_passes(self):
+        """정상 데이터는 검증을 통과한다."""
+        cls = self._import_bot_cls()
+        data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {"005930": pd.DataFrame()},
+            "index_prices": pd.Series([100.0, 101.0]),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 190,
+                "price_failed": 10,
+                "failed_tickers": [],
+            },
+        }
+        is_valid, issues = cls._validate_signal_data(data)
+        assert is_valid is True
+        # 5% 실패율 → 경고 없음
+        fatal = [i for i in issues if not i.startswith("(경고)")]
+        assert len(fatal) == 0
+
+    def test_empty_fundamentals_fails(self):
+        """펀더멘탈이 비어있으면 실패한다."""
+        cls = self._import_bot_cls()
+        data = {
+            "fundamentals": pd.DataFrame(),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        }
+        is_valid, issues = cls._validate_signal_data(data)
+        assert is_valid is False
+        assert any("펀더멘탈" in i for i in issues)
+
+    def test_high_failure_rate_fails(self):
+        """가격 수집 실패율 > 20%이면 실패한다."""
+        cls = self._import_bot_cls()
+        data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {"005930": pd.DataFrame()},
+            "index_prices": pd.Series([100.0]),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 150,
+                "price_failed": 50,
+                "failed_tickers": [],
+            },
+        }
+        is_valid, issues = cls._validate_signal_data(data)
+        assert is_valid is False
+        assert any("실패율 초과" in i for i in issues)
+
+    def test_all_prices_failed(self):
+        """가격 데이터가 전량 실패하면 실패한다."""
+        cls = self._import_bot_cls()
+        data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {},
+            "index_prices": pd.Series([100.0]),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 0,
+                "price_failed": 200,
+                "failed_tickers": [],
+            },
+        }
+        is_valid, issues = cls._validate_signal_data(data)
+        assert is_valid is False
+        assert any("전량 실패" in i for i in issues)
+
+    def test_boundary_20_percent_passes(self):
+        """정확히 20% 실패율은 통과한다 (> 20% 기준)."""
+        cls = self._import_bot_cls()
+        data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {"005930": pd.DataFrame()},
+            "index_prices": pd.Series([100.0]),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 160,
+                "price_failed": 40,
+                "failed_tickers": [],
+            },
+        }
+        is_valid, issues = cls._validate_signal_data(data)
+        assert is_valid is True
+
+    def test_missing_index_is_warning_only(self):
+        """KOSPI 지수 없음은 경고만, 실패는 아니다."""
+        cls = self._import_bot_cls()
+        data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {"005930": pd.DataFrame()},
+            "index_prices": pd.Series(dtype=float),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 200,
+                "price_failed": 0,
+                "failed_tickers": [],
+            },
+        }
+        is_valid, issues = cls._validate_signal_data(data)
+        assert is_valid is True
+        assert any("KOSPI" in i for i in issues)
+
+    def test_no_meta_key_with_good_data(self):
+        """_meta 키 없는 기존 데이터도 펀더멘탈이 있으면 통과한다."""
+        cls = self._import_bot_cls()
+        data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {"005930": pd.DataFrame()},
+            "index_prices": pd.Series([100.0]),
+        }
+        is_valid, issues = cls._validate_signal_data(data)
+        assert is_valid is True
+
+
+class TestPremarketSignalFailure:
+    """premarket_check 시그널 생성 실패 시 CRITICAL 알림 테스트."""
+
+    def test_data_quality_failure_sends_critical(self):
+        """데이터 품질 불량 시 CRITICAL 알림을 발송한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.holidays.is_rebalance_day = MagicMock(return_value=True)
+        bot.holidays.prev_trading_day = MagicMock(
+            return_value=datetime.date(2026, 2, 25)
+        )
+        bot._strategy = MagicMock()
+        bot._collect_strategy_data = MagicMock(return_value={
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 50,
+                "price_failed": 150,
+                "failed_tickers": ["A"] * 10,
+            },
+        })
+        bot._send_notification = MagicMock()
+
+        bot.premarket_check()
+
+        bot._strategy.generate_signals.assert_not_called()
+        bot._send_notification.assert_called()
+        call_kwargs = bot._send_notification.call_args[1]
+        assert call_kwargs.get("level") == "CRITICAL"
+        call_text = bot._send_notification.call_args[0][0]
+        assert "실패율 초과" in call_text
+
+    def test_signal_generation_exception_sends_critical(self):
+        """시그널 생성 예외 시 CRITICAL 알림을 발송한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.holidays.is_rebalance_day = MagicMock(return_value=True)
+        bot.holidays.prev_trading_day = MagicMock(
+            return_value=datetime.date(2026, 2, 25)
+        )
+        mock_strategy = MagicMock()
+        mock_strategy.generate_signals.side_effect = RuntimeError("test")
+        bot._strategy = mock_strategy
+        bot._collect_strategy_data = MagicMock(return_value={
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {"005930": pd.DataFrame()},
+            "index_prices": pd.Series([100.0]),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 200,
+                "price_failed": 0,
+                "failed_tickers": [],
+            },
+        })
+        bot._send_notification = MagicMock()
+
+        bot.premarket_check()
+
+        bot._send_notification.assert_called()
+        call_kwargs = bot._send_notification.call_args[1]
+        assert call_kwargs.get("level") == "CRITICAL"
+        call_text = bot._send_notification.call_args[0][0]
+        assert "예외 발생" in call_text
+
+
+class TestRebalanceDataValidation:
+    """execute_rebalance 데이터 품질 검증 테스트."""
+
+    def test_data_quality_failure_aborts_rebalance(self):
+        """데이터 품질 불량 시 리밸런싱을 중단한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.holidays.is_rebalance_day = MagicMock(return_value=True)
+        bot.holidays.prev_trading_day = MagicMock(
+            return_value=datetime.date(2026, 2, 25)
+        )
+        bot.kis_client.is_configured.return_value = True
+        bot._strategy = MagicMock()
+        bot._collect_strategy_data = MagicMock(return_value={
+            "fundamentals": pd.DataFrame({"ticker": ["005930"]}),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 100,
+                "price_failed": 100,
+                "failed_tickers": [],
+            },
+        })
+        bot._send_notification = MagicMock()
+
+        bot.execute_rebalance()
+
+        # 시그널 생성도 시도하지 않아야 함
+        bot._strategy.generate_signals.assert_not_called()
+        bot._send_notification.assert_called()
+        call_kwargs = bot._send_notification.call_args[1]
+        assert call_kwargs.get("level") == "CRITICAL"
+        call_text = bot._send_notification.call_args[0][0]
+        assert "리밸런싱 중단" in call_text
+
+
+class TestScheduleTime:
+    """스케줄 시간 변경 테스트."""
+
+    def test_premarket_check_at_0730(self):
+        """premarket_check가 07:30에 등록된다."""
+        bot = _make_bot_with_flag(False)
+        bot.setup_schedule()
+
+        jobs = {j.id: j for j in bot.scheduler.get_jobs()}
+        premarket = jobs["premarket_check"]
+        trigger = premarket.trigger
+        # CronTrigger의 fields에서 hour/minute 확인
+        hour_field = str(trigger.fields[trigger.FIELD_NAMES.index("hour")])
+        minute_field = str(trigger.fields[trigger.FIELD_NAMES.index("minute")])
+        assert hour_field == "7"
+        assert minute_field == "30"
