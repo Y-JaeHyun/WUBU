@@ -254,6 +254,8 @@ class TradingBot:
 
             prices: dict = {}
             failed_tickers: list[str] = []
+            cache_hits = 0
+            api_fetched = 0
             for ticker in top_tickers:
                 cache_key_p = DataCache.make_key("price", ticker, start_date, date_str)
                 price_df = None
@@ -262,12 +264,14 @@ class TradingBot:
 
                 if price_df is not None:
                     prices[ticker] = price_df
+                    cache_hits += 1
                     continue
 
                 try:
                     price_df = get_price_data(ticker, start_date, date_str)
                     if not price_df.empty:
                         prices[ticker] = price_df
+                        api_fetched += 1
                         if use_cache:
                             self.data_cache.put(cache_key_p, price_df)
                 except Exception as e:
@@ -279,6 +283,8 @@ class TradingBot:
                 "price_requested": len(top_tickers),
                 "price_collected": len(prices),
                 "price_failed": len(failed_tickers),
+                "cache_hits": cache_hits,
+                "api_fetched": api_fetched,
                 "failed_tickers": failed_tickers[:10],
             }
             logger.info("가격 데이터 수집: %d/%d종목", len(prices), len(top_tickers))
@@ -730,11 +736,18 @@ class TradingBot:
 
             # 데이터 품질 검증
             is_valid, issues = self._validate_signal_data(strategy_data)
+            meta = strategy_data.get("_meta", {})
             if not is_valid:
                 issue_text = "\n".join(f"  - {i}" for i in issues)
+                meta_text = (
+                    f"캐시: {meta.get('cache_hits', '?')}히트 / "
+                    f"API: {meta.get('api_fetched', '?')} / "
+                    f"실패: {meta.get('price_failed', '?')}"
+                )
                 self._send_notification(
                     f"[시그널 생성 실패] {today.strftime('%Y-%m-%d')}\n"
                     f"리밸런싱일 데이터 품질 검증 실패:\n{issue_text}\n"
+                    f"수집 상세: {meta_text}\n"
                     "09:05 리밸런싱이 중단될 수 있습니다.",
                     level="CRITICAL",
                 )
@@ -2627,10 +2640,10 @@ class TradingBot:
         """15:45 - 내일 시그널용 데이터 프리워밍.
 
         장 마감 후 당일 종가 기반 fundamentals + prices + index를
-        DataCache에 저장한다. 익일 08:50 premarket_check()에서
+        DataCache에 저장한다. 익일 07:30 premarket_check()에서
         prev_trading_day(내일) = 오늘이므로 동일한 캐시 키로 히트된다.
 
-        에러 시 로깅만 하고 크래시하지 않는다 (크리티컬하지 않음).
+        데이터 품질 검증에 실패하면 CRITICAL 알림을 발송한다.
         """
         if not self._is_trading_day():
             return
@@ -2641,26 +2654,47 @@ class TradingBot:
 
             strategy_data = self._collect_strategy_data(today_str)
 
+            # 데이터 품질 검증
+            is_valid, issues = self._validate_signal_data(strategy_data)
+
+            meta = strategy_data.get("_meta", {})
+            requested = meta.get("price_requested", 0)
+            collected = meta.get("price_collected", 0)
+            failed = meta.get("price_failed", 0)
             fund_count = (
                 len(strategy_data["fundamentals"])
                 if not strategy_data["fundamentals"].empty
                 else 0
             )
-            price_count = len(strategy_data["prices"])
             index_count = len(strategy_data["index_prices"])
 
-            msg = (
-                f"[데이터 프리워밍 완료] {today_str}\n"
-                f"펀더멘탈: {fund_count}종목\n"
-                f"가격: {price_count}종목\n"
-                f"KOSPI 지수: {index_count}일"
-            )
-            logger.info(msg)
-            self._send_notification(msg)
+            if is_valid:
+                msg = (
+                    f"[데이터 프리워밍 완료] {today_str}\n"
+                    f"펀더멘탈: {fund_count}종목\n"
+                    f"가격: {collected}/{requested}종목\n"
+                    f"KOSPI 지수: {index_count}일"
+                )
+                logger.info(msg)
+                self._send_notification(msg)
+            else:
+                issue_text = "\n".join(f"  - {i}" for i in issues)
+                msg = (
+                    f"[프리워밍 실패] {today_str}\n"
+                    f"가격: {collected}/{requested}종목 "
+                    f"(실패 {failed})\n"
+                    f"문제:\n{issue_text}\n"
+                    "익일 시그널 생성에 영향이 있을 수 있습니다."
+                )
+                logger.error(msg)
+                self._send_notification(msg, level="CRITICAL")
 
         except Exception as e:
             logger.error("데이터 프리워밍 실패: %s", e)
             logger.debug(traceback.format_exc())
+            self._send_notification(
+                f"[프리워밍 오류] {e}", level="CRITICAL"
+            )
 
     def _create_long_term_strategy(self, name: str):
         """전략 이름으로 장기 전략 인스턴스를 생성한다.

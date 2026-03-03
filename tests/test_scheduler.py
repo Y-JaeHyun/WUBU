@@ -1244,6 +1244,14 @@ class TestPrewarmStrategyCache:
             "fundamentals": pd.DataFrame({"ticker": ["005930"] * 50}),
             "prices": {f"0{i:05d}": pd.DataFrame() for i in range(150)},
             "index_prices": pd.Series(range(200), dtype=float),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 150,
+                "price_failed": 50,
+                "cache_hits": 100,
+                "api_fetched": 50,
+                "failed_tickers": [],
+            },
         }
         bot._collect_strategy_data = MagicMock(return_value=mock_data)
         bot._send_notification = MagicMock()
@@ -1252,10 +1260,38 @@ class TestPrewarmStrategyCache:
 
         bot._collect_strategy_data.assert_called_once()
         bot._send_notification.assert_called_once()
+        # 실패율 25% > 20% → CRITICAL
+        call_kwargs = bot._send_notification.call_args[1]
+        assert call_kwargs.get("level") == "CRITICAL"
+        msg = bot._send_notification.call_args[0][0]
+        assert "프리워밍 실패" in msg
+
+    def test_success_sends_info(self):
+        """프리워밍 성공 시 INFO 알림을 발송한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+
+        mock_data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"] * 50}),
+            "prices": {f"0{i:05d}": pd.DataFrame() for i in range(190)},
+            "index_prices": pd.Series(range(200), dtype=float),
+            "_meta": {
+                "price_requested": 200,
+                "price_collected": 190,
+                "price_failed": 10,
+                "cache_hits": 180,
+                "api_fetched": 10,
+                "failed_tickers": [],
+            },
+        }
+        bot._collect_strategy_data = MagicMock(return_value=mock_data)
+        bot._send_notification = MagicMock()
+
+        bot.prewarm_strategy_cache()
+
         msg = bot._send_notification.call_args[0][0]
         assert "프리워밍 완료" in msg
-        assert "50종목" in msg
-        assert "150종목" in msg
+        assert "190/200" in msg
 
     def test_skips_non_trading_day(self):
         """비거래일에는 스킵한다."""
