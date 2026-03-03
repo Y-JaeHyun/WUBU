@@ -630,15 +630,15 @@ class TestDaytradingClose:
 class TestSetupScheduleShortTerm:
     """setup_schedule에 단기 스케줄이 추가되는지 검증."""
 
-    def test_schedule_has_20_jobs(self):
-        """setup_schedule 후 20개의 작업이 등록된다 (기존 19 + emergency_monitor 1)."""
+    def test_schedule_has_21_jobs(self):
+        """setup_schedule 후 21개의 작업이 등록된다 (기존 20 + prewarm_cache 1)."""
         bot = _make_bot_with_flag(False)
 
         bot.setup_schedule()
 
         jobs = bot.scheduler.get_jobs()
-        assert len(jobs) == 20, (
-            f"20개 작업이 등록되어야 합니다. 실제: {len(jobs)}개"
+        assert len(jobs) == 21, (
+            f"21개 작업이 등록되어야 합니다. 실제: {len(jobs)}개"
         )
 
     def test_short_term_job_ids_exist(self):
@@ -1229,3 +1229,87 @@ class TestSimulationWithData:
             # strategy_data가 주입되었는지 확인
             assert mock_sim.strategy_data == mock_data
             bot._collect_strategy_data.assert_called_once()
+
+
+class TestPrewarmStrategyCache:
+    """prewarm_strategy_cache 테스트."""
+
+    def test_calls_collect_strategy_data(self):
+        """프리워밍 시 _collect_strategy_data가 호출된다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+
+        mock_data = {
+            "fundamentals": pd.DataFrame({"ticker": ["005930"] * 50}),
+            "prices": {f"0{i:05d}": pd.DataFrame() for i in range(150)},
+            "index_prices": pd.Series(range(200), dtype=float),
+        }
+        bot._collect_strategy_data = MagicMock(return_value=mock_data)
+        bot._send_notification = MagicMock()
+
+        bot.prewarm_strategy_cache()
+
+        bot._collect_strategy_data.assert_called_once()
+        bot._send_notification.assert_called_once()
+        msg = bot._send_notification.call_args[0][0]
+        assert "프리워밍 완료" in msg
+        assert "50종목" in msg
+        assert "150종목" in msg
+
+    def test_skips_non_trading_day(self):
+        """비거래일에는 스킵한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=False)
+        bot._collect_strategy_data = MagicMock()
+
+        bot.prewarm_strategy_cache()
+
+        bot._collect_strategy_data.assert_not_called()
+
+    def test_error_does_not_crash(self):
+        """에러 시 크래시하지 않고 로깅만 한다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot._collect_strategy_data = MagicMock(
+            side_effect=RuntimeError("test error")
+        )
+        bot._send_notification = MagicMock()
+
+        # 예외가 발생하지 않아야 한다
+        bot.prewarm_strategy_cache()
+
+    def test_cache_key_matches_premarket(self):
+        """15:45 프리워밍 캐시 키가 익일 08:50 캐시 키와 일치한다.
+
+        15:45에 today_str로 캐시 → 익일 08:50에 prev_trading_day(내일) = 오늘
+        → 동일한 date_str로 캐시 히트.
+        """
+        from src.data.cache import DataCache
+
+        today_str = "20260304"
+
+        # 프리워밍 시 캐시 키
+        prewarm_fund_key = DataCache.make_key("fundamentals", today_str)
+        prewarm_price_key = DataCache.make_key(
+            "price", "005930", "20250129", today_str
+        )
+        prewarm_idx_key = DataCache.make_key("kospi_index", today_str)
+
+        # 익일 08:50 시 캐시 키 (prev_trading_day(내일) = 오늘)
+        premarket_fund_key = DataCache.make_key("fundamentals", today_str)
+        premarket_price_key = DataCache.make_key(
+            "price", "005930", "20250129", today_str
+        )
+        premarket_idx_key = DataCache.make_key("kospi_index", today_str)
+
+        assert prewarm_fund_key == premarket_fund_key
+        assert prewarm_price_key == premarket_price_key
+        assert prewarm_idx_key == premarket_idx_key
+
+    def test_schedule_registered(self):
+        """setup_schedule에 prewarm_cache 작업이 등록된다."""
+        bot = _make_bot_with_flag(False)
+        bot.setup_schedule()
+
+        job_ids = [j.id for j in bot.scheduler.get_jobs()]
+        assert "prewarm_cache" in job_ids

@@ -10,6 +10,7 @@ systemd 서비스로 등록하여 무인 운영할 수 있다.
     09:05 - 리밸런싱 실행 (해당일에만)
     매시 정각(09~15) - 포트폴리오 모니터링
     15:35 - 장 마감 후 일일 리뷰
+    15:45 - 데이터 프리워밍 (익일 시그널용 캐시)
     16:00 - 종목 리뷰 [stock_review]
     19:00 - 이브닝 종합 리포트
     22:00 - 야간 리서치 [night_research]
@@ -2514,6 +2515,45 @@ class TradingBot:
             logger.error("성과 DB 기록 실패: %s", e)
             logger.debug(traceback.format_exc())
 
+    def prewarm_strategy_cache(self) -> None:
+        """15:45 - 내일 시그널용 데이터 프리워밍.
+
+        장 마감 후 당일 종가 기반 fundamentals + prices + index를
+        DataCache에 저장한다. 익일 08:50 premarket_check()에서
+        prev_trading_day(내일) = 오늘이므로 동일한 캐시 키로 히트된다.
+
+        에러 시 로깅만 하고 크래시하지 않는다 (크리티컬하지 않음).
+        """
+        if not self._is_trading_day():
+            return
+
+        try:
+            today_str = datetime.now(KST).strftime("%Y%m%d")
+            logger.info("데이터 프리워밍 시작 (기준일: %s)", today_str)
+
+            strategy_data = self._collect_strategy_data(today_str)
+
+            fund_count = (
+                len(strategy_data["fundamentals"])
+                if not strategy_data["fundamentals"].empty
+                else 0
+            )
+            price_count = len(strategy_data["prices"])
+            index_count = len(strategy_data["index_prices"])
+
+            msg = (
+                f"[데이터 프리워밍 완료] {today_str}\n"
+                f"펀더멘탈: {fund_count}종목\n"
+                f"가격: {price_count}종목\n"
+                f"KOSPI 지수: {index_count}일"
+            )
+            logger.info(msg)
+            self._send_notification(msg)
+
+        except Exception as e:
+            logger.error("데이터 프리워밍 실패: %s", e)
+            logger.debug(traceback.format_exc())
+
     def _create_long_term_strategy(self, name: str):
         """전략 이름으로 장기 전략 인스턴스를 생성한다.
 
@@ -2882,6 +2922,15 @@ class TradingBot:
             CronTrigger(hour=15, minute=37, day_of_week="mon-fri"),
             id="record_performance",
             name="성과 DB 기록",
+            misfire_grace_time=300,
+        )
+
+        # 15:45 - 내일 시그널용 데이터 프리워밍
+        self.scheduler.add_job(
+            self.prewarm_strategy_cache,
+            CronTrigger(hour=15, minute=45, day_of_week="mon-fri"),
+            id="prewarm_cache",
+            name="데이터 프리워밍",
             misfire_grace_time=300,
         )
 
