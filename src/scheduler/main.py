@@ -701,6 +701,117 @@ class TradingBot:
             logger.error("모닝 브리핑 생성 실패: %s", e)
             logger.debug(traceback.format_exc())
 
+    def _filter_affordable_signals(
+        self,
+        signals: dict[str, float],
+        strategy_data: dict,
+        pool_budget: int,
+        target_num_stocks: int,
+        price_buffer: float = 0.05,
+        min_stocks: int = 5,
+        score_threshold_ratio: float = 0.7,
+    ) -> tuple[dict[str, float], list[str]]:
+        """매수 불가능 종목을 제외하고 차순위로 대체한다.
+
+        종목당 예산보다 1주 가격이 높은 종목을 필터링하여
+        실제 매수 가능한 포트폴리오를 구성한다.
+
+        Args:
+            signals: 전략 시그널 {ticker: weight}.
+            strategy_data: 전략 데이터 (prices 포함).
+            pool_budget: 장기 풀 예산 (원).
+            target_num_stocks: 목표 종목 수.
+            price_buffer: 가격 버퍼 비율 (기본 5%).
+            min_stocks: 최소 종목 수 경고 임계값 (기본 5).
+            score_threshold_ratio: 스코어 하한선 비율 (기본 0.7).
+
+        Returns:
+            (filtered_signals, excluded_reasons) 튜플.
+        """
+        if not signals or pool_budget <= 0 or target_num_stocks <= 0:
+            return signals, []
+
+        budget_per_stock = pool_budget / target_num_stocks
+        max_price = budget_per_stock * (1 - price_buffer)
+
+        prices = strategy_data.get("prices", {})
+        excluded_reasons: list[str] = []
+        affordable: list[str] = []
+
+        # 스코어 하한선 계산
+        score_threshold = None
+        if (
+            hasattr(self._strategy, "_last_combined_scores")
+            and not self._strategy._last_combined_scores.empty
+        ):
+            top_score = float(self._strategy._last_combined_scores.iloc[0])
+            if top_score > 0:
+                score_threshold = top_score * score_threshold_ratio
+
+        for ticker in signals:
+            # 가격 조회
+            latest_close = None
+            if ticker in prices and not prices[ticker].empty:
+                price_df = prices[ticker]
+                if "close" in price_df.columns:
+                    latest_close = float(price_df["close"].iloc[-1])
+
+            if latest_close is not None and latest_close > max_price:
+                excluded_reasons.append(
+                    f"{ticker}: 주가 {latest_close:,.0f}원 > "
+                    f"예산 {max_price:,.0f}원"
+                )
+                continue
+
+            # 스코어 하한선 체크
+            if (
+                score_threshold is not None
+                and hasattr(self._strategy, "_last_combined_scores")
+                and ticker in self._strategy._last_combined_scores.index
+            ):
+                score = float(self._strategy._last_combined_scores[ticker])
+                if score < score_threshold:
+                    excluded_reasons.append(
+                        f"{ticker}: 스코어 {score:.3f} < "
+                        f"하한 {score_threshold:.3f}"
+                    )
+                    continue
+
+            affordable.append(ticker)
+
+        # 상위 target_num_stocks개 선택
+        selected = affordable[:target_num_stocks]
+
+        if len(selected) == 0:
+            logger.warning("전 종목 매수 불가 — 빈 시그널 반환")
+            excluded_reasons.append("전 종목 매수 불가")
+            return {}, excluded_reasons
+
+        if len(selected) < min_stocks:
+            logger.warning(
+                "매수 가능 종목 %d개 < 최소 %d개",
+                len(selected), min_stocks,
+            )
+            excluded_reasons.append(
+                f"매수 가능 종목 {len(selected)}개 (최소 {min_stocks}개 미달)"
+            )
+
+        # 동일 비중 재할당
+        weight = 1.0 / len(selected)
+        filtered = {ticker: weight for ticker in selected}
+
+        if excluded_reasons:
+            logger.info(
+                "매수가능성 필터: %d개 제외, %d개 선택 "
+                "(예산 %s원/종목, 버퍼 %.0f%%)",
+                len([r for r in excluded_reasons if ":" in r]),
+                len(selected),
+                f"{budget_per_stock:,.0f}",
+                price_buffer * 100,
+            )
+
+        return filtered, excluded_reasons
+
     def premarket_check(self) -> None:
         """07:30 - 장 전 시그널 체크.
 
@@ -755,7 +866,11 @@ class TradingBot:
 
             date_str = today.strftime("%Y%m%d")
             try:
-                signals = self._strategy.generate_signals(date_str, strategy_data)
+                num_stocks = getattr(self._strategy, "num_stocks", 7)
+                scan_limit = num_stocks * 2
+                signals = self._strategy.generate_signals(
+                    date_str, strategy_data, scan_limit=scan_limit
+                )
             except Exception as e:
                 logger.error("시그널 생성 예외: %s", e)
                 logger.debug(traceback.format_exc())
@@ -766,6 +881,15 @@ class TradingBot:
                     level="CRITICAL",
                 )
                 return
+
+            # 매수가능성 필터 (allocator 있을 때만)
+            excluded_reasons: list[str] = []
+            if signals and self.allocator:
+                pool_budget = self.allocator.get_long_term_budget()
+                if pool_budget > 0:
+                    signals, excluded_reasons = self._filter_affordable_signals(
+                        signals, strategy_data, pool_budget, num_stocks
+                    )
 
             # EOD 뉴스 관심종목용 시그널 캐시
             if signals:
@@ -803,6 +927,21 @@ class TradingBot:
                         f"{name}({ticker})" if name != ticker else ticker
                     )
                     lines.append(f"  {label}: {weight:.1%}")
+
+                # 매수 불가 종목 정보
+                ticker_exclusions = [
+                    r for r in excluded_reasons if ":" in r
+                ]
+                if ticker_exclusions:
+                    lines.append(
+                        f"\n매수 불가 {len(ticker_exclusions)}개 제외:"
+                    )
+                    for reason in ticker_exclusions[:5]:
+                        lines.append(f"  - {reason}")
+                    if len(ticker_exclusions) > 5:
+                        lines.append(
+                            f"  ... 외 {len(ticker_exclusions) - 5}개"
+                        )
 
                 # 통합 Dry run (allocator 활성 시)
                 if self.allocator:
@@ -1107,8 +1246,10 @@ class TradingBot:
                     logger.warning("보유 종목 업데이트 실패: %s", e)
 
             try:
+                num_stocks = getattr(self._strategy, "num_stocks", 7)
+                scan_limit = num_stocks * 2
                 long_signals = self._strategy.generate_signals(
-                    date_str, strategy_data
+                    date_str, strategy_data, scan_limit=scan_limit
                 )
             except Exception as e:
                 logger.error("장기 시그널 생성 실패: %s", e)
@@ -1117,6 +1258,19 @@ class TradingBot:
                     level="CRITICAL",
                 )
                 return
+
+            # 매수가능성 필터 (allocator 있을 때만)
+            if long_signals and self.allocator:
+                pool_budget = self.allocator.get_long_term_budget()
+                if pool_budget > 0:
+                    long_signals, excluded = self._filter_affordable_signals(
+                        long_signals, strategy_data, pool_budget, num_stocks
+                    )
+                    if excluded:
+                        logger.info(
+                            "매수 불가 종목 %d개 제외",
+                            len([r for r in excluded if ":" in r]),
+                        )
 
             # 오버레이 적용 (drawdown + vol_targeting)
             if long_signals:

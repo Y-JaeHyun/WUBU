@@ -1593,3 +1593,272 @@ class TestScheduleTime:
         minute_field = str(trigger.fields[trigger.FIELD_NAMES.index("minute")])
         assert hour_field == "7"
         assert minute_field == "30"
+
+
+# ===================================================================
+# 매수가능성(Affordability) 필터 테스트
+# ===================================================================
+
+class TestFilterAffordableSignals:
+    """_filter_affordable_signals 메서드 테스트."""
+
+    def _make_bot(self):
+        """allocator가 있는 bot을 생성한다."""
+        bot = _make_bot_with_flag(True)
+        # _strategy mock
+        mock_strategy = MagicMock()
+        mock_strategy.num_stocks = 7
+        mock_strategy._last_combined_scores = pd.Series(dtype=float)
+        bot._strategy = mock_strategy
+        return bot
+
+    def _make_prices(self, price_map: dict[str, float]) -> dict:
+        """종목별 가격 데이터를 생성한다."""
+        prices = {}
+        for ticker, price in price_map.items():
+            prices[ticker] = pd.DataFrame({"close": [price]})
+        return prices
+
+    def test_filters_expensive_stocks(self):
+        """1주 가격 > budget인 종목이 제외된다."""
+        bot = self._make_bot()
+        signals = {
+            "A001": 0.143,  # 비쌈
+            "A002": 0.143,  # 싸다
+            "A003": 0.143,  # 싸다
+            "A004": 0.143,  # 싸다
+            "A005": 0.143,  # 싸다
+            "A006": 0.143,  # 싸다
+            "A007": 0.143,  # 싸다
+        }
+        prices = self._make_prices({
+            "A001": 100000,  # 예산 초과
+            "A002": 5000,
+            "A003": 5000,
+            "A004": 5000,
+            "A005": 5000,
+            "A006": 5000,
+            "A007": 5000,
+        })
+        strategy_data = {"prices": prices}
+        # 예산: 105,000원 / 7종목 = 15,000원/종목, 버퍼 5% → max 14,250원
+        pool_budget = 105000
+
+        filtered, reasons = bot._filter_affordable_signals(
+            signals, strategy_data, pool_budget, 7
+        )
+
+        assert "A001" not in filtered
+        assert len(filtered) == 6
+        assert any("A001" in r for r in reasons)
+
+    def test_price_buffer_applied(self):
+        """5% 가격 버퍼가 적용된다 (경계값)."""
+        bot = self._make_bot()
+        # 예산: 70,000 / 7 = 10,000원/종목, 버퍼 5% → max 9,500원
+        signals = {"A001": 0.5, "A002": 0.5}
+        prices = self._make_prices({
+            "A001": 9600,  # > 9,500 → 제외
+            "A002": 9400,  # < 9,500 → 통과
+        })
+
+        filtered, reasons = bot._filter_affordable_signals(
+            signals, {"prices": prices}, 70000, 7
+        )
+
+        assert "A001" not in filtered
+        assert "A002" in filtered
+
+    def test_score_threshold(self):
+        """스코어 하한선 이하 종목이 제외된다."""
+        bot = self._make_bot()
+        bot._strategy._last_combined_scores = pd.Series(
+            {"A001": 1.0, "A002": 0.8, "A003": 0.5},
+        )
+        signals = {"A001": 0.33, "A002": 0.33, "A003": 0.33}
+        # 모든 종목 가격 OK
+        prices = self._make_prices({"A001": 100, "A002": 100, "A003": 100})
+
+        filtered, reasons = bot._filter_affordable_signals(
+            signals, {"prices": prices}, 700000, 7,
+            score_threshold_ratio=0.7,
+        )
+
+        # top=1.0 * 0.7 = 0.7 → A003(0.5) 제외
+        assert "A001" in filtered
+        assert "A002" in filtered
+        assert "A003" not in filtered
+
+    def test_min_stocks_warning(self):
+        """매수 가능 종목 < min_stocks이면 경고가 포함된다."""
+        bot = self._make_bot()
+        signals = {"A001": 0.25, "A002": 0.25, "A003": 0.25, "A004": 0.25}
+        # 4개 중 3개 비쌈 → 1개만 통과
+        prices = self._make_prices({
+            "A001": 100000,
+            "A002": 100000,
+            "A003": 100000,
+            "A004": 100,
+        })
+
+        filtered, reasons = bot._filter_affordable_signals(
+            signals, {"prices": prices}, 70000, 7, min_stocks=5,
+        )
+
+        assert len(filtered) == 1
+        assert any("미달" in r for r in reasons)
+
+    def test_all_stocks_filtered(self):
+        """전 종목 불가 시 빈 dict + 경고를 반환한다."""
+        bot = self._make_bot()
+        signals = {"A001": 0.5, "A002": 0.5}
+        prices = self._make_prices({"A001": 100000, "A002": 100000})
+
+        filtered, reasons = bot._filter_affordable_signals(
+            signals, {"prices": prices}, 70000, 7,
+        )
+
+        assert filtered == {}
+        assert any("전 종목 매수 불가" in r for r in reasons)
+
+    def test_no_allocator_skips_filter(self):
+        """allocator 없으면 필터가 적용되지 않는다."""
+        bot = _make_bot_with_flag(False)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot.holidays.is_rebalance_day = MagicMock(return_value=True)
+        bot.holidays.prev_trading_day = MagicMock(
+            return_value=datetime.date(2026, 2, 25)
+        )
+        mock_strategy = MagicMock()
+        mock_strategy.num_stocks = 7
+        mock_strategy.generate_signals.return_value = {
+            "005930": 0.5, "000660": 0.5,
+        }
+        bot._strategy = mock_strategy
+        bot._collect_strategy_data = MagicMock(return_value={
+            "fundamentals": pd.DataFrame({"ticker": ["005930", "000660"]}),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        })
+        bot._send_notification = MagicMock()
+        bot.executor.dry_run = MagicMock(return_value={
+            "sell_orders": [], "buy_orders": [],
+            "risk_check": {"passed": True, "warnings": []},
+        })
+
+        bot.premarket_check()
+
+        # allocator=None이므로 generate_signals 결과가 그대로 사용
+        assert bot._last_long_signals == {"005930": 0.5, "000660": 0.5}
+
+    def test_reweights_equally(self):
+        """필터 후 동일 비중이 재할당된다."""
+        bot = self._make_bot()
+        signals = {
+            "A001": 0.2, "A002": 0.2, "A003": 0.2,
+            "A004": 0.2, "A005": 0.2,
+        }
+        prices = self._make_prices({
+            "A001": 100000,  # 제외
+            "A002": 100, "A003": 100, "A004": 100, "A005": 100,
+        })
+
+        filtered, _ = bot._filter_affordable_signals(
+            signals, {"prices": prices}, 70000, 7,
+        )
+
+        # 4개 남으면 각 25%
+        assert len(filtered) == 4
+        for w in filtered.values():
+            assert abs(w - 0.25) < 1e-9
+
+    def test_no_price_data_passes(self):
+        """가격 데이터 없는 종목은 필터 통과한다."""
+        bot = self._make_bot()
+        signals = {"A001": 0.5, "A002": 0.5}
+        # A001은 prices에 없음
+        prices = self._make_prices({"A002": 100})
+
+        filtered, reasons = bot._filter_affordable_signals(
+            signals, {"prices": prices}, 70000, 7,
+        )
+
+        # 가격 없는 A001도 통과
+        assert "A001" in filtered
+        assert "A002" in filtered
+
+
+class TestMultiFactorScanLimit:
+    """MultiFactorStrategy의 scan_limit 기능 테스트."""
+
+    def test_scan_limit_returns_more(self):
+        """scan_limit=14이면 14개까지 반환한다."""
+        from src.strategy.multi_factor import MultiFactorStrategy
+
+        strategy = MultiFactorStrategy(num_stocks=7, spike_filter=False)
+
+        # 20개 종목 데이터
+        tickers = [f"T{i:03d}" for i in range(20)]
+        fundamentals = pd.DataFrame({
+            "ticker": tickers,
+            "name": tickers,
+            "pbr": [0.5 + i * 0.1 for i in range(20)],
+        })
+        prices = {}
+        for t in tickers:
+            prices[t] = pd.DataFrame({
+                "close": list(range(100, 360))
+            })
+
+        data = {"fundamentals": fundamentals, "prices": prices}
+        signals = strategy.generate_signals("20260301", data, scan_limit=14)
+
+        assert len(signals) == 14
+
+    def test_scan_limit_none_uses_num_stocks(self):
+        """scan_limit 미지정이면 num_stocks개를 반환한다."""
+        from src.strategy.multi_factor import MultiFactorStrategy
+
+        strategy = MultiFactorStrategy(num_stocks=5, spike_filter=False)
+
+        tickers = [f"T{i:03d}" for i in range(20)]
+        fundamentals = pd.DataFrame({
+            "ticker": tickers,
+            "name": tickers,
+            "pbr": [0.5 + i * 0.1 for i in range(20)],
+        })
+        prices = {}
+        for t in tickers:
+            prices[t] = pd.DataFrame({
+                "close": list(range(100, 360))
+            })
+
+        data = {"fundamentals": fundamentals, "prices": prices}
+        signals = strategy.generate_signals("20260301", data)
+
+        assert len(signals) == 5
+
+    def test_last_combined_scores_saved(self):
+        """generate_signals 호출 후 _last_combined_scores가 저장된다."""
+        from src.strategy.multi_factor import MultiFactorStrategy
+
+        strategy = MultiFactorStrategy(num_stocks=5, spike_filter=False)
+        assert strategy._last_combined_scores.empty
+
+        tickers = [f"T{i:03d}" for i in range(10)]
+        fundamentals = pd.DataFrame({
+            "ticker": tickers,
+            "name": tickers,
+            "pbr": [0.5 + i * 0.1 for i in range(10)],
+        })
+        prices = {}
+        for t in tickers:
+            prices[t] = pd.DataFrame({
+                "close": list(range(100, 360))
+            })
+
+        data = {"fundamentals": fundamentals, "prices": prices}
+        strategy.generate_signals("20260301", data)
+
+        assert not strategy._last_combined_scores.empty
+        assert len(strategy._last_combined_scores) > 0

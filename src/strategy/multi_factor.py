@@ -95,6 +95,8 @@ class MultiFactorStrategy(Strategy):
         self.min_f_score = min_f_score
         # 이전 포트폴리오 종목 저장 (회전율 페널티용)
         self._prev_holdings: set[str] = set()
+        # 최근 결합 스코어 저장 (affordability 필터 스코어 하한선용)
+        self._last_combined_scores: pd.Series = pd.Series(dtype=float)
 
         if len(self.factors) != len(self.weights):
             raise ValueError(
@@ -227,6 +229,7 @@ class MultiFactorStrategy(Strategy):
         ranked_scores: pd.Series,
         fundamentals: pd.DataFrame,
         num_stocks: int,
+        target_num_stocks: int | None = None,
     ) -> pd.Series:
         """업종 비중 + 계열사 집중도를 동시 제한하며 상위 종목을 선정한다.
 
@@ -266,7 +269,7 @@ class MultiFactorStrategy(Strategy):
                     zip(fundamentals["ticker"], fundamentals["name"])
                 )
 
-        stock_weight = 1.0 / num_stocks
+        stock_weight = 1.0 / (target_num_stocks or num_stocks)
         selected: list[str] = []
         sector_weights: dict[str, float] = {}
         conglomerate_counts: dict[str, int] = {}
@@ -433,7 +436,7 @@ class MultiFactorStrategy(Strategy):
 
         return value_scores
 
-    def generate_signals(self, date: str, data: dict) -> dict:
+    def generate_signals(self, date: str, data: dict, scan_limit: int | None = None) -> dict:
         """날짜별 포트폴리오 비중을 생성한다.
 
         복수 팩터의 스코어를 결합하여 상위 종목을 선별하고 동일 비중을 부여한다.
@@ -507,6 +510,7 @@ class MultiFactorStrategy(Strategy):
                 )
 
         ranked = combined.sort_values(ascending=False)
+        self._last_combined_scores = ranked.copy()
 
         # 급등 필터: 최근 급등 종목 제외 (다음 리밸런싱으로 이월)
         prices = data.get("prices", {})
@@ -516,7 +520,11 @@ class MultiFactorStrategy(Strategy):
             logger.warning(f"필터 적용 후 후보 종목 없음 ({date})")
             return {}
 
-        top = self._apply_concentration_filter(ranked, fundamentals, self.num_stocks)
+        select_count = scan_limit if scan_limit else self.num_stocks
+        top = self._apply_concentration_filter(
+            ranked, fundamentals, select_count,
+            target_num_stocks=self.num_stocks,
+        )
 
         # 동일 비중 할당
         weight = 1.0 / len(top)
