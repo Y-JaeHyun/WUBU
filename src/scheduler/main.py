@@ -583,6 +583,41 @@ class TradingBot:
 
         return is_trading
 
+    def _is_rebalance_day(self, today=None) -> bool:
+        """오늘이 리밸런싱일인지 확인한다.
+
+        환경변수 FORCE_REBALANCE_DATE가 오늘 날짜와 일치하면
+        정규 리밸런싱 스케줄과 무관하게 True를 반환한다.
+        (테스트/긴급 리밸런싱용)
+
+        Args:
+            today: 확인할 날짜. 기본 오늘.
+
+        Returns:
+            리밸런싱일이면 True.
+        """
+        import os
+
+        if today is None:
+            today = datetime.now(KST).date()
+
+        force_date = os.environ.get("FORCE_REBALANCE_DATE", "")
+        if force_date:
+            try:
+                forced = datetime.strptime(force_date, "%Y%m%d").date()
+                if today == forced:
+                    logger.info(
+                        "FORCE_REBALANCE_DATE=%s → 강제 리밸런싱일", force_date
+                    )
+                    return True
+            except ValueError:
+                logger.warning(
+                    "FORCE_REBALANCE_DATE 형식 오류: %s (YYYYMMDD 필요)",
+                    force_date,
+                )
+
+        return self.holidays.is_rebalance_day(today, self.rebalance_freq)
+
     def _send_notification(self, message: str, level: str = "INFO") -> None:
         """알림을 발송한다.
 
@@ -615,9 +650,7 @@ class TradingBot:
             today = datetime.now(KST).date()
             today_str = today.strftime("%Y-%m-%d")
 
-            is_rebal_day = self.holidays.is_rebalance_day(
-                today, self.rebalance_freq
-            )
+            is_rebal_day = self._is_rebalance_day(today)
             days_to_rebal = self.holidays.days_to_next_rebalance(
                 today, self.rebalance_freq
             )
@@ -674,7 +707,7 @@ class TradingBot:
         try:
             today = datetime.now(KST).date()
 
-            if not self.holidays.is_rebalance_day(today, self.rebalance_freq):
+            if not self._is_rebalance_day(today):
                 logger.info("오늘은 리밸런싱일이 아닙니다.")
                 return
 
@@ -877,7 +910,7 @@ class TradingBot:
             config = self.feature_flags.get_config("etf_rotation")
             rebalance_freq = config.get("rebalance_freq", "monthly")
 
-            if self.holidays.is_rebalance_day(today, rebalance_freq):
+            if self._is_rebalance_day(today):
                 logger.info(
                     "ETF 로테이션: 리밸런싱일 → 09:05 통합 실행 완료. "
                     "모멘텀 순위만 로깅."
@@ -1008,7 +1041,7 @@ class TradingBot:
         try:
             today = datetime.now(KST).date()
 
-            if not self.holidays.is_rebalance_day(today, self.rebalance_freq):
+            if not self._is_rebalance_day(today):
                 logger.info("오늘은 리밸런싱일이 아닙니다. 실행을 스킵합니다.")
                 return
 
