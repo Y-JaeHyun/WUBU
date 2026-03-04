@@ -2322,31 +2322,42 @@ class TradingBot:
     def _generate_long_term_preview(
         self, holdings_map: dict[str, dict],
     ) -> list[str]:
-        """DailySimulator 캐시에서 장기 전략 프리뷰를 생성한다."""
+        """장기 전략 프리뷰를 생성한다.
+
+        캐시가 신선하면(당일) 사용하고, 없거나 오래되면 실시간 생성한다.
+        """
         sim_config = self.feature_flags.get_config("daily_simulation")
         strategy_name = sim_config.get("primary_strategy", "multi_factor")
 
+        # 1. 캐시 확인 — 당일이면 사용
         sim_data = self._find_latest_simulation(strategy_name)
+        use_cache = False
+        if sim_data:
+            sim_date = sim_data.get("date", "")
+            try:
+                sim_dt = datetime.strptime(sim_date, "%Y-%m-%d")
+                days_old = (datetime.now(KST).replace(tzinfo=None) - sim_dt).days
+                if days_old <= 1:
+                    use_cache = True
+            except (ValueError, TypeError):
+                pass
+
+        # 2. 캐시 miss → 실시간 시그널 생성
+        if not use_cache:
+            sim_data = self._generate_live_long_term_signals(strategy_name)
+
         if sim_data is None:
             return [
                 f"[장기 전략 프리뷰 ({strategy_name})]",
-                "  (시뮬레이션 데이터 없음 - 16:05 이후 갱신)",
+                "  (데이터 수집 실패)",
             ]
 
         sim_date = sim_data.get("date", "?")
         selected = sim_data.get("selected", [])
+        source = sim_data.get("source", "cache")
 
-        # 시뮬레이션 데이터 경과일 경고
-        stale_warning = ""
-        try:
-            sim_dt = datetime.strptime(sim_date, "%Y-%m-%d")
-            days_old = (datetime.now(KST).replace(tzinfo=None) - sim_dt).days
-            if days_old >= 2:
-                stale_warning = f" ⚠️{days_old}일 전"
-        except (ValueError, TypeError):
-            pass
-
-        lines = [f"[장기 전략 프리뷰 ({sim_date} 기준{stale_warning})]"]
+        label = "실시간" if source == "live" else sim_date + " 기준"
+        lines = [f"[장기 전략 프리뷰 ({label})]"]
 
         max_display = 7
         for item in selected[:max_display]:
@@ -2417,6 +2428,56 @@ class TradingBot:
             history = sim.get_history(strategy_name, days=7)
             return history[0] if history else None
         except Exception:
+            return None
+
+    def _generate_live_long_term_signals(
+        self, strategy_name: str,
+    ) -> Optional[dict]:
+        """실시간으로 장기 전략 시그널을 생성한다."""
+        try:
+            today_str = datetime.now(KST).strftime("%Y%m%d")
+            strategy_data = self._collect_strategy_data(today_str)
+
+            fund = strategy_data.get("fundamentals")
+            if fund is None or (hasattr(fund, "empty") and fund.empty):
+                logger.warning("실시간 프리뷰: 펀더멘탈 데이터 없음")
+                return None
+
+            strategy = self._create_long_term_strategy(strategy_name)
+            if strategy is None:
+                return None
+
+            signals = strategy.generate_signals(today_str, strategy_data)
+            if not signals:
+                return None
+
+            # DailySimulator와 동일한 포맷으로 변환
+            sorted_items = sorted(
+                signals.items(), key=lambda x: x[1], reverse=True
+            )
+            selected = []
+            for rank, (ticker, weight) in enumerate(sorted_items, 1):
+                name = ""
+                if not fund.empty and "ticker" in fund.columns:
+                    match = fund[fund["ticker"] == ticker]
+                    if not match.empty and "name" in match.columns:
+                        name = str(match.iloc[0]["name"])
+                selected.append({
+                    "ticker": ticker,
+                    "name": name or ticker,
+                    "weight": weight,
+                    "rank": rank,
+                })
+
+            today_fmt = datetime.now(KST).strftime("%Y-%m-%d")
+            return {
+                "date": today_fmt,
+                "strategy": strategy_name,
+                "selected": selected,
+                "source": "live",
+            }
+        except Exception as e:
+            logger.warning("실시간 장기 프리뷰 생성 실패: %s", e)
             return None
 
     def _generate_etf_preview(self) -> list[str]:
