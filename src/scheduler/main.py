@@ -2797,7 +2797,7 @@ class TradingBot:
             logger.debug(traceback.format_exc())
 
     def prewarm_strategy_cache(self) -> None:
-        """15:45 - 내일 시그널용 데이터 프리워밍.
+        """16:10 - 내일 시그널용 데이터 프리워밍.
 
         장 마감 후 당일 종가 기반 fundamentals + prices + index를
         DataCache에 저장한다. 익일 07:30 premarket_check()에서
@@ -3229,10 +3229,10 @@ class TradingBot:
             misfire_grace_time=300,
         )
 
-        # 15:45 - 내일 시그널용 데이터 프리워밍
+        # 16:10 - 내일 시그널용 데이터 프리워밍 (15:45 KRX 피크타임 회피)
         self.scheduler.add_job(
             self.prewarm_strategy_cache,
-            CronTrigger(hour=15, minute=45, day_of_week="mon-fri"),
+            CronTrigger(hour=16, minute=10, day_of_week="mon-fri"),
             id="prewarm_cache",
             name="데이터 프리워밍",
             misfire_grace_time=300,

@@ -322,8 +322,10 @@ def get_all_fundamentals(
             merged = merged.reset_index()
             merged = merged.rename(columns={merged.columns[0]: "ticker"})
 
-            # 종목명 추가
-            merged["name"] = [pykrx_stock.get_market_ticker_name(t) for t in merged["ticker"]]
+            # 종목명 일괄 매핑 (캐시 프리워밍 → dict lookup)
+            pykrx_stock.get_market_ticker_list(d, market=mkt)
+            name_map = {t: pykrx_stock.get_market_ticker_name(t) for t in merged["ticker"]}
+            merged["name"] = merged["ticker"].map(name_map).fillna("")
             merged["market"] = mkt
 
             # 업종 분류 추가
