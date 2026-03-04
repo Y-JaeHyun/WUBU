@@ -25,48 +25,65 @@ _RETRY_DELAY = 2.0  # seconds
 _REQUEST_TIMEOUT = 30  # seconds per pykrx request
 
 
-def _retry_on_failure(func):
+def _retry_on_failure(_func=None, *, timeout=None, max_retries=None):
     """pykrx API 호출 실패 시 재시도하는 데코레이터 (timeout 포함).
 
     signal.alarm() 대신 concurrent.futures를 사용하여
     APScheduler 스레드 워커에서도 안전하게 동작한다.
+
+    Usage:
+        @_retry_on_failure                          # 기본값 (30s, 3회)
+        @_retry_on_failure(timeout=120)              # 커스텀 타임아웃
+        @_retry_on_failure(timeout=120, max_retries=2)  # 커스텀 둘 다
     """
+    effective_timeout = timeout if timeout is not None else _REQUEST_TIMEOUT
+    effective_retries = max(1, max_retries if max_retries is not None else _MAX_RETRIES)
 
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        import concurrent.futures
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            import concurrent.futures
 
-        last_exc = None
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            last_exc = None
+            for attempt in range(1, effective_retries + 1):
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                try:
                     future = pool.submit(func, *args, **kwargs)
-                    result = future.result(timeout=_REQUEST_TIMEOUT)
-                return result
-            except concurrent.futures.TimeoutError:
-                last_exc = TimeoutError(
-                    f"{func.__name__} timeout ({_REQUEST_TIMEOUT}s)"
-                )
-                if attempt < _MAX_RETRIES:
-                    delay = _RETRY_DELAY * attempt
-                    logger.warning(
-                        "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
-                        func.__name__, attempt, _MAX_RETRIES, last_exc, delay,
+                    result = future.result(timeout=effective_timeout)
+                    pool.shutdown(wait=False)
+                    return result
+                except concurrent.futures.TimeoutError:
+                    pool.shutdown(wait=False)
+                    last_exc = TimeoutError(
+                        f"{func.__name__} timeout ({effective_timeout}s)"
                     )
-                    time.sleep(delay)
-            except Exception as e:
-                last_exc = e
-                if attempt < _MAX_RETRIES:
-                    delay = _RETRY_DELAY * attempt
-                    logger.warning(
-                        "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
-                        func.__name__, attempt, _MAX_RETRIES, e, delay,
-                    )
-                    time.sleep(delay)
-        logger.error("%s 최종 실패: %s", func.__name__, last_exc)
-        raise last_exc
+                    if attempt < effective_retries:
+                        delay = _RETRY_DELAY * attempt
+                        logger.warning(
+                            "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
+                            func.__name__, attempt, effective_retries, last_exc, delay,
+                        )
+                        time.sleep(delay)
+                except Exception as e:
+                    pool.shutdown(wait=False)
+                    last_exc = e
+                    if attempt < effective_retries:
+                        delay = _RETRY_DELAY * attempt
+                        logger.warning(
+                            "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
+                            func.__name__, attempt, effective_retries, e, delay,
+                        )
+                        time.sleep(delay)
+            logger.error("%s 최종 실패: %s", func.__name__, last_exc)
+            raise last_exc
 
-    return wrapper
+        return wrapper
+
+    if _func is not None:
+        # @_retry_on_failure 형태 (인자 없이 직접 사용)
+        return decorator(_func)
+    # @_retry_on_failure(timeout=120) 형태
+    return decorator
 
 
 def _format_date(date) -> str:
@@ -251,7 +268,7 @@ def get_fundamental(
         raise
 
 
-@_retry_on_failure
+@_retry_on_failure(timeout=120, max_retries=2)
 def get_all_fundamentals(
     date: str,
     market: str = "ALL",
