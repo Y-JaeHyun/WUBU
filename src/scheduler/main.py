@@ -2470,12 +2470,22 @@ class TradingBot:
                 })
 
             today_fmt = datetime.now(KST).strftime("%Y-%m-%d")
-            return {
+            result = {
                 "date": today_fmt,
                 "strategy": strategy_name,
                 "selected": selected,
                 "source": "live",
             }
+
+            # 캐시 저장 (다음 호출 시 재사용)
+            try:
+                from src.data.daily_simulator import DailySimulator
+                sim = DailySimulator()
+                sim.save_selection(today_fmt, strategy_name, result)
+            except Exception as e:
+                logger.debug("실시간 프리뷰 캐시 저장 실패: %s", e)
+
+            return result
         except Exception as e:
             logger.warning("실시간 장기 프리뷰 생성 실패: %s", e)
             return None
