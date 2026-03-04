@@ -406,15 +406,23 @@ class MultiFactorStrategy(Strategy):
             if "eps" in fund_by_ticker.columns and "bps" in fund_by_ticker.columns:
                 eps_val = row.get("eps", 0)
                 bps_val = row.get("bps", 0)
+                # NaN 체크: 데이터 누락 종목 제외
+                if pd.isna(bps_val) or pd.isna(eps_val):
+                    excluded.append(ticker)
+                    logger.info(
+                        f"밸류트랩 필터(NaN) 제외: {ticker} "
+                        f"(EPS={eps_val}, BPS={bps_val})"
+                    )
+                    continue
                 # BPS <= 0 (자본잠식) → 즉시 제외
-                if bps_val is not None and float(bps_val) <= 0:
+                if float(bps_val) <= 0:
                     excluded.append(ticker)
                     logger.info(
                         f"밸류트랩 필터(자본잠식) 제외: {ticker} "
                         f"(BPS={float(bps_val):,.0f})"
                     )
                     continue
-                if bps_val and float(bps_val) > 0:
+                if float(bps_val) > 0:
                     roe = float(eps_val) / float(bps_val)
                     if roe < self.min_roe:
                         excluded.append(ticker)
@@ -428,7 +436,7 @@ class MultiFactorStrategy(Strategy):
             if self.min_f_score > 0 and "eps" in fund_by_ticker.columns:
                 f_score = 0
                 eps_val = row.get("eps", 0)
-                if eps_val and float(eps_val) > 0:
+                if not pd.isna(eps_val) and float(eps_val) > 0:
                     f_score += 1
 
                 if f_score < self.min_f_score:

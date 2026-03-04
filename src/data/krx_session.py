@@ -161,11 +161,11 @@ def _patch_webio() -> None:
 
     def _session_post_read(self, **params):
         ensure_session()
-        return _session.post(self.url, headers=self.headers, data=params)
+        return _session.post(self.url, headers=self.headers, data=params, timeout=30)
 
     def _session_get_read(self, **params):
         ensure_session()
-        return _session.get(self.url, headers=self.headers, params=params)
+        return _session.get(self.url, headers=self.headers, params=params, timeout=30)
 
     webio.Post.read = _session_post_read
     webio.Get.read = _session_get_read

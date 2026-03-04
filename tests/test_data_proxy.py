@@ -139,7 +139,7 @@ class TestCreateStockApi:
 
         with patch("src.data.krx_session.init"):
             with patch("src.data.krx_provider.is_available", return_value=False):
-                with patch("src.data.krx_provider._has_api_key", return_value=False):
+                with patch("src.data.krx_provider._try_ensure_api", return_value=False):
                     result = create_stock_api()
 
         # pykrx 모듈이 직접 반환됨 (DataProxy가 아님)
@@ -151,7 +151,7 @@ class TestCreateStockApi:
 
         with patch("src.data.krx_session.init"):
             with patch("src.data.krx_provider.is_available", return_value=False):
-                with patch("src.data.krx_provider._has_api_key", return_value=True):
+                with patch("src.data.krx_provider._try_ensure_api", return_value=True):
                     result = create_stock_api()
 
         assert isinstance(result, DataProxy)
@@ -164,7 +164,7 @@ class TestCreateStockApi:
 
         with patch("src.data.krx_session.init"):
             with patch("src.data.krx_provider.is_available", return_value=True):
-                with patch("src.data.krx_provider._has_api_key", return_value=True):
+                with patch("src.data.krx_provider._try_ensure_api", return_value=True):
                     result = create_stock_api()
 
         assert isinstance(result, DataProxy)

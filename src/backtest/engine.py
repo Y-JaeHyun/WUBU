@@ -465,10 +465,26 @@ class Backtest:
                             df = price_cache[ticker]
                             etf_prices_data[ticker] = df[df.index <= target]
 
+                # 미래 데이터 누출 방지: 리밸런싱 날짜까지의 데이터만 전달
+                target = pd.Timestamp(date)
+                truncated_prices: dict[str, pd.DataFrame] = {}
+                for ticker, df in price_cache.items():
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        truncated_prices[ticker] = df[df.index <= target]
+                    else:
+                        truncated_prices[ticker] = df
+
+                truncated_index: dict[str, pd.DataFrame] = {}
+                for idx_name, df in index_prices.items():
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        truncated_index[idx_name] = df[df.index <= target]
+                    else:
+                        truncated_index[idx_name] = df
+
                 data = {
                     "fundamentals": fundamentals,
-                    "prices": price_cache,
-                    "index_prices": index_prices,
+                    "prices": truncated_prices,
+                    "index_prices": truncated_index,
                     "etf_prices": etf_prices_data,
                 }
 

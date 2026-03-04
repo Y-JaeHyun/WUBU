@@ -1060,7 +1060,6 @@ class TradingBot:
         try:
             today = datetime.now(KST).date()
             config = self.feature_flags.get_config("etf_rotation")
-            rebalance_freq = config.get("rebalance_freq", "monthly")
 
             if self._is_rebalance_day(today):
                 logger.info(
@@ -1789,8 +1788,9 @@ class TradingBot:
             checks.append(f"MDD: {mdd:.2%}")
 
             level = "INFO" if all_ok else "CRITICAL"
+            now = datetime.now(KST)
             message = (
-                f"[헬스 체크] {today.strftime('%Y-%m-%d')} 08:00\n"
+                f"[헬스 체크] {now.strftime('%Y-%m-%d %H:%M')}\n"
                 + "\n".join(f"  {c}" for c in checks)
             )
             self._send_notification(message, level=level)
@@ -2099,10 +2099,11 @@ class TradingBot:
             logger.error("단기 포지션 모니터링 실패: %s", e)
 
     def daytrading_close(self) -> None:
-        """15:20 - 데이트레이딩 포지션 강제 청산.
+        """15:20 - 데이트레이딩 포지션 청산 알림.
 
         Feature Flag 'short_term_trading'으로 제어.
-        daytrading 모드인 포지션만 청산한다.
+        daytrading 모드인 포지션을 감지하여 수동 청산 알림을 보낸다.
+        NOTE: 자동 매도는 미구현. 알림 확인 후 수동 청산 필요.
         """
         if not self.feature_flags.is_enabled("short_term_trading"):
             return
@@ -2127,7 +2128,7 @@ class TradingBot:
                 logger.info("데이트레이딩 청산: 대상 없음")
                 return
 
-            lines = [f"[데이트레이딩 청산] {len(daytrading_positions)}개"]
+            lines = [f"[데이트레이딩 수동 청산 필요] {len(daytrading_positions)}개"]
             for pos in daytrading_positions:
                 ticker = pos.get("ticker", "")
                 pnl_pct = pos.get("pnl_pct", 0)

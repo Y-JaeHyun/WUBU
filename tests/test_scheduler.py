@@ -614,7 +614,7 @@ class TestDaytradingClose:
 
         bot._send_notification.assert_called_once()
         msg = bot._send_notification.call_args[0][0]
-        assert "데이트레이딩 청산" in msg
+        assert "데이트레이딩" in msg and "청산" in msg
         assert "035420" in msg
 
     def test_flag_off_skip(self):

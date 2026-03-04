@@ -93,7 +93,7 @@ def create_stock_api():
     from pykrx import stock as _pykrx
 
     # KRX Open API 가능 여부 (feature flag 무관, API key만 확인)
-    krx_api_available = _krx._has_api_key()
+    krx_api_available = _krx._try_ensure_api()
 
     if _krx.is_available():
         # krx_openapi flag ON → KRX API primary, pykrx fallback

@@ -25,18 +25,23 @@ class KRXHolidays:
         LUNAR_HOLIDAYS: 음력 기반 변동 공휴일 (연도별 MM-DD 리스트).
     """
 
-    # 고정 공휴일 (MM-DD)
-    # 신정, 삼일절, 어린이날, 현충일, 제헌절, 광복절, 개천절, 한글날, 성탄절
+    # 고정 공휴일 (MM-DD) — 모든 연도에 적용
+    # 신정, 삼일절, 어린이날, 현충일, 광복절, 개천절, 한글날, 성탄절
+    # 주의: 제헌절(07-17)은 2026년부터만 공휴일이므로 YEAR_CONDITIONAL_HOLIDAYS에서 관리
     FIXED_HOLIDAYS: list[str] = [
         "01-01",  # 신정
         "03-01",  # 삼일절
         "05-05",  # 어린이날
         "06-06",  # 현충일
-        "07-17",  # 제헌절 (2026년부터 공휴일 재지정)
         "08-15",  # 광복절
         "10-03",  # 개천절
         "10-09",  # 한글날
         "12-25",  # 성탄절
+    ]
+
+    # 특정 연도부터 적용되는 고정 공휴일 (MM-DD, 시작연도)
+    YEAR_CONDITIONAL_HOLIDAYS: list[tuple[str, int]] = [
+        ("07-17", 2026),  # 제헌절 (2026년부터 공휴일 재지정)
     ]
 
     # 대체공휴일 적용 대상 고정 공휴일 (관공서의 공휴일에 관한 규정 제3조)
@@ -45,11 +50,15 @@ class KRXHolidays:
     SUBSTITUTE_ELIGIBLE_FIXED: list[str] = [
         "03-01",  # 삼일절
         "05-05",  # 어린이날
-        "07-17",  # 제헌절
         "08-15",  # 광복절
         "10-03",  # 개천절
         "10-09",  # 한글날
         "12-25",  # 성탄절
+    ]
+
+    # 특정 연도부터 대체공휴일 적용 대상 (MM-DD, 시작연도)
+    SUBSTITUTE_ELIGIBLE_CONDITIONAL: list[tuple[str, int]] = [
+        ("07-17", 2027),  # 제헌절 대체공휴일 (2027년부터, 2026-07-17은 금요일)
     ]
 
     # 음력 공휴일 (연도별 MM-DD 리스트)
@@ -135,6 +144,17 @@ class KRXHolidays:
             except ValueError:
                 logger.warning("잘못된 고정 공휴일 형식: %s", md)
 
+        # 연도 조건부 고정 공휴일 추가 (예: 제헌절 2026~)
+        for md, start_year in self.YEAR_CONDITIONAL_HOLIDAYS:
+            if year >= start_year:
+                try:
+                    month, day = md.split("-")
+                    d = datetime.date(year, int(month), int(day))
+                    holidays.add(d)
+                    raw_holidays.append(d)
+                except ValueError:
+                    logger.warning("잘못된 조건부 공휴일 형식: %s", md)
+
         # 특별 공휴일 추가 (선거일, 임시공휴일 등)
         special_dates = self.SPECIAL_HOLIDAYS.get(year, [])
         for md in special_dates:
@@ -161,7 +181,13 @@ class KRXHolidays:
         # 대상: SUBSTITUTE_ELIGIBLE_FIXED에 해당하는 고정 공휴일
         # 조건: 토/일에 해당하거나 다른 공휴일과 겹칠 때
         # 방식: 다음 첫 번째 비공휴일 평일을 대체공휴일로 지정
-        for md in self.SUBSTITUTE_ELIGIBLE_FIXED:
+        # 조건부 대체공휴일 대상 합치기
+        all_substitute_eligible = list(self.SUBSTITUTE_ELIGIBLE_FIXED)
+        for md, start_year in self.SUBSTITUTE_ELIGIBLE_CONDITIONAL:
+            if year >= start_year:
+                all_substitute_eligible.append(md)
+
+        for md in all_substitute_eligible:
             try:
                 month, day = md.split("-")
                 holiday = datetime.date(year, int(month), int(day))

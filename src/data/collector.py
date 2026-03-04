@@ -12,11 +12,18 @@ import pandas as pd
 
 from src.data.data_proxy import create_stock_api
 
-pykrx_stock = create_stock_api()
-
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def __getattr__(name: str):
+    """모듈 레벨 lazy 초기화: pykrx_stock을 최초 접근 시에만 생성한다."""
+    if name == "pykrx_stock":
+        api = create_stock_api()
+        globals()["pykrx_stock"] = api
+        return api
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 _MAX_RETRIES = 3
 _RETRY_DELAY = 2.0  # seconds

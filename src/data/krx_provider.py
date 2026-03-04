@@ -68,8 +68,11 @@ def is_available() -> bool:
     return _init_api(key)
 
 
-def _has_api_key() -> bool:
-    """KRX_API_KEY가 설정되어 있고 초기화 가능한지 확인한다 (feature flag 무관)."""
+def _try_ensure_api() -> bool:
+    """KRX_API_KEY가 설정되어 있으면 API를 초기화한다 (feature flag 무관).
+
+    NOTE: 단순 존재 확인이 아니라 _init_api()를 호출하여 초기화 사이드이펙트가 있다.
+    """
     if _initialized:
         return True
     key = os.environ.get("KRX_API_KEY", "").strip()
@@ -459,6 +462,10 @@ def _fetch_date_range(
     current = s_dt
 
     while current <= e_dt:
+        # 주말(토/일) 스킵 — 거래 데이터 없으므로 쿼터 절약
+        if current.weekday() >= 5:
+            current += timedelta(days=1)
+            continue
         d = current.strftime("%Y%m%d")
         params = {"basDd": d, **extra_params}
         rows = api.request_all(endpoint, params)
