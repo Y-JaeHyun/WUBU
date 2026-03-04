@@ -159,7 +159,7 @@ class TestDryRunIntegrated:
 
         pool_signals = {
             "long_term": {"005930": 0.5, "000660": 0.5},
-            "etf_rotation": {"069500": 0.5, "371460": 0.5},
+            "etf_rotation": {"069500": 0.5, "360750": 0.5},
         }
         result = executor.dry_run_integrated(pool_signals)
 

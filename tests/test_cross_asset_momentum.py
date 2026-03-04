@@ -129,13 +129,13 @@ class TestAssetClassFilter:
             etf_universe={
                 "069500": "KODEX200",      # equity_kr
                 "091160": "반도체",          # equity_kr
-                "371460": "S&P500",         # equity_us
+                "360750": "S&P500",         # equity_us
                 "132030": "골드",           # commodity
                 "439870": "채권",           # bond
             },
         )
         # 069500과 091160은 같은 equity_kr
-        ranked = ["069500", "091160", "371460", "132030"]
+        ranked = ["069500", "091160", "360750", "132030"]
         result = s._apply_asset_class_filter(ranked)
         # equity_kr에서 최대 1개만 선정
         kr_count = sum(
@@ -149,7 +149,7 @@ class TestAssetClassFilter:
             num_assets=3,
             max_per_asset_class=0,
         )
-        ranked = ["069500", "091160", "371460", "132030"]
+        ranked = ["069500", "091160", "360750", "132030"]
         result = s._apply_asset_class_filter(ranked)
         assert len(result) == 3
 

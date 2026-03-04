@@ -86,7 +86,7 @@ class TestMergePoolTargets:
 
         pool_signals = {
             "long_term": {"005930": 0.5, "000660": 0.5},
-            "etf_rotation": {"069500": 0.5, "371460": 0.5},
+            "etf_rotation": {"069500": 0.5, "360750": 0.5},
         }
         merged = alloc.merge_pool_targets(pool_signals)
 
@@ -95,7 +95,7 @@ class TestMergePoolTargets:
         assert merged["000660"] == pytest.approx(0.35)
         # etf_rotation: 0.5*0.3=0.15 each
         assert merged["069500"] == pytest.approx(0.15)
-        assert merged["371460"] == pytest.approx(0.15)
+        assert merged["360750"] == pytest.approx(0.15)
         total = sum(merged.values())
         assert total == pytest.approx(1.0)
 
@@ -331,7 +331,7 @@ class TestAutoTagFromPoolSignals:
 
         pool_signals = {
             "long_term": {"005930": 0.3, "000660": 0.3, "035420": 0.4},
-            "etf_rotation": {"069500": 0.5, "371460": 0.5},
+            "etf_rotation": {"069500": 0.5, "360750": 0.5},
             "short_term": {"003490": 1.0},
         }
         alloc.auto_tag_from_pool_signals(pool_signals)
@@ -340,7 +340,7 @@ class TestAutoTagFromPoolSignals:
         assert alloc.get_position_pool("000660") == "long_term"
         assert alloc.get_position_pool("035420") == "long_term"
         assert alloc.get_position_pool("069500") == "etf_rotation"
-        assert alloc.get_position_pool("371460") == "etf_rotation"
+        assert alloc.get_position_pool("360750") == "etf_rotation"
         assert alloc.get_position_pool("003490") == "short_term"
 
 
@@ -357,17 +357,17 @@ class TestBackfillUntaggedPositions:
         holdings = [
             {"ticker": "069500", "eval_amount": 300_000, "current_price": 30000,
              "qty": 10, "pnl": 0, "pnl_pct": 0.0},
-            {"ticker": "371460", "eval_amount": 200_000, "current_price": 20000,
+            {"ticker": "360750", "eval_amount": 200_000, "current_price": 20000,
              "qty": 10, "pnl": 0, "pnl_pct": 0.0},
         ]
         alloc = _make_allocator(tmp_path, holdings=holdings)
 
-        etf_universe = {"069500", "371460", "252670"}
+        etf_universe = {"069500", "360750", "252670"}
         count = alloc.backfill_untagged_positions(etf_tickers=etf_universe)
 
         assert count == 2
         assert alloc.get_position_pool("069500") == "etf_rotation"
-        assert alloc.get_position_pool("371460") == "etf_rotation"
+        assert alloc.get_position_pool("360750") == "etf_rotation"
 
     def test_non_etf_tickers_tagged_as_default_pool(self, tmp_path):
         """ETF가 아닌 미태깅 종목은 기본 풀(long_term)로 태깅된다."""
@@ -379,7 +379,7 @@ class TestBackfillUntaggedPositions:
         ]
         alloc = _make_allocator(tmp_path, holdings=holdings)
 
-        etf_universe = {"069500", "371460"}
+        etf_universe = {"069500", "360750"}
         count = alloc.backfill_untagged_positions(etf_tickers=etf_universe)
 
         assert count == 2

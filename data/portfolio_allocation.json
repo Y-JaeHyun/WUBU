@@ -1,11 +1,22 @@
 {
   "version": 1,
-  "updated_at": "2026-02-26T21:13:23",
+  "updated_at": "2026-03-04T09:05:36",
   "config": {
     "long_term_pct": 0.7,
     "short_term_pct": 0.0,
     "etf_rotation_pct": 0.3,
     "soft_cap_mode": true
   },
-  "positions": {}
+  "positions": {
+    "360750": {
+      "pool": "etf_rotation",
+      "entry_date": "2026-03-04",
+      "backfilled": true
+    },
+    "469150": {
+      "pool": "etf_rotation",
+      "entry_date": "2026-03-04",
+      "backfilled": true
+    }
+  }
 }

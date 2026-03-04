@@ -583,10 +583,10 @@ class TestETFRotationPool:
             kis, long_term_pct=0.70, etf_rotation_pct=0.30,
             allocation_path=_alloc_path(tmp_path),
         )
-        weights = {"069500": 0.5, "371460": 0.5}
+        weights = {"069500": 0.5, "360750": 0.5}
         scaled = alloc.filter_etf_rotation_weights(weights)
         assert scaled["069500"] == pytest.approx(0.15)
-        assert scaled["371460"] == pytest.approx(0.15)
+        assert scaled["360750"] == pytest.approx(0.15)
 
     def test_filter_etf_rotation_weights_empty(self, tmp_path):
         """빈 weights에 대해 빈 딕셔너리를 반환한다."""

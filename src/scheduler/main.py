@@ -2336,7 +2336,17 @@ class TradingBot:
         sim_date = sim_data.get("date", "?")
         selected = sim_data.get("selected", [])
 
-        lines = [f"[장기 전략 프리뷰 ({sim_date} 기준)]"]
+        # 시뮬레이션 데이터 경과일 경고
+        stale_warning = ""
+        try:
+            sim_dt = datetime.strptime(sim_date, "%Y-%m-%d")
+            days_old = (datetime.now(KST).replace(tzinfo=None) - sim_dt).days
+            if days_old >= 2:
+                stale_warning = f" ⚠️{days_old}일 전"
+        except (ValueError, TypeError):
+            pass
+
+        lines = [f"[장기 전략 프리뷰 ({sim_date} 기준{stale_warning})]"]
 
         max_display = 7
         for item in selected[:max_display]:

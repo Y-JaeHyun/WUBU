@@ -640,7 +640,7 @@ class TestBalanceCommand:
             "total_profit_pct": 3.45,
             "holdings": [
                 {
-                    "ticker": "371460",
+                    "ticker": "360750",
                     "name": "TIGER미국S&P500",
                     "qty": 10,
                     "eval_amount": 700_000,
@@ -717,7 +717,7 @@ class TestBalanceCommand:
                     ],
                     "etf_rotation": [
                         {
-                            "ticker": "371460",
+                            "ticker": "360750",
                             "qty": 10,
                             "eval_amount": 700_000,
                             "pnl_pct": 5.0,
@@ -994,7 +994,7 @@ class TestETFRotationRebalanceE2E:
         bot._fetch_etf_prices = MagicMock(return_value={
             "069500": self._make_etf_price(10000, 13000),  # +30%
             "133690": self._make_etf_price(10000, 12000),  # +20%
-            "371460": self._make_etf_price(10000, 11000),  # +10%
+            "360750": self._make_etf_price(10000, 11000),  # +10%
             "091160": self._make_etf_price(10000, 9000),   # -10%
             "091170": self._make_etf_price(10000, 8500),   # -15%
             "117700": self._make_etf_price(10000, 9500),   # -5%

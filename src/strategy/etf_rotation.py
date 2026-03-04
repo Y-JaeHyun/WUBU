@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 # 기본 ETF 유니버스
 DEFAULT_ETF_UNIVERSE: dict[str, str] = {
     "069500": "KODEX 200",
-    "371460": "TIGER 미국S&P500",
+    "360750": "TIGER 미국S&P500",
     "133690": "TIGER 미국나스닥100",
     "091160": "KODEX 반도체",
     "091170": "KODEX 은행",
@@ -34,7 +34,7 @@ DEFAULT_ETF_UNIVERSE: dict[str, str] = {
 # ETF 섹터 카테고리 매핑 (섹터 집중도 제한용)
 ETF_SECTOR_MAP: dict[str, str] = {
     "069500": "국내지수",
-    "371460": "미국지수",
+    "360750": "미국지수",
     "133690": "미국지수",
     "091160": "반도체",
     "091170": "금융",
