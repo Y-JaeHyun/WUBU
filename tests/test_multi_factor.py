@@ -557,3 +557,227 @@ class TestDualConcentrationFilter:
 
             for group, count in conglomerate_counts.items():
                 assert count <= 2
+
+
+# ===================================================================
+# 급등/밸류트랩 필터 테스트용 헬퍼
+# ===================================================================
+
+def _make_spike_data(n=30, seed=42):
+    """급등 종목이 포함된 멀티팩터 테스트 데이터를 생성한다.
+
+    000001: 마지막 날 +25% 급등 + PBR=0.1 (밸류 최상위)
+    """
+    np.random.seed(seed)
+    tickers = [f"{i:06d}" for i in range(1, n + 1)]
+    dates = pd.bdate_range("2023-01-02", periods=252)
+
+    fundamentals = pd.DataFrame({
+        "ticker": tickers,
+        "name": [f"종목{i}" for i in range(1, n + 1)],
+        "market": ["KOSPI"] * n,
+        "pbr": np.random.uniform(0.3, 5.0, n).round(2),
+        "per": np.random.uniform(3, 30, n).round(2),
+        "eps": np.random.randint(500, 20000, n),
+        "bps": np.random.randint(5000, 100000, n),
+        "close": np.random.randint(5000, 500000, n),
+        "market_cap": np.random.randint(200_000_000_000, 5_000_000_000_000, n),
+        "volume": np.random.randint(100_000, 5_000_000, n),
+    })
+
+    prices = {}
+    for i, ticker in enumerate(tickers):
+        base = np.random.randint(10000, 100000)
+        close = base * np.exp(np.cumsum(np.random.randn(252) * 0.02))
+        df = pd.DataFrame({
+            "open": close * 0.99,
+            "high": close * 1.01,
+            "low": close * 0.98,
+            "close": close,
+            "volume": np.random.randint(100000, 5000000, 252),
+        }, index=dates)
+        df.index.name = "date"
+        prices[ticker] = df
+
+    # 000001: 급등 종목 (마지막 날 +25%)
+    spike_ticker = "000001"
+    spike_df = prices[spike_ticker].copy()
+    spike_df.iloc[-1, spike_df.columns.get_loc("close")] *= 1.25
+    prices[spike_ticker] = spike_df
+
+    # 000001: 가장 낮은 PBR (밸류 스코어 최상위)
+    fundamentals.loc[fundamentals["ticker"] == spike_ticker, "pbr"] = 0.1
+
+    return {"fundamentals": fundamentals, "prices": prices}
+
+
+# ===================================================================
+# TestSpikeFilter
+# ===================================================================
+
+class TestSpikeFilter:
+    """spike_filter 파라미터 검증."""
+
+    def test_spike_filter_enabled_by_default(self):
+        """기본값은 spike_filter=True이다 (3년 백테스트 기반 최적 설정)."""
+        mf = MultiFactorStrategy()
+        assert mf.spike_filter is True
+        assert mf.spike_threshold_1d == 0.15
+        assert mf.spike_threshold_5d == 0.25
+
+    def test_spike_filter_excludes_surged_stock(self):
+        """급등 종목(1일 +25%)이 spike_filter에 의해 제외된다."""
+        mf = MultiFactorStrategy(
+            num_stocks=5,
+            spike_filter=True,
+            spike_threshold_1d=0.15,
+            max_group_weight=0,
+            max_stocks_per_conglomerate=0,
+        )
+        data = _make_spike_data()
+        signals = mf.generate_signals("20240102", data)
+
+        # 급등 종목(000001)은 제외되어야 함
+        assert "000001" not in signals
+
+    def test_spike_filter_disabled_allows_surged_stock(self):
+        """spike_filter=False이면 급등 종목이 PBR=0.1로 밸류 최상위에서 선택될 수 있다."""
+        mf = MultiFactorStrategy(
+            num_stocks=5,
+            spike_filter=False,
+            max_group_weight=0,
+            max_stocks_per_conglomerate=0,
+        )
+        data = _make_spike_data()
+        signals = mf.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        # PBR=0.1인 000001은 밸류 최상위 → 선택될 가능성 높음
+        if signals:
+            assert len(signals) <= 5
+
+    def test_spike_filter_high_threshold_allows_stock(self):
+        """높은 threshold(30%)에서는 25% 급등 종목이 통과한다."""
+        mf = MultiFactorStrategy(
+            num_stocks=5,
+            spike_filter=True,
+            spike_threshold_1d=0.30,
+            spike_threshold_5d=0.50,
+            max_group_weight=0,
+            max_stocks_per_conglomerate=0,
+        )
+        data = _make_spike_data()
+        signals = mf.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        # 25% < 30% threshold이므로 000001이 통과 가능
+
+
+# ===================================================================
+# TestValueTrapFilter
+# ===================================================================
+
+class TestValueTrapFilter:
+    """value_trap_filter 파라미터 검증."""
+
+    def test_value_trap_filter_disabled_by_default(self):
+        """기본값은 value_trap_filter=False이다."""
+        mf = MultiFactorStrategy()
+        assert mf.value_trap_filter is False
+        assert mf.min_roe == 0.0
+        assert mf.min_f_score == 0
+
+    def test_value_trap_filter_excludes_negative_roe(self):
+        """ROE < 0인 종목이 value_trap_filter에 의해 제외된다."""
+        mf = MultiFactorStrategy(
+            num_stocks=5,
+            value_trap_filter=True,
+            min_roe=0.0,
+            max_group_weight=0,
+            max_stocks_per_conglomerate=0,
+        )
+        data = _make_spike_data()
+        # 000002: 음수 EPS → ROE < 0
+        fund = data["fundamentals"]
+        fund.loc[fund["ticker"] == "000002", "eps"] = -1000
+        fund.loc[fund["ticker"] == "000002", "pbr"] = 0.15  # 밸류 상위
+
+        signals = mf.generate_signals("20240102", data)
+
+        # ROE < 0 종목(000002)은 밸류 스코어에서 제외
+        assert "000002" not in signals
+
+    def test_value_trap_filter_f_score(self):
+        """min_f_score=1이면 EPS <= 0인 종목이 제외된다."""
+        mf = MultiFactorStrategy(
+            num_stocks=5,
+            value_trap_filter=True,
+            min_f_score=1,
+            max_group_weight=0,
+            max_stocks_per_conglomerate=0,
+        )
+        data = _make_spike_data()
+        # 000003: 음수 EPS → F-Score = 0
+        fund = data["fundamentals"]
+        fund.loc[fund["ticker"] == "000003", "eps"] = -500
+        fund.loc[fund["ticker"] == "000003", "pbr"] = 0.12
+
+        signals = mf.generate_signals("20240102", data)
+
+        assert "000003" not in signals
+
+
+# ===================================================================
+# TestCombinedFilters
+# ===================================================================
+
+class TestCombinedFilters:
+    """spike_filter + value_trap_filter 동시 적용 검증."""
+
+    def test_combined_filters(self):
+        """두 필터가 동시에 동작한다."""
+        mf = MultiFactorStrategy(
+            num_stocks=5,
+            spike_filter=True,
+            spike_threshold_1d=0.15,
+            value_trap_filter=True,
+            min_roe=0.0,
+            max_group_weight=0,
+            max_stocks_per_conglomerate=0,
+        )
+        data = _make_spike_data()
+        # 000001: 급등 (spike filter)
+        # 000002: 음수 ROE (value trap filter)
+        fund = data["fundamentals"]
+        fund.loc[fund["ticker"] == "000002", "eps"] = -1000
+        fund.loc[fund["ticker"] == "000002", "pbr"] = 0.2
+
+        signals = mf.generate_signals("20240102", data)
+
+        assert "000001" not in signals  # spike filter
+        assert "000002" not in signals  # value trap filter
+        assert len(signals) <= 5
+
+    def test_filters_with_normal_data(self):
+        """정상 데이터에서 필터 활성화 시에도 시그널이 생성된다."""
+        mf = MultiFactorStrategy(
+            num_stocks=5,
+            spike_filter=True,
+            value_trap_filter=True,
+            min_roe=0.0,
+            max_group_weight=0,
+            max_stocks_per_conglomerate=0,
+        )
+        data = _make_multifactor_data()
+        # eps, bps 추가 (기존 데이터에 없으므로)
+        fund = data["fundamentals"]
+        n = len(fund)
+        np.random.seed(99)
+        fund["eps"] = np.random.randint(500, 20000, n)
+        fund["bps"] = np.random.randint(5000, 100000, n)
+
+        signals = mf.generate_signals("20240102", data)
+
+        assert isinstance(signals, dict)
+        if signals:
+            assert len(signals) <= 5

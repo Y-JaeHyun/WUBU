@@ -67,6 +67,11 @@ class DailySimulator:
             if "ticker" in fund.columns and "name" in fund.columns:
                 self._ticker_names = dict(zip(fund["ticker"], fund["name"]))
 
+        # ETF universe 이름 매핑 추가
+        for strategy in self.strategies.values():
+            if hasattr(strategy, "etf_universe"):
+                self._ticker_names.update(strategy.etf_universe)
+
         results: dict[str, Any] = {}
 
         for name, strategy in self.strategies.items():

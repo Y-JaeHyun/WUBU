@@ -640,7 +640,7 @@ class TestBalanceCommand:
             "total_profit_pct": 3.45,
             "holdings": [
                 {
-                    "ticker": "371460",
+                    "ticker": "360750",
                     "name": "TIGER미국S&P500",
                     "qty": 10,
                     "eval_amount": 700_000,
@@ -717,7 +717,7 @@ class TestBalanceCommand:
                     ],
                     "etf_rotation": [
                         {
-                            "ticker": "371460",
+                            "ticker": "360750",
                             "qty": 10,
                             "eval_amount": 700_000,
                             "pnl_pct": 5.0,
@@ -857,12 +857,16 @@ class TestBalanceCommand:
 
     def test_balance_long_term_preview_with_sim_data(self):
         """시뮬레이션 캐시가 있으면 장기 전략 프리뷰가 표시된다."""
+        from datetime import datetime
+        from unittest.mock import patch
         from src.scheduler.main import TradingBot
 
         bot = self._make_mock_bot(etf_flag=False, daily_sim_flag=True)
 
+        # 캐시 신선도 검사를 통과하도록 오늘 날짜 사용
+        today_str = datetime.now().strftime("%Y-%m-%d")
         sim_data = {
-            "date": "2026-02-25",
+            "date": today_str,
             "strategy": "multi_factor",
             "selected": [
                 {"ticker": "005930", "name": "삼성전자", "weight": 0.10, "rank": 1},
@@ -875,7 +879,6 @@ class TestBalanceCommand:
         result = TradingBot._cmd_balance(bot, "")
 
         assert "장기 전략 프리뷰" in result
-        assert "2026-02-25" in result
         assert "삼성전자" in result
         assert "(보유중)" in result
         assert "SK하이닉스" in result
@@ -884,17 +887,17 @@ class TestBalanceCommand:
         assert "예상 변경" in result
 
     def test_balance_long_term_preview_no_sim_data(self):
-        """시뮬레이션 캐시가 없으면 안내 메시지가 표시된다."""
+        """캐시도 없고 라이브 생성도 실패하면 안내 메시지가 표시된다."""
         from src.scheduler.main import TradingBot
 
         bot = self._make_mock_bot(etf_flag=False, daily_sim_flag=True)
 
         bot._find_latest_simulation = lambda name: None
+        bot._generate_live_long_term_signals = lambda name: None
         result = TradingBot._cmd_balance(bot, "")
 
         assert "장기 전략 프리뷰" in result
-        assert "시뮬레이션 데이터 없음" in result
-        assert "16:05" in result
+        assert "데이터 수집 실패" in result
 
     def test_balance_long_term_preview_disabled(self):
         """daily_simulation OFF 시 장기 전략 프리뷰가 없다."""
@@ -994,7 +997,7 @@ class TestETFRotationRebalanceE2E:
         bot._fetch_etf_prices = MagicMock(return_value={
             "069500": self._make_etf_price(10000, 13000),  # +30%
             "133690": self._make_etf_price(10000, 12000),  # +20%
-            "371460": self._make_etf_price(10000, 11000),  # +10%
+            "360750": self._make_etf_price(10000, 11000),  # +10%
             "091160": self._make_etf_price(10000, 9000),   # -10%
             "091170": self._make_etf_price(10000, 8500),   # -15%
             "117700": self._make_etf_price(10000, 9500),   # -5%

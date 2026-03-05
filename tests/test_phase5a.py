@@ -431,8 +431,10 @@ class TestAutoBacktester:
 
         ab = AutoBacktester()
 
-        assert ab.strategies == ["value", "momentum", "multi_factor"], (
-            "기본 전략 리스트는 ['value', 'momentum', 'multi_factor']이어야 한다."
+        assert ab.strategies == [
+            "value", "momentum", "multi_factor", "three_factor", "quality",
+        ], (
+            "기본 전략 리스트는 5개 전략이어야 한다."
         )
         assert ab.lookback_months == 6, "기본 lookback_months는 6이어야 한다."
 

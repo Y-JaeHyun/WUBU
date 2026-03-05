@@ -10,7 +10,7 @@ class TestIsETF:
         """ETF 유니버스에 정의된 티커는 True를 반환한다."""
         etf_tickers = [
             "069500",   # KODEX 200
-            "371460",   # TIGER 미국S&P500
+            "360750",   # TIGER 미국S&P500
             "133690",   # TIGER 미국나스닥100
             "132030",   # KODEX 골드선물(H)
             "439870",   # KODEX 단기채권

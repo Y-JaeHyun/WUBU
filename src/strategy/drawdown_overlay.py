@@ -77,6 +77,10 @@ class DrawdownOverlay:
             f"recovery_buffer={self.recovery_buffer}"
         )
 
+    def set_peak(self, value: float) -> None:
+        """고점 값을 외부에서 설정한다 (재시작 시 동기화용)."""
+        self._peak = value
+
     def reset(self) -> None:
         """내부 상태를 초기화한다. 새로운 백테스트 시작 시 호출."""
         self._peak = 0.0

@@ -158,7 +158,7 @@ class FeatureFlags:
             "description": "주간 자동 백테스트",
             "config": {
                 "lookback_months": 6,
-                "strategies": ["value", "momentum", "multi_factor"],
+                "strategies": ["value", "momentum", "multi_factor", "three_factor", "quality"],
             },
         },
         "night_research": {
@@ -284,6 +284,14 @@ class FeatureFlags:
             "config": {
                 "level": "rule_based",
                 "update_freq": "monthly",
+            },
+        },
+        "krx_openapi": {
+            "enabled": False,
+            "description": "KRX Open API 사용 (pykrx 대체)",
+            "config": {
+                "rate_limit_per_second": 5,
+                "daily_quota": 10000,
             },
         },
         "enhanced_etf_rotation": {

@@ -1,13 +1,16 @@
 """KOSPI/KOSDAQ 지수 데이터 수집 모듈.
 
-pykrx를 활용하여 시장 지수의 OHLCV 데이터를 수집한다.
+pykrx 또는 KRX Open API를 활용하여 시장 지수의 OHLCV 데이터를 수집한다.
 마켓 타이밍 전략에서 사용되는 지수 가격 데이터를 제공한다.
 """
 
 from typing import Optional
 
 import pandas as pd
-from pykrx import stock as pykrx_stock
+
+from src.data.data_proxy import create_stock_api
+
+pykrx_stock = create_stock_api()
 
 from src.data.collector import _format_date, _retry_on_failure
 from src.utils.logger import get_logger

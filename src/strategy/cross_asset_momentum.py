@@ -11,7 +11,7 @@
 
 ETF 유니버스 (자산군별):
 - 국내주식: KODEX 200 (069500)
-- 미국주식: TIGER 미국S&P500 (371460), TIGER 미국나스닥100 (133690)
+- 미국주식: TIGER 미국S&P500 (360750), TIGER 미국나스닥100 (133690)
 - 반도체: KODEX 반도체 (091160)
 - 금: KODEX 골드선물 (132030)
 - 채권: KODEX 단기채권 (439870)
@@ -31,7 +31,7 @@ logger = get_logger(__name__)
 # 교차 자산 유니버스: 상관관계가 낮은 자산군으로 구성
 CROSS_ASSET_UNIVERSE: dict[str, str] = {
     "069500": "KODEX 200",             # 국내주식
-    "371460": "TIGER 미국S&P500",       # 미국주식
+    "360750": "TIGER 미국S&P500",       # 미국주식
     "133690": "TIGER 미국나스닥100",     # 미국기술주
     "091160": "KODEX 반도체",           # 섹터(반도체)
     "132030": "KODEX 골드선물(H)",       # 원자재(금)
@@ -41,7 +41,7 @@ CROSS_ASSET_UNIVERSE: dict[str, str] = {
 # 자산군 카테고리
 ASSET_CLASS_MAP: dict[str, str] = {
     "069500": "equity_kr",
-    "371460": "equity_us",
+    "360750": "equity_us",
     "133690": "equity_us",
     "091160": "equity_kr",
     "132030": "commodity",

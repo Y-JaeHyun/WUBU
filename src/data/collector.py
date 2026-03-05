@@ -1,6 +1,7 @@
 """한국 주식 데이터 수집 모듈.
 
-pykrx를 사용하여 KOSPI/KOSDAQ 종목의 OHLCV, 시가총액, 기본 지표 데이터를 수집한다.
+pykrx 또는 KRX Open API를 사용하여 KOSPI/KOSDAQ 종목의 OHLCV, 시가총액, 기본 지표 데이터를 수집한다.
+KRX_API_KEY 환경변수 + krx_openapi 플래그 설정 시 KRX Open API 사용, 아니면 pykrx fallback.
 """
 
 import functools
@@ -8,38 +9,83 @@ import time
 from typing import Optional
 
 import pandas as pd
-from pykrx import stock as pykrx_stock
+
+from src.data.data_proxy import create_stock_api
 
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+
+pykrx_stock = create_stock_api()
+
 _MAX_RETRIES = 3
 _RETRY_DELAY = 2.0  # seconds
 
 
-def _retry_on_failure(func):
-    """pykrx API 호출 실패 시 재시도하는 데코레이터."""
+_REQUEST_TIMEOUT = 30  # seconds per pykrx request
 
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        last_exc = None
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                return func(*args, **kwargs)
-            except Exception as e:
-                last_exc = e
-                if attempt < _MAX_RETRIES:
-                    delay = _RETRY_DELAY * attempt
-                    logger.warning(
-                        "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
-                        func.__name__, attempt, _MAX_RETRIES, e, delay,
+
+def _retry_on_failure(_func=None, *, timeout=None, max_retries=None):
+    """pykrx API 호출 실패 시 재시도하는 데코레이터 (timeout 포함).
+
+    signal.alarm() 대신 concurrent.futures를 사용하여
+    APScheduler 스레드 워커에서도 안전하게 동작한다.
+
+    Usage:
+        @_retry_on_failure                          # 기본값 (30s, 3회)
+        @_retry_on_failure(timeout=120)              # 커스텀 타임아웃
+        @_retry_on_failure(timeout=120, max_retries=2)  # 커스텀 둘 다
+    """
+    effective_timeout = timeout if timeout is not None else _REQUEST_TIMEOUT
+    effective_retries = max(1, max_retries if max_retries is not None else _MAX_RETRIES)
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            import concurrent.futures
+
+            last_exc = None
+            for attempt in range(1, effective_retries + 1):
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                try:
+                    future = pool.submit(func, *args, **kwargs)
+                    result = future.result(timeout=effective_timeout)
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    return result
+                except concurrent.futures.TimeoutError:
+                    future.cancel()
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    last_exc = TimeoutError(
+                        f"{func.__name__} timeout ({effective_timeout}s)"
                     )
-                    time.sleep(delay)
-        logger.error("%s 최종 실패: %s", func.__name__, last_exc)
-        raise last_exc
+                    if attempt < effective_retries:
+                        delay = _RETRY_DELAY * attempt
+                        logger.warning(
+                            "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
+                            func.__name__, attempt, effective_retries, last_exc, delay,
+                        )
+                        time.sleep(delay)
+                except Exception as e:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    last_exc = e
+                    if attempt < effective_retries:
+                        delay = _RETRY_DELAY * attempt
+                        logger.warning(
+                            "%s 실패 (시도 %d/%d): %s — %.1f초 후 재시도",
+                            func.__name__, attempt, effective_retries, e, delay,
+                        )
+                        time.sleep(delay)
+            logger.error("%s 최종 실패: %s", func.__name__, last_exc)
+            raise last_exc
 
-    return wrapper
+        return wrapper
+
+    if _func is not None:
+        # @_retry_on_failure 형태 (인자 없이 직접 사용)
+        return decorator(_func)
+    # @_retry_on_failure(timeout=120) 형태
+    return decorator
 
 
 def _format_date(date) -> str:
@@ -224,7 +270,9 @@ def get_fundamental(
         raise
 
 
-@_retry_on_failure
+# timeout=120s: 전종목(~2700) 펀더멘탈 일괄 조회는 KRX 응답이 느려 기본 30s로 부족
+# max_retries=2: 120s × 3회 = 6분은 과도하므로 2회로 제한 (총 최대 ~4분)
+@_retry_on_failure(timeout=120, max_retries=2)
 def get_all_fundamentals(
     date: str,
     market: str = "ALL",
@@ -278,8 +326,10 @@ def get_all_fundamentals(
             merged = merged.reset_index()
             merged = merged.rename(columns={merged.columns[0]: "ticker"})
 
-            # 종목명 추가
-            merged["name"] = [pykrx_stock.get_market_ticker_name(t) for t in merged["ticker"]]
+            # 종목명 일괄 매핑 (캐시 프리워밍 → dict lookup)
+            pykrx_stock.get_market_ticker_list(d, market=mkt)
+            name_map = {t: pykrx_stock.get_market_ticker_name(t) for t in merged["ticker"]}
+            merged["name"] = merged["ticker"].map(name_map).fillna("")
             merged["market"] = mkt
 
             # 업종 분류 추가

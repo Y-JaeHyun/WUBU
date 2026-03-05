@@ -15,7 +15,7 @@ load_dotenv()
 
 from src.data.collector import get_all_fundamentals, get_price_data
 from src.data.index_collector import get_index_data
-from src.strategy.multi_factor import MultiFactorStrategy
+from src.strategy.strategy_config import create_multi_factor
 from src.strategy.etf_rotation import ETFRotationStrategy
 from src.execution.portfolio_allocator import PortfolioAllocator
 from src.execution.position_manager import PositionManager
@@ -101,15 +101,9 @@ strategy_data = {
     "index_prices": index_df["종가"] if index_df is not None and not index_df.empty else None,
 }
 
-# ── 2. 장기 전략 시그널 (MultiFactor: V0.4 + M0.6, top10, MT, turnover_penalty=0.1) ──
-print(f"\n[2] 장기 전략 시그널 생성 (MultiFactor V0.4+M0.6, top10)...")
-long_strategy = MultiFactorStrategy(
-    value_weight=0.4,
-    momentum_weight=0.6,
-    num_stocks=10,
-    turnover_penalty=0.1,
-    apply_market_timing=True,
-)
+# ── 2. 장기 전략 시그널 (MultiFactor, top10, MT) ──
+print(f"\n[2] 장기 전략 시그널 생성 (MultiFactor, top10)...")
+long_strategy = create_multi_factor("live", num_stocks=10)
 
 long_signals = long_strategy.generate_signals(NEXT_TRADING_DATE, strategy_data)
 print(f"  장기 종목 수: {len(long_signals)}개")

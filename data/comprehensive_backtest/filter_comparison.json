@@ -1,0 +1,89 @@
+{
+  "period": "20230301-20260227",
+  "capital": 2000000,
+  "results": [
+    {
+      "label": "1. baseline",
+      "strategy_name": "MultiFactor(value+momentum, zscore, top10)",
+      "total_return": 745.35,
+      "cagr": 103.94,
+      "sharpe": 2.58,
+      "mdd": -20.16,
+      "elapsed": 855.8
+    },
+    {
+      "label": "2. +spike(15/25)",
+      "strategy_name": "MultiFactor(value+momentum, zscore, top10+spike)",
+      "total_return": 797.33,
+      "cagr": 108.05,
+      "sharpe": 2.6,
+      "mdd": -20.16,
+      "elapsed": 4.4
+    },
+    {
+      "label": "3. +vtrap(roe>=0)",
+      "strategy_name": "MultiFactor(value+momentum, zscore, top10+vtrap)",
+      "total_return": 745.35,
+      "cagr": 103.94,
+      "sharpe": 2.58,
+      "mdd": -20.16,
+      "elapsed": 7.5
+    },
+    {
+      "label": "4. +vtrap(f1)",
+      "strategy_name": "MultiFactor(value+momentum, zscore, top10+vtrap)",
+      "total_return": 385.16,
+      "cagr": 69.43,
+      "sharpe": 2.05,
+      "mdd": -19.39,
+      "elapsed": 9.8
+    },
+    {
+      "label": "5. +spike+vtrap",
+      "strategy_name": "MultiFactor(value+momentum, zscore, top10+spike+vtrap)",
+      "total_return": 797.33,
+      "cagr": 108.05,
+      "sharpe": 2.6,
+      "mdd": -20.16,
+      "elapsed": 8.9
+    },
+    {
+      "label": "6. +spike+vtrap(f1)",
+      "strategy_name": "MultiFactor(value+momentum, zscore, top10+spike+vtrap)",
+      "total_return": 391.75,
+      "cagr": 70.2,
+      "sharpe": 2.06,
+      "mdd": -18.21,
+      "elapsed": 10.8
+    },
+    {
+      "label": "7. +spike(10/20)",
+      "strategy_name": "MultiFactor(value+momentum, zscore, top10+spike)",
+      "total_return": 797.33,
+      "cagr": 108.05,
+      "sharpe": 2.6,
+      "mdd": -20.16,
+      "elapsed": 4.4
+    },
+    {
+      "label": "8. +spike(20/30)",
+      "strategy_name": "MultiFactor(value+momentum, zscore, top10+spike)",
+      "total_return": 745.35,
+      "cagr": 103.94,
+      "sharpe": 2.58,
+      "mdd": -20.16,
+      "elapsed": 4.3
+    }
+  ],
+  "best": {
+    "label": "2. +spike(15/25)",
+    "strategy_name": "MultiFactor(value+momentum, zscore, top10+spike)",
+    "total_return": 797.33,
+    "cagr": 108.05,
+    "sharpe": 2.6,
+    "mdd": -20.16,
+    "elapsed": 4.4
+  },
+  "total_elapsed_sec": 905.9,
+  "generated": "2026-03-02 20:20:37"
+}

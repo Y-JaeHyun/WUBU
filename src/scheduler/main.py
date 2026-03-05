@@ -5,11 +5,12 @@ systemd 서비스로 등록하여 무인 운영할 수 있다.
 
 스케줄:
     07:00 - 모닝 브리핑 (마켓 요약 + 포트폴리오 현황)
-    08:00 - 헬스 체크
-    08:50 - 장 전 시그널 체크 (리밸런싱 대상일 판별)
+    07:10 - 헬스 체크
+    07:30 - 장 전 시그널 체크 (리밸런싱 대상일 판별)
     09:05 - 리밸런싱 실행 (해당일에만)
     매시 정각(09~15) - 포트폴리오 모니터링
     15:35 - 장 마감 후 일일 리뷰
+    15:45 - 데이터 프리워밍 (익일 시그널용 캐시)
     16:00 - 종목 리뷰 [stock_review]
     19:00 - 이브닝 종합 리포트
     22:00 - 야간 리서치 [night_research]
@@ -136,6 +137,43 @@ class TradingBot:
         self.stock_reviewer: StockReviewer = StockReviewer()
         self.night_researcher: NightResearcher = NightResearcher()
 
+        # 오버레이 (feature flag 기반 초기화)
+        self._drawdown_overlay = None
+        self._vol_targeting_overlay = None
+
+        if self.feature_flags.is_enabled("drawdown_overlay"):
+            from src.strategy.drawdown_overlay import DrawdownOverlay
+
+            dd_cfg = self.feature_flags.get_config("drawdown_overlay")
+            thresholds = [
+                (t[0], t[1])
+                for t in dd_cfg.get(
+                    "thresholds",
+                    [[-0.10, 0.75], [-0.15, 0.50], [-0.20, 0.25]],
+                )
+            ]
+            self._drawdown_overlay = DrawdownOverlay(
+                thresholds=thresholds,
+                recovery_buffer=dd_cfg.get("recovery_buffer", 0.02),
+            )
+            # PortfolioTracker의 고점을 DrawdownOverlay에 동기화 (재시작 시 보존)
+            if self.portfolio_tracker.peak > 0:
+                self._drawdown_overlay.set_peak(self.portfolio_tracker.peak)
+                logger.info(
+                    "DrawdownOverlay peak 동기화: %s",
+                    f"{self.portfolio_tracker.peak:,.0f}",
+                )
+
+        if self.feature_flags.is_enabled("vol_targeting"):
+            from src.strategy.vol_targeting import VolTargetingOverlay
+
+            vt_cfg = self.feature_flags.get_config("vol_targeting")
+            self._vol_targeting_overlay = VolTargetingOverlay(
+                target_vol=vt_cfg.get("target_vol", 0.15),
+                lookback_days=vt_cfg.get("lookback_days", 20),
+                use_downside_only=vt_cfg.get("use_downside_only", True),
+            )
+
         # 전략 (외부에서 주입 가능)
         self._strategy = None
 
@@ -215,6 +253,9 @@ class TradingBot:
             start_date = start_dt.strftime("%Y%m%d")
 
             prices: dict = {}
+            failed_tickers: list[str] = []
+            cache_hits = 0
+            api_fetched = 0
             for ticker in top_tickers:
                 cache_key_p = DataCache.make_key("price", ticker, start_date, date_str)
                 price_df = None
@@ -223,19 +264,36 @@ class TradingBot:
 
                 if price_df is not None:
                     prices[ticker] = price_df
+                    cache_hits += 1
                     continue
 
                 try:
                     price_df = get_price_data(ticker, start_date, date_str)
                     if not price_df.empty:
                         prices[ticker] = price_df
+                        api_fetched += 1
                         if use_cache:
                             self.data_cache.put(cache_key_p, price_df)
-                except Exception:
-                    pass  # 개별 종목 실패는 무시
+                except Exception as e:
+                    failed_tickers.append(ticker)
+                    logger.warning("가격 수집 실패 (%s): %s", ticker, e)
 
             data["prices"] = prices
+            data["_meta"] = {
+                "price_requested": len(top_tickers),
+                "price_collected": len(prices),
+                "price_failed": len(failed_tickers),
+                "cache_hits": cache_hits,
+                "api_fetched": api_fetched,
+                "failed_tickers": failed_tickers[:10],
+            }
             logger.info("가격 데이터 수집: %d/%d종목", len(prices), len(top_tickers))
+            if failed_tickers:
+                logger.warning(
+                    "가격 수집 실패: %d종목 (예: %s)",
+                    len(failed_tickers),
+                    ", ".join(failed_tickers[:5]),
+                )
 
         # 3. KOSPI 지수 ────────────────────────────────────
         try:
@@ -471,6 +529,51 @@ class TradingBot:
             return BBSqueezeStrategy()
         return factory()
 
+    @staticmethod
+    def _validate_signal_data(
+        strategy_data: dict, fail_rate_threshold: float = 0.2,
+    ) -> tuple[bool, list[str]]:
+        """전략 데이터 품질을 검증한다.
+
+        Args:
+            strategy_data: _collect_strategy_data() 반환값.
+            fail_rate_threshold: 가격 수집 실패율 허용 상한 (기본 20%).
+
+        Returns:
+            (is_valid, issues): 유효 여부와 문제 목록.
+        """
+        issues: list[str] = []
+
+        # 펀더멘탈 검증
+        fund = strategy_data.get("fundamentals")
+        if fund is None or (hasattr(fund, "empty") and fund.empty):
+            issues.append("펀더멘탈 데이터 수집 실패")
+
+        # 가격 데이터 검증
+        meta = strategy_data.get("_meta", {})
+        requested = meta.get("price_requested", 0)
+        collected = meta.get("price_collected", 0)
+        failed = meta.get("price_failed", 0)
+
+        if collected == 0 and requested > 0:
+            issues.append(f"가격 데이터 전량 실패 (0/{requested}종목)")
+        elif requested > 0 and failed / requested > fail_rate_threshold:
+            issues.append(
+                f"가격 수집 실패율 초과: {failed}/{requested}종목 "
+                f"({failed / requested:.0%} > {fail_rate_threshold:.0%})"
+            )
+
+        # KOSPI 지수 (경고만, 실패 판정하지 않음)
+        idx = strategy_data.get("index_prices")
+        if idx is None or (hasattr(idx, "empty") and idx.empty):
+            issues.append("(경고) KOSPI 지수 데이터 없음")
+
+        # 경고만 있는 경우는 유효
+        fatal_issues = [i for i in issues if not i.startswith("(경고)")]
+        is_valid = len(fatal_issues) == 0
+
+        return is_valid, issues
+
     def _is_trading_day(self) -> bool:
         """오늘이 거래일인지 확인한다.
 
@@ -485,6 +588,41 @@ class TradingBot:
             logger.info("오늘(%s)은 %s입니다. 작업을 스킵합니다.", today, reason)
 
         return is_trading
+
+    def _is_rebalance_day(self, today=None) -> bool:
+        """오늘이 리밸런싱일인지 확인한다.
+
+        환경변수 FORCE_REBALANCE_DATE가 오늘 날짜와 일치하면
+        정규 리밸런싱 스케줄과 무관하게 True를 반환한다.
+        (테스트/긴급 리밸런싱용)
+
+        Args:
+            today: 확인할 날짜. 기본 오늘.
+
+        Returns:
+            리밸런싱일이면 True.
+        """
+        import os
+
+        if today is None:
+            today = datetime.now(KST).date()
+
+        force_date = os.environ.get("FORCE_REBALANCE_DATE", "")
+        if force_date:
+            try:
+                forced = datetime.strptime(force_date, "%Y%m%d").date()
+                if today == forced:
+                    logger.info(
+                        "FORCE_REBALANCE_DATE=%s → 강제 리밸런싱일", force_date
+                    )
+                    return True
+            except ValueError:
+                logger.warning(
+                    "FORCE_REBALANCE_DATE 형식 오류: %s (YYYYMMDD 필요)",
+                    force_date,
+                )
+
+        return self.holidays.is_rebalance_day(today, self.rebalance_freq)
 
     def _send_notification(self, message: str, level: str = "INFO") -> None:
         """알림을 발송한다.
@@ -518,9 +656,7 @@ class TradingBot:
             today = datetime.now(KST).date()
             today_str = today.strftime("%Y-%m-%d")
 
-            is_rebal_day = self.holidays.is_rebalance_day(
-                today, self.rebalance_freq
-            )
+            is_rebal_day = self._is_rebalance_day(today)
             days_to_rebal = self.holidays.days_to_next_rebalance(
                 today, self.rebalance_freq
             )
@@ -565,10 +701,122 @@ class TradingBot:
             logger.error("모닝 브리핑 생성 실패: %s", e)
             logger.debug(traceback.format_exc())
 
+    def _filter_affordable_signals(
+        self,
+        signals: dict[str, float],
+        strategy_data: dict,
+        pool_budget: int,
+        target_num_stocks: int,
+        price_buffer: float = 0.05,
+        min_stocks: int = 5,
+        score_threshold_ratio: float = 0.7,
+    ) -> tuple[dict[str, float], list[str]]:
+        """매수 불가능 종목을 제외하고 차순위로 대체한다.
+
+        종목당 예산보다 1주 가격이 높은 종목을 필터링하여
+        실제 매수 가능한 포트폴리오를 구성한다.
+
+        Args:
+            signals: 전략 시그널 {ticker: weight}.
+            strategy_data: 전략 데이터 (prices 포함).
+            pool_budget: 장기 풀 예산 (원).
+            target_num_stocks: 목표 종목 수.
+            price_buffer: 가격 버퍼 비율 (기본 5%).
+            min_stocks: 최소 종목 수 경고 임계값 (기본 5).
+            score_threshold_ratio: 스코어 하한선 비율 (기본 0.7).
+
+        Returns:
+            (filtered_signals, excluded_reasons) 튜플.
+        """
+        if not signals or pool_budget <= 0 or target_num_stocks <= 0:
+            return signals, []
+
+        budget_per_stock = pool_budget / target_num_stocks
+        max_price = budget_per_stock * (1 - price_buffer)
+
+        prices = strategy_data.get("prices", {})
+        excluded_reasons: list[str] = []
+        affordable: list[str] = []
+
+        # 스코어 하한선 계산
+        score_threshold = None
+        if (
+            hasattr(self._strategy, "_last_combined_scores")
+            and not self._strategy._last_combined_scores.empty
+        ):
+            top_score = float(self._strategy._last_combined_scores.iloc[0])
+            if top_score > 0:
+                score_threshold = top_score * score_threshold_ratio
+
+        for ticker in signals:
+            # 가격 조회
+            latest_close = None
+            if ticker in prices and not prices[ticker].empty:
+                price_df = prices[ticker]
+                if "close" in price_df.columns:
+                    latest_close = float(price_df["close"].iloc[-1])
+
+            if latest_close is not None and latest_close > max_price:
+                excluded_reasons.append(
+                    f"{ticker}: 주가 {latest_close:,.0f}원 > "
+                    f"예산 {max_price:,.0f}원"
+                )
+                continue
+
+            # 스코어 하한선 체크
+            if (
+                score_threshold is not None
+                and hasattr(self._strategy, "_last_combined_scores")
+                and ticker in self._strategy._last_combined_scores.index
+            ):
+                score = float(self._strategy._last_combined_scores[ticker])
+                if score < score_threshold:
+                    excluded_reasons.append(
+                        f"{ticker}: 스코어 {score:.3f} < "
+                        f"하한 {score_threshold:.3f}"
+                    )
+                    continue
+
+            affordable.append(ticker)
+
+        # 상위 target_num_stocks개 선택
+        selected = affordable[:target_num_stocks]
+
+        if len(selected) == 0:
+            logger.warning("전 종목 매수 불가 — 빈 시그널 반환")
+            excluded_reasons.append("전 종목 매수 불가")
+            return {}, excluded_reasons
+
+        if len(selected) < min_stocks:
+            logger.warning(
+                "매수 가능 종목 %d개 < 최소 %d개",
+                len(selected), min_stocks,
+            )
+            excluded_reasons.append(
+                f"매수 가능 종목 {len(selected)}개 (최소 {min_stocks}개 미달)"
+            )
+
+        # 동일 비중 재할당
+        weight = 1.0 / len(selected)
+        filtered = {ticker: weight for ticker in selected}
+
+        if excluded_reasons:
+            logger.info(
+                "매수가능성 필터: %d개 제외, %d개 선택 "
+                "(예산 %s원/종목, 버퍼 %.0f%%)",
+                len([r for r in excluded_reasons if ":" in r]),
+                len(selected),
+                f"{budget_per_stock:,.0f}",
+                price_buffer * 100,
+            )
+
+        return filtered, excluded_reasons
+
     def premarket_check(self) -> None:
-        """08:50 - 장 전 시그널 체크.
+        """07:30 - 장 전 시그널 체크.
 
         리밸런싱 대상일이면 전략 시그널을 미리 생성하여 알림한다.
+        데이터 품질 검증에 실패하면 CRITICAL 알림을 발송한다.
         """
         if not self._is_trading_day():
             return
@@ -576,7 +824,7 @@ class TradingBot:
         try:
             today = datetime.now(KST).date()
 
-            if not self.holidays.is_rebalance_day(today, self.rebalance_freq):
+            if not self._is_rebalance_day(today):
                 logger.info("오늘은 리밸런싱일이 아닙니다.")
                 return
 
@@ -591,26 +839,57 @@ class TradingBot:
             # 전략 시그널 미리보기 (dry run)
             logger.info("리밸런싱 사전 시그널 체크 시작")
 
-            # T-1 기준 데이터 수집 (08:50에는 당일 데이터 미완성)
+            # T-1 기준 데이터 수집 (장 전에는 당일 데이터 미완성)
             prev_day = self.holidays.prev_trading_day(today)
             data_date = prev_day.strftime("%Y%m%d")
             logger.info("전략 데이터 수집 (기준일: %s)", data_date)
             strategy_data = self._collect_strategy_data(data_date)
 
-            if strategy_data["fundamentals"].empty:
+            # 데이터 품질 검증
+            is_valid, issues = self._validate_signal_data(strategy_data)
+            meta = strategy_data.get("_meta", {})
+            if not is_valid:
+                issue_text = "\n".join(f"  - {i}" for i in issues)
+                meta_text = (
+                    f"캐시: {meta.get('cache_hits', '?')}히트 / "
+                    f"API: {meta.get('api_fetched', '?')} / "
+                    f"실패: {meta.get('price_failed', '?')}"
+                )
                 self._send_notification(
-                    f"[장 전 체크] {today.strftime('%Y-%m-%d')}\n"
-                    "펀더멘탈 데이터 수집 실패. 시그널 생성 불가.",
-                    level="WARNING",
+                    f"[시그널 생성 실패] {today.strftime('%Y-%m-%d')}\n"
+                    f"리밸런싱일 데이터 품질 검증 실패:\n{issue_text}\n"
+                    f"수집 상세: {meta_text}\n"
+                    "09:05 리밸런싱이 중단될 수 있습니다.",
+                    level="CRITICAL",
                 )
                 return
 
             date_str = today.strftime("%Y%m%d")
             try:
-                signals = self._strategy.generate_signals(date_str, strategy_data)
+                num_stocks = getattr(self._strategy, "num_stocks", 7)
+                scan_limit = num_stocks * 2
+                signals = self._strategy.generate_signals(
+                    date_str, strategy_data, scan_limit=scan_limit
+                )
             except Exception as e:
-                logger.warning("시그널 생성 중 오류: %s", e)
-                signals = {}
+                logger.error("시그널 생성 예외: %s", e)
+                logger.debug(traceback.format_exc())
+                self._send_notification(
+                    f"[시그널 생성 실패] {today.strftime('%Y-%m-%d')}\n"
+                    f"전략 시그널 생성 중 예외 발생: {e}\n"
+                    "09:05 리밸런싱이 중단될 수 있습니다.",
+                    level="CRITICAL",
+                )
+                return
+
+            # 매수가능성 필터 (allocator 있을 때만)
+            excluded_reasons: list[str] = []
+            if signals and self.allocator:
+                pool_budget = self.allocator.get_long_term_budget()
+                if pool_budget > 0:
+                    signals, excluded_reasons = self._filter_affordable_signals(
+                        signals, strategy_data, pool_budget, num_stocks
+                    )
 
             # EOD 뉴스 관심종목용 시그널 캐시
             if signals:
@@ -620,6 +899,21 @@ class TradingBot:
                 top_tickers = sorted(
                     signals.items(), key=lambda x: x[1], reverse=True
                 )[:10]
+
+                # 종목명 매핑: fundamentals + ETF universe
+                name_map: dict[str, str] = {}
+                fund = strategy_data.get("fundamentals")
+                if (
+                    fund is not None
+                    and hasattr(fund, "empty")
+                    and not fund.empty
+                    and "ticker" in fund.columns
+                    and "name" in fund.columns
+                ):
+                    name_map.update(
+                        dict(zip(fund["ticker"], fund["name"]))
+                    )
+
                 lines = [
                     f"[장 전 시그널 체크] {today.strftime('%Y-%m-%d')}",
                     "─" * 30,
@@ -628,7 +922,26 @@ class TradingBot:
                     "Top 10 비중:",
                 ]
                 for ticker, weight in top_tickers:
-                    lines.append(f"  {ticker}: {weight:.1%}")
+                    name = name_map.get(ticker, ticker)
+                    label = (
+                        f"{name}({ticker})" if name != ticker else ticker
+                    )
+                    lines.append(f"  {label}: {weight:.1%}")
+
+                # 매수 불가 종목 정보
+                ticker_exclusions = [
+                    r for r in excluded_reasons if ":" in r
+                ]
+                if ticker_exclusions:
+                    lines.append(
+                        f"\n매수 불가 {len(ticker_exclusions)}개 제외:"
+                    )
+                    for reason in ticker_exclusions[:5]:
+                        lines.append(f"  - {reason}")
+                    if len(ticker_exclusions) > 5:
+                        lines.append(
+                            f"  ... 외 {len(ticker_exclusions) - 5}개"
+                        )
 
                 # 통합 Dry run (allocator 활성 시)
                 if self.allocator:
@@ -639,7 +952,23 @@ class TradingBot:
                     if etf_signals:
                         pool_signals["etf_rotation"] = etf_signals
                         self._last_etf_signals = dict(etf_signals)
-                        lines.append(f"\nETF 종목 수: {len(etf_signals)}개")
+                        # ETF universe 이름 매핑 추가
+                        etf_strategy = self._create_etf_strategy()
+                        if hasattr(etf_strategy, "etf_universe"):
+                            name_map.update(etf_strategy.etf_universe)
+                        etf_lines = []
+                        for t, w in sorted(
+                            etf_signals.items(),
+                            key=lambda x: x[1],
+                            reverse=True,
+                        ):
+                            ename = name_map.get(t, t)
+                            elabel = (
+                                f"{ename}({t})" if ename != t else t
+                            )
+                            etf_lines.append(f"  {elabel}: {w:.1%}")
+                        lines.append(f"\nETF 종목 ({len(etf_signals)}개):")
+                        lines.extend(etf_lines)
 
                     dry_result = self.executor.dry_run_integrated(
                         pool_signals
@@ -669,7 +998,8 @@ class TradingBot:
             else:
                 self._send_notification(
                     f"[장 전 시그널 체크] {today.strftime('%Y-%m-%d')}\n"
-                    "시그널이 없습니다."
+                    "시그널이 없습니다. 전략 로직을 확인하세요.",
+                    level="WARNING",
                 )
 
             logger.info("장 전 시그널 체크 완료")
@@ -716,10 +1046,11 @@ class TradingBot:
         return etf_prices
 
     def execute_etf_rotation_rebalance(self) -> None:
-        """09:10 - ETF 로테이션 모니터링.
+        """09:10 - ETF 로테이션 모멘텀 순위 모니터링 (진단 전용).
 
-        리밸런싱일: 09:05 통합 리밸런싱에서 이미 실행됨 → 모멘텀 순위만 로깅.
-        비 리밸런싱일: 모멘텀 순위 로깅만 수행.
+        실제 ETF 매매는 09:05 execute_rebalance()에서 통합 수행된다.
+        이 메서드는 모멘텀 순위를 로깅하여 운영 모니터링을 돕는다.
+        리밸런싱일/비 리밸런싱일 공통으로 순위만 기록한다.
         """
         if not self.feature_flags.is_enabled("etf_rotation"):
             return
@@ -729,9 +1060,8 @@ class TradingBot:
         try:
             today = datetime.now(KST).date()
             config = self.feature_flags.get_config("etf_rotation")
-            rebalance_freq = config.get("rebalance_freq", "monthly")
 
-            if self.holidays.is_rebalance_day(today, rebalance_freq):
+            if self._is_rebalance_day(today):
                 logger.info(
                     "ETF 로테이션: 리밸런싱일 → 09:05 통합 실행 완료. "
                     "모멘텀 순위만 로깅."
@@ -794,6 +1124,62 @@ class TradingBot:
         except Exception as e:
             logger.warning("ETF 모멘텀 순위 로깅 실패: %s", e)
 
+    def _apply_live_overlays(
+        self, signals: dict[str, float]
+    ) -> dict[str, float]:
+        """라이브 리밸런싱에 drawdown/vol_targeting 오버레이를 적용한다.
+
+        Args:
+            signals: {ticker: weight} 포트폴리오 비중.
+
+        Returns:
+            오버레이 적용 후 {ticker: weight}.
+        """
+        if not signals:
+            return signals
+
+        # 1. 드로다운 오버레이
+        if self._drawdown_overlay is not None:
+            try:
+                balance = self.kis_client.get_balance()
+                pv = balance.get("total_eval", 0)
+                if pv > 0:
+                    signals = self._drawdown_overlay.apply_overlay(
+                        signals, pv
+                    )
+                    logger.info(
+                        "드로다운 오버레이 적용: %d종목", len(signals)
+                    )
+            except Exception as e:
+                logger.warning("드로다운 오버레이 실패: %s", e)
+
+        # 2. 변동성 타겟팅
+        if self._vol_targeting_overlay is not None:
+            try:
+                pv_series = self.portfolio_tracker.get_values_series()
+                if len(pv_series) > 0:
+                    signals = self._vol_targeting_overlay.apply(
+                        signals, pv_series
+                    )
+                    logger.info(
+                        "변동성 타겟팅 적용: %d종목", len(signals)
+                    )
+            except Exception as e:
+                logger.warning("변동성 타겟팅 실패: %s", e)
+
+        # 최소 노출 하한 (10%) — 백테스트 엔진과 동일
+        if signals:
+            total_w = sum(signals.values())
+            if 0 < total_w < 0.10:
+                scale = 0.10 / total_w
+                signals = {t: w * scale for t, w in signals.items()}
+                logger.info(
+                    "최소 노출 하한 적용: %.1f%% → 10%%",
+                    total_w * 100,
+                )
+
+        return signals
+
     def execute_rebalance(self) -> None:
         """09:05 - 통합 리밸런싱 실행 (해당일만).
 
@@ -806,7 +1192,7 @@ class TradingBot:
         try:
             today = datetime.now(KST).date()
 
-            if not self.holidays.is_rebalance_day(today, self.rebalance_freq):
+            if not self._is_rebalance_day(today):
                 logger.info("오늘은 리밸런싱일이 아닙니다. 실행을 스킵합니다.")
                 return
 
@@ -826,16 +1212,19 @@ class TradingBot:
                 )
                 return
 
-            # T-1 데이터 수집 (08:50 캐시 히트 기대)
+            # T-1 데이터 수집 (07:30 프리워밍 캐시 히트 기대)
             prev_day = self.holidays.prev_trading_day(today)
             data_date = prev_day.strftime("%Y%m%d")
             logger.info("리밸런싱 데이터 수집 (기준일: %s)", data_date)
             strategy_data = self._collect_strategy_data(data_date)
 
-            if strategy_data["fundamentals"].empty:
-                logger.error("펀더멘탈 데이터 수집 실패. 리밸런싱을 중단합니다.")
+            # 데이터 품질 검증
+            is_valid, issues = self._validate_signal_data(strategy_data)
+            if not is_valid:
+                issue_text = "\n".join(f"  - {i}" for i in issues)
+                logger.error("데이터 품질 검증 실패. 리밸런싱을 중단합니다.")
                 self._send_notification(
-                    "[리밸런싱 오류] 펀더멘탈 데이터 수집 실패.",
+                    f"[리밸런싱 중단] 데이터 품질 검증 실패:\n{issue_text}",
                     level="CRITICAL",
                 )
                 return
@@ -844,9 +1233,22 @@ class TradingBot:
             date_str = today.strftime("%Y%m%d")
             logger.info("리밸런싱 시그널 생성 중: %s", date_str)
 
+            # turnover_reduction: 현재 보유 종목을 전략에 전달
+            if hasattr(self._strategy, "update_holdings"):
+                try:
+                    balance = self.kis_client.get_balance()
+                    current_tickers = {
+                        h["ticker"] for h in balance.get("holdings", [])
+                    }
+                    self._strategy.update_holdings(current_tickers)
+                except Exception as e:
+                    logger.warning("보유 종목 업데이트 실패: %s", e)
+
             try:
+                num_stocks = getattr(self._strategy, "num_stocks", 7)
+                scan_limit = num_stocks * 2
                 long_signals = self._strategy.generate_signals(
-                    date_str, strategy_data
+                    date_str, strategy_data, scan_limit=scan_limit
                 )
             except Exception as e:
                 logger.error("장기 시그널 생성 실패: %s", e)
@@ -855,6 +1257,23 @@ class TradingBot:
                     level="CRITICAL",
                 )
                 return
+
+            # 매수가능성 필터 (allocator 있을 때만)
+            if long_signals and self.allocator:
+                pool_budget = self.allocator.get_long_term_budget()
+                if pool_budget > 0:
+                    long_signals, excluded = self._filter_affordable_signals(
+                        long_signals, strategy_data, pool_budget, num_stocks
+                    )
+                    if excluded:
+                        logger.info(
+                            "매수 불가 종목 %d개 제외",
+                            len([r for r in excluded if ":" in r]),
+                        )
+
+            # 오버레이 적용 (drawdown + vol_targeting)
+            if long_signals:
+                long_signals = self._apply_live_overlays(long_signals)
 
             # EOD 뉴스 관심종목용 시그널 캐시
             if long_signals:
@@ -875,10 +1294,16 @@ class TradingBot:
                     pool_signals["long_term"] = long_signals
 
                 # ETF 시그널 생성 (ETF 로테이션 활성 + 리밸런싱일)
+                # 참고: ETF 풀은 채권/안전자산 포함이므로 드로다운 오버레이 미적용 (의도적 제외)
                 etf_signals = self._generate_etf_signals(date_str)
                 if etf_signals:
                     pool_signals["etf_rotation"] = etf_signals
                     self._last_etf_signals = dict(etf_signals)
+                    logger.info(
+                        "ETF 시그널 %d개 (드로다운 오버레이 미적용 — "
+                        "채권/안전자산 포함 풀)",
+                        len(etf_signals),
+                    )
 
                 if not pool_signals:
                     logger.warning("시그널이 없습니다. 리밸런싱을 스킵합니다.")
@@ -1363,8 +1788,9 @@ class TradingBot:
             checks.append(f"MDD: {mdd:.2%}")
 
             level = "INFO" if all_ok else "CRITICAL"
+            now = datetime.now(KST)
             message = (
-                f"[헬스 체크] {today.strftime('%Y-%m-%d')} 08:00\n"
+                f"[헬스 체크] {now.strftime('%Y-%m-%d %H:%M')}\n"
                 + "\n".join(f"  {c}" for c in checks)
             )
             self._send_notification(message, level=level)
@@ -1445,9 +1871,76 @@ class TradingBot:
             text = backtester.run_all()
             self._send_notification(text)
             logger.info("자동 백테스트 완료")
+
+            # Walk-Forward 검증 (옵셔널)
+            if self.feature_flags.is_enabled("walk_forward_backtest"):
+                try:
+                    self._run_walk_forward(config)
+                except Exception as wf_err:
+                    logger.error("Walk-Forward 실패: %s", wf_err)
+                    logger.debug(traceback.format_exc())
+
         except Exception as e:
             logger.error("자동 백테스트 실패: %s", e)
             logger.debug(traceback.format_exc())
+
+    def _run_walk_forward(self, backtest_config: dict) -> None:
+        """Walk-Forward 백테스트를 실행하고 결과를 발송한다."""
+        from src.backtest.walk_forward import WalkForwardBacktest
+
+        wf_cfg = self.feature_flags.get_config("walk_forward_backtest")
+        strategies = backtest_config.get(
+            "strategies", ["value", "momentum", "multi_factor"]
+        )
+
+        results_lines = ["[Walk-Forward 검증 결과]", ""]
+
+        for strategy_name in strategies[:3]:  # 상위 3개만 (실행시간 제한)
+            try:
+                strategy = self._create_long_term_strategy(strategy_name)
+                if strategy is None:
+                    continue
+
+                def strategy_factory(train_start, train_end, s=strategy):
+                    return s
+
+                wf = WalkForwardBacktest(
+                    strategy_factory=strategy_factory,
+                    full_start_date=(
+                        datetime.now(KST)
+                        - timedelta(
+                            days=365 * (
+                                wf_cfg.get("train_years", 5)
+                                + wf_cfg.get("test_years", 1)
+                            )
+                        )
+                    ).strftime("%Y%m%d"),
+                    full_end_date=datetime.now(KST).strftime("%Y%m%d"),
+                    train_years=wf_cfg.get("train_years", 5),
+                    test_years=wf_cfg.get("test_years", 1),
+                    step_months=wf_cfg.get("step_months", 12),
+                )
+                wf.run()
+                oos = wf.get_oos_results()
+
+                if oos:
+                    avg_sharpe = sum(
+                        r.get("sharpe", 0) for r in oos
+                    ) / len(oos)
+                    results_lines.append(
+                        f"  {strategy_name}: OOS Sharpe={avg_sharpe:.2f} "
+                        f"({len(oos)}구간)"
+                    )
+                else:
+                    results_lines.append(f"  {strategy_name}: 결과 없음")
+
+            except Exception as e:
+                results_lines.append(f"  {strategy_name}: 실패 ({e})")
+                logger.warning("Walk-Forward %s 실패: %s", strategy_name, e)
+
+        if len(results_lines) > 2:
+            self._send_notification("\n".join(results_lines))
+            logger.info("Walk-Forward 검증 완료")
 
     def night_research_job(self) -> None:
         """22:00 평일 - 야간 리서치 리포트.
@@ -1606,10 +2099,11 @@ class TradingBot:
             logger.error("단기 포지션 모니터링 실패: %s", e)
 
     def daytrading_close(self) -> None:
-        """15:20 - 데이트레이딩 포지션 강제 청산.
+        """15:20 - 데이트레이딩 포지션 청산 알림.
 
         Feature Flag 'short_term_trading'으로 제어.
-        daytrading 모드인 포지션만 청산한다.
+        daytrading 모드인 포지션을 감지하여 수동 청산 알림을 보낸다.
+        NOTE: 자동 매도는 미구현. 알림 확인 후 수동 청산 필요.
         """
         if not self.feature_flags.is_enabled("short_term_trading"):
             return
@@ -1634,7 +2128,7 @@ class TradingBot:
                 logger.info("데이트레이딩 청산: 대상 없음")
                 return
 
-            lines = [f"[데이트레이딩 청산] {len(daytrading_positions)}개"]
+            lines = [f"[데이트레이딩 수동 청산 필요] {len(daytrading_positions)}개"]
             for pos in daytrading_positions:
                 ticker = pos.get("ticker", "")
                 pnl_pct = pos.get("pnl_pct", 0)
@@ -1829,21 +2323,42 @@ class TradingBot:
     def _generate_long_term_preview(
         self, holdings_map: dict[str, dict],
     ) -> list[str]:
-        """DailySimulator 캐시에서 장기 전략 프리뷰를 생성한다."""
+        """장기 전략 프리뷰를 생성한다.
+
+        캐시가 신선하면(당일) 사용하고, 없거나 오래되면 실시간 생성한다.
+        """
         sim_config = self.feature_flags.get_config("daily_simulation")
         strategy_name = sim_config.get("primary_strategy", "multi_factor")
 
+        # 1. 캐시 확인 — 당일이면 사용
         sim_data = self._find_latest_simulation(strategy_name)
+        use_cache = False
+        if sim_data:
+            sim_date = sim_data.get("date", "")
+            try:
+                sim_dt = datetime.strptime(sim_date, "%Y-%m-%d")
+                days_old = (datetime.now(KST).replace(tzinfo=None) - sim_dt).days
+                if days_old <= 1:
+                    use_cache = True
+            except (ValueError, TypeError):
+                pass
+
+        # 2. 캐시 miss → 실시간 시그널 생성
+        if not use_cache:
+            sim_data = self._generate_live_long_term_signals(strategy_name)
+
         if sim_data is None:
             return [
                 f"[장기 전략 프리뷰 ({strategy_name})]",
-                "  (시뮬레이션 데이터 없음 - 16:05 이후 갱신)",
+                "  (데이터 수집 실패)",
             ]
 
         sim_date = sim_data.get("date", "?")
         selected = sim_data.get("selected", [])
+        source = sim_data.get("source", "cache")
 
-        lines = [f"[장기 전략 프리뷰 ({sim_date} 기준)]"]
+        label = "실시간" if source == "live" else sim_date + " 기준"
+        lines = [f"[장기 전략 프리뷰 ({label})]"]
 
         max_display = 7
         for item in selected[:max_display]:
@@ -1914,6 +2429,66 @@ class TradingBot:
             history = sim.get_history(strategy_name, days=7)
             return history[0] if history else None
         except Exception:
+            return None
+
+    def _generate_live_long_term_signals(
+        self, strategy_name: str,
+    ) -> Optional[dict]:
+        """실시간으로 장기 전략 시그널을 생성한다."""
+        try:
+            today_str = datetime.now(KST).strftime("%Y%m%d")
+            strategy_data = self._collect_strategy_data(today_str)
+
+            fund = strategy_data.get("fundamentals")
+            if fund is None or (hasattr(fund, "empty") and fund.empty):
+                logger.warning("실시간 프리뷰: 펀더멘탈 데이터 없음")
+                return None
+
+            strategy = self._create_long_term_strategy(strategy_name)
+            if strategy is None:
+                return None
+
+            signals = strategy.generate_signals(today_str, strategy_data)
+            if not signals:
+                return None
+
+            # DailySimulator와 동일한 포맷으로 변환
+            sorted_items = sorted(
+                signals.items(), key=lambda x: x[1], reverse=True
+            )
+            selected = []
+            for rank, (ticker, weight) in enumerate(sorted_items, 1):
+                name = ""
+                if not fund.empty and "ticker" in fund.columns:
+                    match = fund[fund["ticker"] == ticker]
+                    if not match.empty and "name" in match.columns:
+                        name = str(match.iloc[0]["name"])
+                selected.append({
+                    "ticker": ticker,
+                    "name": name or ticker,
+                    "weight": weight,
+                    "rank": rank,
+                })
+
+            today_fmt = datetime.now(KST).strftime("%Y-%m-%d")
+            result = {
+                "date": today_fmt,
+                "strategy": strategy_name,
+                "selected": selected,
+                "source": "live",
+            }
+
+            # 캐시 저장 (다음 호출 시 재사용)
+            try:
+                from src.data.daily_simulator import DailySimulator
+                sim = DailySimulator()
+                sim.save_selection(today_fmt, strategy_name, result)
+            except Exception as e:
+                logger.debug("실시간 프리뷰 캐시 저장 실패: %s", e)
+
+            return result
+        except Exception as e:
+            logger.warning("실시간 장기 프리뷰 생성 실패: %s", e)
             return None
 
     def _generate_etf_preview(self) -> list[str]:
@@ -2273,6 +2848,9 @@ class TradingBot:
             if total_eval <= 0:
                 return
 
+            # EOD 포트폴리오 트래커 스냅샷
+            self.portfolio_tracker.update(total_eval)
+
             today = datetime.now(KST).strftime("%Y-%m-%d")
 
             # NAV 기록
@@ -2300,6 +2878,66 @@ class TradingBot:
             logger.error("성과 DB 기록 실패: %s", e)
             logger.debug(traceback.format_exc())
 
+    def prewarm_strategy_cache(self) -> None:
+        """16:10 - 내일 시그널용 데이터 프리워밍.
+
+        장 마감 후 당일 종가 기반 fundamentals + prices + index를
+        DataCache에 저장한다. 익일 07:30 premarket_check()에서
+        prev_trading_day(내일) = 오늘이므로 동일한 캐시 키로 히트된다.
+
+        데이터 품질 검증에 실패하면 CRITICAL 알림을 발송한다.
+        """
+        if not self._is_trading_day():
+            return
+
+        try:
+            today_str = datetime.now(KST).strftime("%Y%m%d")
+            logger.info("데이터 프리워밍 시작 (기준일: %s)", today_str)
+
+            strategy_data = self._collect_strategy_data(today_str)
+
+            # 데이터 품질 검증
+            is_valid, issues = self._validate_signal_data(strategy_data)
+
+            meta = strategy_data.get("_meta", {})
+            requested = meta.get("price_requested", 0)
+            collected = meta.get("price_collected", 0)
+            failed = meta.get("price_failed", 0)
+            fund_count = (
+                len(strategy_data["fundamentals"])
+                if not strategy_data["fundamentals"].empty
+                else 0
+            )
+            index_count = len(strategy_data["index_prices"])
+
+            if is_valid:
+                msg = (
+                    f"[데이터 프리워밍 완료] {today_str}\n"
+                    f"펀더멘탈: {fund_count}종목\n"
+                    f"가격: {collected}/{requested}종목\n"
+                    f"KOSPI 지수: {index_count}일"
+                )
+                logger.info(msg)
+                self._send_notification(msg)
+            else:
+                issue_text = "\n".join(f"  - {i}" for i in issues)
+                msg = (
+                    f"[프리워밍 실패] {today_str}\n"
+                    f"가격: {collected}/{requested}종목 "
+                    f"(실패 {failed})\n"
+                    f"문제:\n{issue_text}\n"
+                    "익일 시그널 생성에 영향이 있을 수 있습니다."
+                )
+                logger.error(msg)
+                self._send_notification(msg, level="CRITICAL")
+
+        except Exception as e:
+            logger.error("데이터 프리워밍 실패: %s", e)
+            logger.debug(traceback.format_exc())
+            self._send_notification(
+                f"[프리워밍 오류] {e}", level="CRITICAL"
+            )
+
     def _create_long_term_strategy(self, name: str):
         """전략 이름으로 장기 전략 인스턴스를 생성한다.
 
@@ -2313,16 +2951,49 @@ class TradingBot:
         """
         try:
             if name == "multi_factor":
-                from src.strategy.multi_factor import MultiFactorStrategy
-                return MultiFactorStrategy(
-                    factors=["value", "momentum"],
-                    weights=[0.5, 0.5],
-                    combine_method="zscore",
-                    num_stocks=7,
-                )
+                from src.strategy.strategy_config import create_multi_factor
+                return create_multi_factor("live", apply_market_timing=False)
             elif name == "three_factor":
                 from src.strategy.three_factor import ThreeFactorStrategy
-                return ThreeFactorStrategy(num_stocks=10)
+
+                tf_kwargs: dict = {"num_stocks": 10}
+
+                # low_volatility_factor 연동
+                if self.feature_flags.is_enabled("low_volatility_factor"):
+                    lv_cfg = self.feature_flags.get_config("low_volatility_factor")
+                    tf_kwargs["low_vol_weight"] = lv_cfg.get("weight", 0.15)
+                    tf_kwargs["low_vol_params"] = {
+                        "vol_period": lv_cfg.get("vol_period", 60),
+                    }
+
+                # sector_neutral 연동
+                if self.feature_flags.is_enabled("sector_neutral"):
+                    sn_cfg = self.feature_flags.get_config("sector_neutral")
+                    tf_kwargs["sector_neutral"] = True
+                    tf_kwargs["max_sector_pct"] = sn_cfg.get("max_sector_pct", 0.25)
+
+                # turnover_reduction 연동
+                if self.feature_flags.is_enabled("turnover_reduction"):
+                    tr_cfg = self.feature_flags.get_config("turnover_reduction")
+                    tf_kwargs["turnover_buffer"] = tr_cfg.get("buffer_size", 5)
+                    tf_kwargs["holding_bonus"] = tr_cfg.get("holding_bonus", 0.1)
+
+                # regime_meta_model 연동
+                if self.feature_flags.is_enabled("regime_meta_model"):
+                    try:
+                        from src.ml.regime_model import RuleBasedRegimeModel
+
+                        rm_cfg = self.feature_flags.get_config("regime_meta_model")
+                        factor_names = ["value", "momentum", "quality"]
+                        if tf_kwargs.get("low_vol_weight", 0) > 0:
+                            factor_names.append("low_vol")
+                        tf_kwargs["regime_model"] = RuleBasedRegimeModel(
+                            factor_names=factor_names,
+                        )
+                    except Exception as e:
+                        logger.warning("레짐 모델 초기화 실패: %s", e)
+
+                return ThreeFactorStrategy(**tf_kwargs)
             elif name == "shareholder_yield":
                 from src.strategy.shareholder_yield import ShareholderYieldStrategy
                 return ShareholderYieldStrategy(num_stocks=10)
@@ -2362,14 +3033,7 @@ class TradingBot:
         긴급 매도를 트리거한다.
 
         Feature Flag 'emergency_monitor'로 제어.
-
-        # 스케줄 등록 예시:
-        # scheduler.add_job(
-        #     self.emergency_monitor_check,
-        #     'interval',
-        #     minutes=30,
-        #     id='emergency_monitor',
-        # )
+        setup_schedule()에서 CronTrigger(minute="*/30", hour="9-15")로 등록됨.
         """
         if not self.feature_flags.is_enabled("emergency_monitor"):
             return
@@ -2399,11 +3063,21 @@ class TradingBot:
 
             price_shocks = []
             for h in holdings:
-                change_pct = float(h.get("change_pct", 0))
+                ticker = h.get("ticker", "")
+                if not ticker:
+                    continue
+                # get_balance()는 pnl_pct(매입 대비)만 제공하므로
+                # get_current_price()로 당일 등락률을 별도 조회한다.
+                try:
+                    price_info = self.kis_client.get_current_price(ticker)
+                    change_pct = float(price_info.get("change_pct", 0))
+                except Exception as e:
+                    logger.debug("종목 %s 현재가 조회 실패: %s", ticker, e)
+                    continue
                 if abs(change_pct) >= price_shock_pct:
                     price_shocks.append({
                         "name": h.get("name", ""),
-                        "ticker": h.get("ticker", ""),
+                        "ticker": ticker,
                         "change": change_pct,
                     })
             state["price_shocks"] = price_shocks
@@ -2480,12 +3154,14 @@ class TradingBot:
 
                     if has_critical and self.kis_client.is_configured():
                         self._send_notification(
-                            "[긴급 매도] CRITICAL 조건 감지 — "
-                            "자동 매도를 시도합니다.",
+                            "[긴급 알림] CRITICAL 조건 감지 — "
+                            "수동 매도 검토가 필요합니다.\n"
+                            "자동 매도는 미구현 상태입니다.",
                             level="CRITICAL",
                         )
                         logger.warning(
-                            "긴급 자동 매도 트리거 (auto_exit_enabled=True)"
+                            "긴급 CRITICAL 감지 (auto_exit_enabled=True, "
+                            "자동 매도 미구현 — 수동 조치 필요)"
                         )
             else:
                 logger.debug("긴급 모니터 정상: 이상 없음")
@@ -2514,7 +3190,7 @@ class TradingBot:
 
         self.scheduler.add_job(
             self.health_check,
-            CronTrigger(hour=8, minute=0, day_of_week="mon-fri"),
+            CronTrigger(hour=7, minute=10, day_of_week="mon-fri"),
             id="health_check",
             name="헬스 체크",
             misfire_grace_time=300,
@@ -2522,7 +3198,7 @@ class TradingBot:
 
         self.scheduler.add_job(
             self.premarket_check,
-            CronTrigger(hour=8, minute=50, day_of_week="mon-fri"),
+            CronTrigger(hour=7, minute=30, day_of_week="mon-fri"),
             id="premarket_check",
             name="장 전 시그널 체크",
             misfire_grace_time=300,
@@ -2635,6 +3311,15 @@ class TradingBot:
             misfire_grace_time=300,
         )
 
+        # 16:10 - 내일 시그널용 데이터 프리워밍 (15:45 KRX 피크타임 회피)
+        self.scheduler.add_job(
+            self.prewarm_strategy_cache,
+            CronTrigger(hour=16, minute=10, day_of_week="mon-fri"),
+            id="prewarm_cache",
+            name="데이터 프리워밍",
+            misfire_grace_time=300,
+        )
+
         # Phase 5-B: 단기 트레이딩 스케줄
         self.scheduler.add_job(
             self.short_term_scan,
@@ -2657,6 +3342,15 @@ class TradingBot:
             CronTrigger(hour=15, minute=20, day_of_week="mon-fri"),
             id="daytrading_close",
             name="데이트레이딩 청산",
+            misfire_grace_time=300,
+        )
+
+        # 긴급 리밸런싱 모니터 (장중 30분 간격)
+        self.scheduler.add_job(
+            self.emergency_monitor_check,
+            CronTrigger(minute="*/30", hour="9-15", day_of_week="mon-fri"),
+            id="emergency_monitor",
+            name="긴급 리밸런싱 모니터",
             misfire_grace_time=300,
         )
 
@@ -2739,16 +3433,9 @@ def main() -> None:
 
     # 전략 설정 (실제 운영 시 원하는 전략으로 교체)
     try:
-        from src.strategy.multi_factor import MultiFactorStrategy
+        from src.strategy.strategy_config import create_multi_factor
 
-        strategy = MultiFactorStrategy(
-            factors=["value", "momentum"],
-            weights=[0.5, 0.5],
-            combine_method="zscore",
-            num_stocks=7,
-            apply_market_timing=True,
-            turnover_penalty=0.1,
-        )
+        strategy = create_multi_factor("live")
         bot.set_strategy(strategy)
     except Exception as e:
         logger.warning("기본 전략 로드 실패: %s. 전략 없이 시작합니다.", e)
