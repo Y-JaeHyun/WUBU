@@ -47,16 +47,11 @@ def _init_api(auth_key: str) -> bool:
 
 
 def is_available() -> bool:
-    """KRX Open API 사용 가능 여부를 반환한다."""
-    global _initialized
-    if _initialized:
-        return True
+    """KRX Open API 사용 가능 여부를 반환한다.
 
-    key = os.environ.get("KRX_API_KEY", "").strip()
-    if not key:
-        return False
-
-    # feature flag 체크
+    feature flag ``krx_openapi`` 가 OFF이면 _initialized 여부와 무관하게 False.
+    """
+    # feature flag 체크 — 항상 우선 판정
     try:
         from src.utils.feature_flags import FeatureFlags
         ff = FeatureFlags()
@@ -64,6 +59,13 @@ def is_available() -> bool:
             return False
     except Exception:
         pass
+
+    if _initialized:
+        return True
+
+    key = os.environ.get("KRX_API_KEY", "").strip()
+    if not key:
+        return False
 
     return _init_api(key)
 
