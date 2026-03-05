@@ -474,12 +474,11 @@ class Backtest:
                     else:
                         truncated_prices[ticker] = df
 
-                truncated_index: dict[str, pd.DataFrame] = {}
-                for idx_name, df in index_prices.items():
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        truncated_index[idx_name] = df[df.index <= target]
-                    else:
-                        truncated_index[idx_name] = df
+                # index_prices는 pd.Series (지수 종가 시계열) — 미래 데이터 누출 방지
+                if isinstance(index_prices, pd.Series) and not index_prices.empty:
+                    truncated_index = index_prices[index_prices.index <= target]
+                else:
+                    truncated_index = index_prices
 
                 data = {
                     "fundamentals": fundamentals,

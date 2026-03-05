@@ -158,7 +158,7 @@ class TradingBot:
             )
             # PortfolioTracker의 고점을 DrawdownOverlay에 동기화 (재시작 시 보존)
             if self.portfolio_tracker.peak > 0:
-                self._drawdown_overlay._peak = self.portfolio_tracker.peak
+                self._drawdown_overlay.set_peak(self.portfolio_tracker.peak)
                 logger.info(
                     "DrawdownOverlay peak 동기화: %s",
                     f"{self.portfolio_tracker.peak:,.0f}",

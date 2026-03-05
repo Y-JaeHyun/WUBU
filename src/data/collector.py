@@ -57,10 +57,11 @@ def _retry_on_failure(_func=None, *, timeout=None, max_retries=None):
                 try:
                     future = pool.submit(func, *args, **kwargs)
                     result = future.result(timeout=effective_timeout)
-                    pool.shutdown(wait=False)
+                    pool.shutdown(wait=True, cancel_futures=True)
                     return result
                 except concurrent.futures.TimeoutError:
-                    pool.shutdown(wait=False)
+                    future.cancel()
+                    pool.shutdown(wait=False, cancel_futures=True)
                     last_exc = TimeoutError(
                         f"{func.__name__} timeout ({effective_timeout}s)"
                     )
@@ -72,7 +73,7 @@ def _retry_on_failure(_func=None, *, timeout=None, max_retries=None):
                         )
                         time.sleep(delay)
                 except Exception as e:
-                    pool.shutdown(wait=False)
+                    pool.shutdown(wait=False, cancel_futures=True)
                     last_exc = e
                     if attempt < effective_retries:
                         delay = _RETRY_DELAY * attempt
@@ -275,6 +276,8 @@ def get_fundamental(
         raise
 
 
+# timeout=120s: 전종목(~2700) 펀더멘탈 일괄 조회는 KRX 응답이 느려 기본 30s로 부족
+# max_retries=2: 120s × 3회 = 6분은 과도하므로 2회로 제한 (총 최대 ~4분)
 @_retry_on_failure(timeout=120, max_retries=2)
 def get_all_fundamentals(
     date: str,

@@ -40,6 +40,8 @@ MULTI_FACTOR_BASE: dict = {
 }
 
 # 프로필별 오버라이드 (BASE 위에 덮어씀)
+# live=7종목: 소규모 자본(~145만원)에서 종목당 최소 주문금액(7만원) 확보를 위해 축소
+# backtest=10종목: 충분한 분산 효과 측정을 위한 통계적 유의성 확보용
 MULTI_FACTOR_PROFILES: dict[str, dict] = {
     "live": {
         "num_stocks": 7,

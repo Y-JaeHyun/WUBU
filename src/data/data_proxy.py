@@ -76,6 +76,8 @@ class DataProxy:
                 return fallback_fn(*args, **kwargs)
 
         _with_fallback.__name__ = name
+        # wrapper를 인스턴스 __dict__에 캐싱하여 매 호출마다 재생성 방지
+        object.__getattribute__(self, "__dict__")[name] = _with_fallback
         return _with_fallback
 
 
