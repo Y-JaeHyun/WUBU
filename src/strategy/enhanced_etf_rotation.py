@@ -460,16 +460,17 @@ class EnhancedETFRotationStrategy(Strategy):
         # 7. 절대 모멘텀 필터
         raw_momentum = self._calculate_raw_momentum(etf_prices, lookback=63)
         final_risky = []
-        safe_count = 0
 
         for ticker in selected_tickers:
             raw_mom = raw_momentum.get(ticker, 0.0)
             if self.abs_momentum and raw_mom <= 0:
-                safe_count += 1
+                pass  # 절대 모멘텀 음수 → safe_asset으로 대체
             else:
                 final_risky.append(ticker)
 
-        total_slots = len(final_risky) + safe_count
+        # 비중 배분은 항상 num_etfs 기준 — 선정 종목 < target이면 남은 슬롯은 safe_asset
+        total_slots = max(self.num_etfs, len(final_risky))
+        safe_count = total_slots - len(final_risky)
         if total_slots == 0:
             return {self.safe_asset: 1.0}
 
@@ -484,7 +485,7 @@ class EnhancedETFRotationStrategy(Strategy):
             slot_weight = 1.0 / total_slots
             signals = {t: slot_weight for t in final_risky}
 
-        # 안전자산 비중 추가
+        # 안전자산 비중 추가 (필터로 비워진 슬롯 포함)
         if safe_count > 0:
             safe_portion = safe_count / total_slots
             signals[self.safe_asset] = signals.get(self.safe_asset, 0.0) + safe_portion
