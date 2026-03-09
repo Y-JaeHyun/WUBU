@@ -1863,3 +1863,68 @@ class TestMultiFactorScanLimit:
 
         assert not strategy._last_combined_scores.empty
         assert len(strategy._last_combined_scores) > 0
+
+
+# ===================================================================
+# 실시간 시그널 날짜 fallback 테스트
+# ===================================================================
+
+class TestLiveSignalsFallback:
+    """_generate_live_long_term_signals 날짜 fallback 검증."""
+
+    def _make_bot(self):
+        bot = _make_bot_with_flag(True)
+        mock_strategy = MagicMock()
+        mock_strategy.num_stocks = 7
+        mock_strategy._last_combined_scores = pd.Series(dtype=float)
+        bot._strategy = mock_strategy
+        return bot
+
+    @patch("src.scheduler.main.datetime")
+    def test_fallback_to_prev_trading_day(self, mock_dt):
+        """당일 데이터 비어있으면 전 거래일로 fallback한다."""
+        import datetime as dt
+
+        TradingBot = _import_trading_bot()
+        bot = self._make_bot()
+
+        # datetime.now() 설정
+        mock_now = dt.datetime(2026, 3, 9, 8, 31, tzinfo=None)
+        mock_dt.now.return_value = mock_now
+        mock_dt.strptime = dt.datetime.strptime
+
+        # 당일 데이터 → empty, 전 거래일 데이터 → 정상
+        empty_data = {
+            "fundamentals": pd.DataFrame(),
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        }
+        good_fund = pd.DataFrame({
+            "ticker": ["005930", "000660"],
+            "name": ["삼성전자", "SK하이닉스"],
+            "market_cap": [400e12, 90e12],
+        })
+        good_data = {
+            "fundamentals": good_fund,
+            "prices": {},
+            "index_prices": pd.Series(dtype=float),
+        }
+
+        call_count = {"n": 0}
+        def mock_collect(date_str):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return empty_data
+            return good_data
+
+        bot._collect_strategy_data = mock_collect
+        bot.holidays.prev_trading_day = MagicMock(
+            return_value=dt.date(2026, 3, 6)
+        )
+        bot._create_long_term_strategy = MagicMock(return_value=None)
+
+        TradingBot._generate_live_long_term_signals(bot, "multi_factor")
+
+        # 2번 호출: today → prev_trading_day
+        assert call_count["n"] == 2
+        bot.holidays.prev_trading_day.assert_called_once()

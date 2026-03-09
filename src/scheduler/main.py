@@ -2438,8 +2438,24 @@ class TradingBot:
         try:
             today_str = datetime.now(KST).strftime("%Y%m%d")
             strategy_data = self._collect_strategy_data(today_str)
+            data_date = today_str
 
             fund = strategy_data.get("fundamentals")
+            if fund is None or (hasattr(fund, "empty") and fund.empty):
+                # 당일 데이터 불완전 → 전 거래일 fallback
+                prev_day = self.holidays.prev_trading_day(
+                    datetime.now(KST).date()
+                )
+                prev_str = prev_day.strftime("%Y%m%d")
+                logger.info(
+                    "당일(%s) 펀더멘탈 미준비, 전 거래일(%s) fallback",
+                    today_str,
+                    prev_str,
+                )
+                strategy_data = self._collect_strategy_data(prev_str)
+                data_date = prev_str
+                fund = strategy_data.get("fundamentals")
+
             if fund is None or (hasattr(fund, "empty") and fund.empty):
                 logger.warning("실시간 프리뷰: 펀더멘탈 데이터 없음")
                 return None
@@ -2448,7 +2464,7 @@ class TradingBot:
             if strategy is None:
                 return None
 
-            signals = strategy.generate_signals(today_str, strategy_data)
+            signals = strategy.generate_signals(data_date, strategy_data)
             if not signals:
                 return None
 
