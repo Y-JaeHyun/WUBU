@@ -28,36 +28,47 @@ class RiskGuard:
         max_order_pct: 1건당 최대 비중 (기본 0.10 = 10%).
         max_daily_turnover: 일일 최대 회전율 (기본 0.30 = 30%).
         max_single_stock_pct: 개별종목 최대 비중 (기본 0.15 = 15%).
+        max_single_etf_pct: ETF 최대 비중 (기본 0.25 = 25%).
         blocked_tickers: 매매 금지 종목 리스트 (콤마 구분 문자열).
+        etf_tickers: ETF 종목코드 집합 (차등 비중 한도 적용).
 
     Attributes:
         max_order_pct: 1건당 최대 주문 비중.
         max_daily_turnover: 일일 최대 회전율.
         max_single_stock_pct: 개별종목 최대 비중.
+        max_single_etf_pct: ETF 최대 비중.
         blocked_tickers: 매매 금지 종목 코드 집합.
+        etf_tickers: ETF 종목코드 집합.
     """
 
     # 모의투자 기본 한도
     DEFAULT_MAX_ORDER_PCT = 0.10
     DEFAULT_MAX_DAILY_TURNOVER = 1.50
     DEFAULT_MAX_SINGLE_STOCK_PCT = 0.15
+    DEFAULT_MAX_SINGLE_ETF_PCT = 0.25
 
     # 실전투자 기본 한도
     # 월 1회 통합 리밸런싱: (매도+매수)/총액 기준 60~100% 정상 범위
     LIVE_MAX_ORDER_PCT = 0.05
     LIVE_MAX_DAILY_TURNOVER = 1.00
     LIVE_MAX_SINGLE_STOCK_PCT = 0.10
+    LIVE_MAX_SINGLE_ETF_PCT = 0.20
 
     def __init__(
-        self, config: Optional[dict] = None, is_live: bool = False
+        self,
+        config: Optional[dict] = None,
+        is_live: bool = False,
+        etf_tickers: Optional[set[str]] = None,
     ) -> None:
         """RiskGuard를 초기화한다.
 
         Args:
             config: 리스크 설정 딕셔너리. None이면 환경변수에서 로드.
                 keys: max_order_pct, max_daily_turnover,
-                      max_single_stock_pct, blocked_tickers
+                      max_single_stock_pct, max_single_etf_pct,
+                      blocked_tickers
             is_live: 실전 모드 여부. True이면 보수적 기본값 적용.
+            etf_tickers: ETF 종목코드 집합. 차등 비중 한도 적용에 사용.
         """
         cfg = config or {}
 
@@ -66,10 +77,12 @@ class RiskGuard:
             default_order = self.LIVE_MAX_ORDER_PCT
             default_turnover = self.LIVE_MAX_DAILY_TURNOVER
             default_single = self.LIVE_MAX_SINGLE_STOCK_PCT
+            default_etf = self.LIVE_MAX_SINGLE_ETF_PCT
         else:
             default_order = self.DEFAULT_MAX_ORDER_PCT
             default_turnover = self.DEFAULT_MAX_DAILY_TURNOVER
             default_single = self.DEFAULT_MAX_SINGLE_STOCK_PCT
+            default_etf = self.DEFAULT_MAX_SINGLE_ETF_PCT
 
         self.max_order_pct: float = float(
             cfg.get(
@@ -89,6 +102,15 @@ class RiskGuard:
                 os.getenv("RISK_MAX_SINGLE_STOCK_PCT", str(default_single)),
             )
         )
+        self.max_single_etf_pct: float = float(
+            cfg.get(
+                "max_single_etf_pct",
+                os.getenv("RISK_MAX_SINGLE_ETF_PCT", str(default_etf)),
+            )
+        )
+
+        # ETF 종목 집합 (차등 비중 한도)
+        self.etf_tickers: set[str] = set(etf_tickers) if etf_tickers else set()
 
         # 매매 금지 종목
         blocked_str = cfg.get(
@@ -107,10 +129,13 @@ class RiskGuard:
         logger.info(
             "RiskGuard 초기화 완료: "
             "max_order=%.1f%%, max_turnover=%.1f%%, "
-            "max_single_stock=%.1f%%, blocked=%d개",
+            "max_stock=%.1f%%, max_etf=%.1f%%, "
+            "etf=%d개, blocked=%d개",
             self.max_order_pct * 100,
             self.max_daily_turnover * 100,
             self.max_single_stock_pct * 100,
+            self.max_single_etf_pct * 100,
+            len(self.etf_tickers),
             len(self.blocked_tickers),
         )
 
@@ -249,6 +274,8 @@ class RiskGuard:
     ) -> tuple[bool, str]:
         """개별 종목의 비중 한도를 확인한다.
 
+        ETF 종목은 분산 자산이므로 별도의 (더 높은) 한도를 적용한다.
+
         Args:
             ticker: 종목코드.
             weight: 목표 비중 (0~1).
@@ -256,14 +283,27 @@ class RiskGuard:
         Returns:
             (통과 여부, 사유) 튜플.
         """
-        if weight > self.max_single_stock_pct:
+        is_etf = ticker in self.etf_tickers
+        limit = self.max_single_etf_pct if is_etf else self.max_single_stock_pct
+        label = "ETF" if is_etf else "개별종목"
+
+        if weight > limit:
             reason = (
-                f"개별종목 비중 초과: {ticker} "
-                f"({weight:.1%} > {self.max_single_stock_pct:.1%})"
+                f"{label} 비중 초과: {ticker} "
+                f"({weight:.1%} > {limit:.1%})"
             )
             logger.warning("리스크 거절: %s", reason)
             return False, reason
         return True, ""
+
+    def set_etf_tickers(self, tickers: set[str]) -> None:
+        """ETF 종목코드 집합을 갱신한다.
+
+        Args:
+            tickers: ETF 종목코드 집합.
+        """
+        self.etf_tickers = set(tickers)
+        logger.info("RiskGuard ETF 종목 갱신: %d개", len(self.etf_tickers))
 
     def _check_blocked_tickers(self, ticker: str) -> tuple[bool, str]:
         """매매 금지 종목인지 확인한다.

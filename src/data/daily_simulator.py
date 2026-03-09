@@ -78,7 +78,11 @@ class DailySimulator:
             try:
                 logger.info("시뮬레이션 시작: %s (%s)", name, date_formatted)
 
-                signals = self._generate_signals(strategy, date_str)
+                num_stocks = getattr(strategy, "num_stocks", 7)
+                scan_limit = num_stocks * 2
+                signals = self._generate_signals(
+                    strategy, date_str, scan_limit=scan_limit
+                )
                 if not signals:
                     logger.warning("전략 '%s': 시그널 없음", name)
                     continue
@@ -483,17 +487,30 @@ class DailySimulator:
     # 내부 헬퍼
     # ------------------------------------------------------------------
 
-    def _generate_signals(self, strategy: Any, date_str: str) -> dict:
+    def _generate_signals(
+        self,
+        strategy: Any,
+        date_str: str,
+        scan_limit: int | None = None,
+    ) -> dict:
         """전략 시그널을 생성한다.
 
         strategy_data(fundamentals/prices/index_prices)를 기본으로 전달하고,
         ETF 전략인 경우 etf_prices를 추가 주입한다.
+
+        Args:
+            strategy: 전략 인스턴스.
+            date_str: 날짜 ('YYYYMMDD').
+            scan_limit: 후보 확장 스캔 수. None이면 전략 기본값 사용.
         """
         try:
             data = dict(self.strategy_data)
             if hasattr(strategy, "etf_universe") and self.etf_prices:
                 data["etf_prices"] = self.etf_prices
-            return strategy.generate_signals(date_str, data)
+            kwargs: dict = {}
+            if scan_limit is not None:
+                kwargs["scan_limit"] = scan_limit
+            return strategy.generate_signals(date_str, data, **kwargs)
         except Exception as e:
             logger.warning("시그널 생성 실패: %s", e)
             return {}

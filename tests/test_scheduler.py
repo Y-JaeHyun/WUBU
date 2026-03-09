@@ -1870,7 +1870,11 @@ class TestMultiFactorScanLimit:
 # ===================================================================
 
 class TestLiveSignalsFallback:
-    """_generate_live_long_term_signals 날짜 fallback 검증."""
+    """_generate_live_long_term_signals T-1 데이터 사용 검증.
+
+    premarket_check / execute_rebalance 와 동일하게
+    항상 T-1(전 거래일) 데이터를 사용해야 한다.
+    """
 
     def _make_bot(self):
         bot = _make_bot_with_flag(True)
@@ -1881,8 +1885,8 @@ class TestLiveSignalsFallback:
         return bot
 
     @patch("src.scheduler.main.datetime")
-    def test_fallback_to_prev_trading_day(self, mock_dt):
-        """당일 데이터 비어있으면 전 거래일로 fallback한다."""
+    def test_always_uses_t_minus_1(self, mock_dt):
+        """항상 T-1 데이터를 사용한다 (premarket_check과 동일)."""
         import datetime as dt
 
         TradingBot = _import_trading_bot()
@@ -1893,12 +1897,6 @@ class TestLiveSignalsFallback:
         mock_dt.now.return_value = mock_now
         mock_dt.strptime = dt.datetime.strptime
 
-        # 당일 데이터 → empty, 전 거래일 데이터 → 정상
-        empty_data = {
-            "fundamentals": pd.DataFrame(),
-            "prices": {},
-            "index_prices": pd.Series(dtype=float),
-        }
         good_fund = pd.DataFrame({
             "ticker": ["005930", "000660"],
             "name": ["삼성전자", "SK하이닉스"],
@@ -1910,21 +1908,24 @@ class TestLiveSignalsFallback:
             "index_prices": pd.Series(dtype=float),
         }
 
-        call_count = {"n": 0}
+        collected_dates = []
         def mock_collect(date_str):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return empty_data
+            collected_dates.append(date_str)
             return good_data
 
         bot._collect_strategy_data = mock_collect
         bot.holidays.prev_trading_day = MagicMock(
             return_value=dt.date(2026, 3, 6)
         )
-        bot._create_long_term_strategy = MagicMock(return_value=None)
+        # strategy.generate_signals 반환값
+        bot._strategy.generate_signals.return_value = {
+            "005930": 0.5, "000660": 0.5
+        }
+        bot.allocator = None  # 매수가능 필터 스킵
 
         TradingBot._generate_live_long_term_signals(bot, "multi_factor")
 
-        # 2번 호출: today → prev_trading_day
-        assert call_count["n"] == 2
+        # T-1 1회만 호출 (today 시도 없음)
+        assert len(collected_dates) == 1
+        assert collected_dates[0] == "20260306"
         bot.holidays.prev_trading_day.assert_called_once()
