@@ -425,3 +425,36 @@ class TestGetAllFundamentals:
 
         assert isinstance(df, pd.DataFrame)
         assert df.empty
+
+    @patch("src.data.collector.pykrx_stock")
+    def test_empty_when_all_market_cap_zero(self, mock_pykrx):
+        """시가총액이 전부 0이면 빈 DataFrame을 반환한다 (장 전 불완전 데이터)."""
+        fund_df = pd.DataFrame(
+            {
+                "BPS": [45000, 30000],
+                "PER": [12.5, 8.0],
+                "PBR": [1.5, 0.8],
+                "EPS": [5600, 3800],
+                "DIV": [2.1, 3.5],
+                "DPS": [1444, 1000],
+            },
+            index=pd.Index(["005930", "000660"], name="티커"),
+        )
+        cap_df = pd.DataFrame(
+            {
+                "종가": [0, 0],
+                "시가총액": [0, 0],
+                "거래량": [0, 0],
+                "거래대금": [0, 0],
+                "상장주식수": [5_969_782_550, 728_002_365],
+            },
+            index=pd.Index(["005930", "000660"], name="티커"),
+        )
+        mock_pykrx.get_market_fundamental.return_value = fund_df
+        mock_pykrx.get_market_cap.return_value = cap_df
+        mock_pykrx.get_market_ticker_name.side_effect = lambda t: "테스트"
+
+        df = get_all_fundamentals("20240102", market="KOSPI")
+
+        assert isinstance(df, pd.DataFrame)
+        assert df.empty, "market_cap 전부 0이면 빈 DataFrame이어야 한다"

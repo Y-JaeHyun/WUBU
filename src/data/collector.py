@@ -363,6 +363,18 @@ def get_all_fundamentals(
         col_order = [c for c in col_order if c in df.columns]
         df = df[col_order]
 
+        # Sanity check: 시가총액이 거의 전부 0이면 장 시작 전 불완전 데이터
+        if "market_cap" in df.columns and len(df) > 0:
+            valid_cap_ratio = (df["market_cap"] > 0).sum() / len(df)
+            if valid_cap_ratio < 0.05:
+                logger.warning(
+                    "펀더멘탈 데이터 불완전: market_cap 유효 비율 %.1f%% (%s). "
+                    "빈 DataFrame 반환.",
+                    valid_cap_ratio * 100,
+                    d,
+                )
+                return pd.DataFrame()
+
         logger.info(f"전 종목 기본 지표 조회 완료: {len(df)}개 종목")
         return df
 
