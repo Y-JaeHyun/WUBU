@@ -796,8 +796,8 @@ class TradingBot:
                 f"매수 가능 종목 {len(selected)}개 (최소 {min_stocks}개 미달)"
             )
 
-        # 동일 비중 재할당
-        weight = 1.0 / len(selected)
+        # 고정 슬롯 기준 비중 배분 — 선정 종목 < target이면 나머지는 현금 유지
+        weight = 1.0 / target_num_stocks
         filtered = {ticker: weight for ticker in selected}
 
         if excluded_reasons:

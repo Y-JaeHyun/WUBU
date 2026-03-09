@@ -293,26 +293,7 @@ class RebalanceExecutor:
                     "skipped": [],
                 }
 
-        # 1. 리스크 검증
-        risk_passed, risk_warnings = self.risk_guard.check_rebalance(target_weights)
-        if not risk_passed:
-            msg = f"리스크 검증 실패: {risk_warnings}"
-            logger.error(msg)
-            return {
-                "success": False,
-                "errors": [msg],
-                "sells": [],
-                "buys": [],
-                "total_sell_amount": 0,
-                "total_buy_amount": 0,
-                "skipped": [],
-            }
-
-        if risk_warnings:
-            for w in risk_warnings:
-                logger.warning("리스크 경고: %s", w)
-
-        # 2. 리밸런싱 주문 계산 (allocator가 있으면 풀 비중으로 스케일링)
+        # 1. allocator 스케일링 (있으면 풀 비중으로 조정)
         effective_weights = target_weights
         if self.allocator is not None:
             if pool == "etf_rotation":
@@ -330,11 +311,33 @@ class RebalanceExecutor:
                 sum(effective_weights.values()),
             )
 
+        # 2. 리스크 검증 (allocator 스케일링 후 최종 비중 기준)
+        risk_passed, risk_warnings = self.risk_guard.check_rebalance(
+            effective_weights
+        )
+        if not risk_passed:
+            msg = f"리스크 검증 실패: {risk_warnings}"
+            logger.error(msg)
+            return {
+                "success": False,
+                "errors": [msg],
+                "sells": [],
+                "buys": [],
+                "total_sell_amount": 0,
+                "total_buy_amount": 0,
+                "skipped": [],
+            }
+
+        if risk_warnings:
+            for w in risk_warnings:
+                logger.warning("리스크 경고: %s", w)
+
+        # 3. 리밸런싱 주문 계산
         sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
             effective_weights, allocator=self.allocator, pool=pool
         )
 
-        # 3. 주문 배치 실행
+        # 4. 주문 배치 실행
         return self._execute_order_batch(sell_orders, buy_orders)
 
     def dry_run(
@@ -383,14 +386,7 @@ class RebalanceExecutor:
             logger.warning("DRY RUN: 포트폴리오 가치가 0원입니다.")
             return result
 
-        # 리스크 검증
-        risk_passed, risk_warnings = self.risk_guard.check_rebalance(target_weights)
-        result["risk_check"] = {
-            "passed": risk_passed,
-            "warnings": risk_warnings,
-        }
-
-        # 리밸런싱 주문 계산 (allocator가 있으면 풀 비중으로 스케일링)
+        # allocator 스케일링 (있으면 풀 비중으로 조정)
         effective_weights = target_weights
         if self.allocator is not None:
             if pool == "etf_rotation":
@@ -407,6 +403,15 @@ class RebalanceExecutor:
                 sum(target_weights.values()),
                 sum(effective_weights.values()),
             )
+
+        # 리스크 검증 (allocator 스케일링 후 최종 비중 기준)
+        risk_passed, risk_warnings = self.risk_guard.check_rebalance(
+            effective_weights
+        )
+        result["risk_check"] = {
+            "passed": risk_passed,
+            "warnings": risk_warnings,
+        }
 
         sell_orders, buy_orders = self.position_manager.calculate_rebalance_orders(
             effective_weights, allocator=self.allocator, pool=pool

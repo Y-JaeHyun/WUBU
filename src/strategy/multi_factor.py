@@ -546,8 +546,8 @@ class MultiFactorStrategy(Strategy):
             logger.warning(f"집중도 필터 후 후보 종목 없음 ({date})")
             return {}
 
-        # 동일 비중 할당
-        weight = 1.0 / len(top)
+        # 고정 슬롯 기준 비중 할당 — 선정 종목 < num_stocks이면 나머지는 현금 유지
+        weight = 1.0 / max(len(top), self.num_stocks)
         signals = {ticker: weight for ticker in top.index}
 
         # 마켓 타이밍 오버레이 적용
