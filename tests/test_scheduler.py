@@ -1752,7 +1752,7 @@ class TestFilterAffordableSignals:
         assert bot._last_long_signals == {"005930": 0.5, "000660": 0.5}
 
     def test_reweights_equally(self):
-        """필터 후 동일 비중이 재할당된다."""
+        """필터 후 고정 슬롯 기준 비중이 재할당된다."""
         bot = self._make_bot()
         signals = {
             "A001": 0.2, "A002": 0.2, "A003": 0.2,
@@ -1767,10 +1767,11 @@ class TestFilterAffordableSignals:
             signals, {"prices": prices}, 70000, 7,
         )
 
-        # 4개 남으면 각 25%
+        # 4개 남으면 각 1/7 (고정 슬롯) — 미달 슬롯은 현금 유지
         assert len(filtered) == 4
+        expected_weight = 1.0 / 7
         for w in filtered.values():
-            assert abs(w - 0.25) < 1e-9
+            assert abs(w - expected_weight) < 1e-9
 
     def test_no_price_data_passes(self):
         """가격 데이터 없는 종목은 필터 통과한다."""
