@@ -100,7 +100,7 @@ class TradingBot:
         # KIS 클라이언트 및 실행기 (모드별 리스크 한도 자동 적용)
         self.kis_client: KISClient = KISClient()
         self.risk_guard: RiskGuard = RiskGuard(
-            is_live=not self.kis_client.is_paper
+            is_live=not self.kis_client.is_paper,
         )
         self.executor: RebalanceExecutor = RebalanceExecutor(
             self.kis_client, self.risk_guard
@@ -136,6 +136,11 @@ class TradingBot:
         self.commander.register_command("/balance", self._cmd_balance)
         self.stock_reviewer: StockReviewer = StockReviewer()
         self.night_researcher: NightResearcher = NightResearcher()
+
+        # ETF 유니버스를 RiskGuard에 등록 (차등 비중 한도)
+        etf_tickers = self._get_etf_universe_tickers()
+        if etf_tickers:
+            self.risk_guard.set_etf_tickers(etf_tickers)
 
         # 오버레이 (feature flag 기반 초기화)
         self._drawdown_overlay = None

@@ -599,6 +599,80 @@ class TestDualTradingMode:
         assert live_rg.max_daily_turnover < paper_rg.max_daily_turnover
         assert live_rg.max_single_stock_pct < paper_rg.max_single_stock_pct
 
+    def test_etf_higher_weight_limit(self):
+        """ETF 종목은 개별주식보다 높은 비중 한도를 적용한다."""
+        RiskGuard = _import_risk_guard()
+
+        etf_tickers = {"069500", "371460", "132030"}
+        rg = RiskGuard(
+            is_live=True,
+            etf_tickers=etf_tickers,
+        )
+
+        # ETF 12.3% → 실전 ETF 한도 20% 이내 → 통과
+        target = {"069500": 0.123, "371460": 0.101, "005930": 0.076}
+        passed, warnings = rg.check_rebalance(target)
+        assert passed is True, f"ETF 12.3%는 통과해야 합니다: {warnings}"
+
+    def test_etf_exceeds_etf_limit(self):
+        """ETF도 ETF 한도를 초과하면 거부된다."""
+        RiskGuard = _import_risk_guard()
+
+        etf_tickers = {"069500"}
+        rg = RiskGuard(
+            is_live=True,
+            etf_tickers=etf_tickers,
+        )
+
+        # ETF 25% → 실전 ETF 한도 20% 초과 → 거부
+        target = {"069500": 0.25}
+        passed, warnings = rg.check_rebalance(target)
+        assert passed is False, "ETF 25%는 거부되어야 합니다"
+        assert any("ETF 비중 초과" in w for w in warnings)
+
+    def test_stock_still_blocked_at_stock_limit(self):
+        """주식 종목은 ETF 한도가 아닌 주식 한도가 적용된다."""
+        RiskGuard = _import_risk_guard()
+
+        etf_tickers = {"069500"}
+        rg = RiskGuard(
+            is_live=True,
+            etf_tickers=etf_tickers,
+        )
+
+        # 주식 12% → 실전 주식 한도 10% 초과 → 거부
+        target = {"005930": 0.12}
+        passed, warnings = rg.check_rebalance(target)
+        assert passed is False, "주식 12%는 거부되어야 합니다"
+        assert any("개별종목 비중 초과" in w for w in warnings)
+
+    def test_set_etf_tickers(self):
+        """set_etf_tickers로 ETF 목록을 갱신할 수 있다."""
+        RiskGuard = _import_risk_guard()
+
+        rg = RiskGuard(is_live=True)
+
+        # 초기: ETF 미등록 → 주식 한도 적용 → 12% 거부
+        target = {"069500": 0.12}
+        passed, _ = rg.check_rebalance(target)
+        assert passed is False
+
+        # ETF 등록 후 → ETF 한도 적용 → 12% 통과
+        rg.set_etf_tickers({"069500"})
+        passed, _ = rg.check_rebalance(target)
+        assert passed is True
+
+    def test_live_etf_defaults(self):
+        """실전/모의 모드별 ETF 한도 기본값이 다르다."""
+        RiskGuard = _import_risk_guard()
+
+        paper_rg = RiskGuard()
+        live_rg = RiskGuard(is_live=True)
+
+        assert live_rg.max_single_etf_pct < paper_rg.max_single_etf_pct
+        assert live_rg.max_single_etf_pct == 0.20
+        assert paper_rg.max_single_etf_pct == 0.25
+
 
 # ===================================================================
 # 토큰 자동 재발급 테스트
