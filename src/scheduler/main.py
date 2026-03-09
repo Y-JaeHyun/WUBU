@@ -2434,39 +2434,60 @@ class TradingBot:
     def _generate_live_long_term_signals(
         self, strategy_name: str,
     ) -> Optional[dict]:
-        """실시간으로 장기 전략 시그널을 생성한다."""
+        """실시간으로 장기 전략 시그널을 생성한다.
+
+        premarket_check / execute_rebalance 와 동일한 조건으로 시그널을 생성하여
+        /balance 프리뷰 결과가 장전 시그널·리밸런싱 실행 결과와 일치하도록 한다.
+
+        통일 조건:
+        - 데이터 날짜: T-1 (전 거래일)
+        - scan_limit: num_stocks * 2
+        - 매수가능성 필터 적용
+        - 메인 전략 인스턴스 사용 (turnover penalty 유지)
+        """
         try:
-            today_str = datetime.now(KST).strftime("%Y%m%d")
-            strategy_data = self._collect_strategy_data(today_str)
-            data_date = today_str
+            today = datetime.now(KST).date()
+
+            # 1. T-1 데이터 (premarket_check과 동일)
+            prev_day = self.holidays.prev_trading_day(today)
+            data_date = prev_day.strftime("%Y%m%d")
+            logger.info(
+                "실시간 프리뷰 데이터 수집 (기준일: %s, T-1)", data_date
+            )
+            strategy_data = self._collect_strategy_data(data_date)
 
             fund = strategy_data.get("fundamentals")
-            if fund is None or (hasattr(fund, "empty") and fund.empty):
-                # 당일 데이터 불완전 → 전 거래일 fallback
-                prev_day = self.holidays.prev_trading_day(
-                    datetime.now(KST).date()
-                )
-                prev_str = prev_day.strftime("%Y%m%d")
-                logger.info(
-                    "당일(%s) 펀더멘탈 미준비, 전 거래일(%s) fallback",
-                    today_str,
-                    prev_str,
-                )
-                strategy_data = self._collect_strategy_data(prev_str)
-                data_date = prev_str
-                fund = strategy_data.get("fundamentals")
-
             if fund is None or (hasattr(fund, "empty") and fund.empty):
                 logger.warning("실시간 프리뷰: 펀더멘탈 데이터 없음")
                 return None
 
-            strategy = self._create_long_term_strategy(strategy_name)
+            # 2. 전략 인스턴스: self._strategy 우선 (turnover penalty 유지)
+            strategy = self._strategy
+            if strategy is None:
+                strategy = self._create_long_term_strategy(strategy_name)
             if strategy is None:
                 return None
 
-            signals = strategy.generate_signals(data_date, strategy_data)
+            # 3. scan_limit 적용 (premarket_check과 동일)
+            num_stocks = getattr(strategy, "num_stocks", 7)
+            scan_limit = num_stocks * 2
+            date_str = today.strftime("%Y%m%d")
+            signals = strategy.generate_signals(
+                date_str, strategy_data, scan_limit=scan_limit
+            )
             if not signals:
                 return None
+
+            # 4. 매수가능성 필터 (premarket_check과 동일)
+            if self.allocator:
+                pool_budget = self.allocator.get_long_term_budget()
+                if pool_budget > 0:
+                    signals, _ = self._filter_affordable_signals(
+                        signals, strategy_data, pool_budget, num_stocks
+                    )
+                    if not signals:
+                        logger.warning("실시간 프리뷰: 매수가능 종목 없음")
+                        return None
 
             # DailySimulator와 동일한 포맷으로 변환
             sorted_items = sorted(
@@ -2753,16 +2774,21 @@ class TradingBot:
             simulator = DailySimulator()
 
             # 전략 인스턴스 생성
+            # primary 전략은 self._strategy 우선 사용 (premarket_check과 동일 조건)
             config = self.feature_flags.get_config("daily_simulation")
+            primary_strategy = config.get("primary_strategy", "multi_factor")
             strategy_names = config.get(
                 "strategies", ["multi_factor", "three_factor"]
             )
             strategies = {}
             for name in strategy_names:
                 try:
-                    strategy = self._create_long_term_strategy(name)
-                    if strategy:
-                        strategies[name] = strategy
+                    if name == primary_strategy and self._strategy is not None:
+                        strategies[name] = self._strategy
+                    else:
+                        strategy = self._create_long_term_strategy(name)
+                        if strategy:
+                            strategies[name] = strategy
                 except Exception as e:
                     logger.warning("시뮬레이션 전략 생성 실패 (%s): %s", name, e)
 
@@ -2786,6 +2812,49 @@ class TradingBot:
                 )
 
             result = simulator.run_daily_simulation()
+
+            # 매수가능성 필터: 장기 전략 결과에 적용 (premarket_check과 동일)
+            if self.allocator and primary_strategy in result:
+                try:
+                    sim_data = result[primary_strategy]
+                    raw_signals = {
+                        item["ticker"]: item["weight"]
+                        for item in sim_data.get("selected", [])
+                    }
+                    if raw_signals:
+                        pool_budget = self.allocator.get_long_term_budget()
+                        primary_strat = strategies.get(primary_strategy)
+                        num_stocks = getattr(primary_strat, "num_stocks", 7)
+                        filtered, _ = self._filter_affordable_signals(
+                            raw_signals, strategy_data, pool_budget, num_stocks
+                        )
+                        if filtered:
+                            # 필터된 결과로 selected 재구성
+                            fund = strategy_data.get("fundamentals")
+                            name_map: dict[str, str] = {}
+                            if fund is not None and not fund.empty:
+                                if "ticker" in fund.columns and "name" in fund.columns:
+                                    name_map = dict(zip(fund["ticker"], fund["name"]))
+                            new_selected = []
+                            for rank, (t, w) in enumerate(
+                                sorted(filtered.items(), key=lambda x: x[1], reverse=True), 1
+                            ):
+                                new_selected.append({
+                                    "ticker": t,
+                                    "name": name_map.get(t, t),
+                                    "weight": w,
+                                    "rank": rank,
+                                })
+                            sim_data["selected"] = new_selected
+                            sim_data["universe_size"] = len(raw_signals)
+                            # 캐시 갱신
+                            date_fmt = sim_data.get("date", "")
+                            if date_fmt:
+                                simulator.save_selection(
+                                    date_fmt, primary_strategy, sim_data
+                                )
+                except Exception as e:
+                    logger.debug("시뮬레이션 매수가능 필터 실패: %s", e)
 
             # Dry-run: 현재 포트폴리오 대비 매수/매도 예상
             if self.kis_client.is_configured():
@@ -2968,7 +3037,7 @@ class TradingBot:
         try:
             if name == "multi_factor":
                 from src.strategy.strategy_config import create_multi_factor
-                return create_multi_factor("live", apply_market_timing=False)
+                return create_multi_factor("live")
             elif name == "three_factor":
                 from src.strategy.three_factor import ThreeFactorStrategy
 
