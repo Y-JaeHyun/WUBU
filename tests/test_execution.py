@@ -309,6 +309,40 @@ class TestRiskGuard:
             f"max_order_pct 초과 주문이 거부되어야 합니다: {msg}"
         )
 
+    def test_rebalance_order_uses_holding_limit(self):
+        """리밸런싱 주문은 보유 비중 한도를 적용한다."""
+        RiskGuard = _import_risk_guard()
+        # 실전: max_order_pct=5%, max_single_stock_pct=10%
+        rg = RiskGuard(is_live=True)
+
+        # 포트폴리오 130만, 주문 13만 (10%) → 일반주문이면 5% 초과로 거부
+        order = {"ticker": "004990", "amount": 130_000, "side": "buy"}
+        portfolio_value = 1_300_000
+
+        # 일반 주문: 거부
+        passed, _ = rg.check_order(order, portfolio_value, is_rebalance=False)
+        assert passed is False, "일반 주문 10%는 5% 한도 초과로 거부"
+
+        # 리밸런싱 주문: 통과 (10% ≤ 주식 한도 10%)
+        passed, _ = rg.check_order(order, portfolio_value, is_rebalance=True)
+        assert passed is True, "리밸런싱 주문 10%는 보유 한도 10% 이내 통과"
+
+    def test_rebalance_order_etf_uses_etf_limit(self):
+        """리밸런싱 ETF 주문은 ETF 비중 한도를 적용한다."""
+        RiskGuard = _import_risk_guard()
+        rg = RiskGuard(is_live=True, etf_tickers={"132030"})
+
+        # ETF 15% 주문 → 리밸런싱이면 ETF 한도 20% 이내 통과
+        order = {"ticker": "132030", "amount": 195_000, "side": "buy"}
+        portfolio_value = 1_300_000  # 15%
+
+        passed, _ = rg.check_order(order, portfolio_value, is_rebalance=True)
+        assert passed is True, "리밸런싱 ETF 15%는 ETF 한도 20% 이내 통과"
+
+        # 일반 주문: 거부 (15% > 5%)
+        passed, _ = rg.check_order(order, portfolio_value, is_rebalance=False)
+        assert passed is False, "일반 ETF 15%는 5% 초과로 거부"
+
     def test_check_single_stock_limit(self):
         """단일 종목 비중 제한이 동작한다."""
         RiskGuard = _import_risk_guard()
