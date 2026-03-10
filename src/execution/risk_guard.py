@@ -140,7 +140,10 @@ class RiskGuard:
         )
 
     def check_order(
-        self, order: dict, portfolio_value: int
+        self,
+        order: dict,
+        portfolio_value: int,
+        is_rebalance: bool = False,
     ) -> tuple[bool, str]:
         """단일 주문을 검증한다.
 
@@ -148,6 +151,8 @@ class RiskGuard:
             order: 주문 딕셔너리.
                 keys: ticker, side, qty, price (또는 amount).
             portfolio_value: 현재 포트폴리오 총 가치 (원).
+            is_rebalance: 리밸런싱 주문 여부. True이면 check_rebalance에서
+                이미 전체 비중을 검증했으므로 보유 비중 한도를 적용한다.
 
         Returns:
             (통과 여부, 사유) 튜플.
@@ -170,10 +175,24 @@ class RiskGuard:
 
             if order_amount > 0:
                 order_pct = order_amount / portfolio_value
-                if order_pct > self.max_order_pct:
+
+                # 리밸런싱: check_rebalance로 전체 비중 검증 완료 →
+                # 보유 비중 한도(ETF/주식 차등) 적용
+                if is_rebalance:
+                    is_etf = ticker in self.etf_tickers
+                    limit = (
+                        self.max_single_etf_pct
+                        if is_etf
+                        else self.max_single_stock_pct
+                    )
+                else:
+                    limit = self.max_order_pct
+
+                if order_pct > limit:
+                    label = "리밸런싱" if is_rebalance else "단일"
                     reason = (
-                        f"단일 주문 비중 초과: {ticker} "
-                        f"({order_pct:.1%} > {self.max_order_pct:.1%})"
+                        f"{label} 주문 비중 초과: {ticker} "
+                        f"({order_pct:.1%} > {limit:.1%})"
                     )
                     logger.warning("리스크 거절: %s", reason)
                     return False, reason

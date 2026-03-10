@@ -138,7 +138,7 @@ class RebalanceExecutor:
         )
         for order_spec in sell_orders:
             order_passed, order_reason = self.risk_guard.check_order(
-                order_spec, portfolio_value
+                order_spec, portfolio_value, is_rebalance=True
             )
             if not order_passed:
                 result["skipped"].append(
@@ -175,7 +175,7 @@ class RebalanceExecutor:
         )
         for order_spec in buy_orders:
             order_passed, order_reason = self.risk_guard.check_order(
-                order_spec, portfolio_value
+                order_spec, portfolio_value, is_rebalance=True
             )
             if not order_passed:
                 result["skipped"].append(
