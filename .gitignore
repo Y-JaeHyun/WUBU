@@ -56,8 +56,4 @@ output/
 reports/
 
 # Ralph Loop (개발 워크플로우 도구, 로컬 전용)
-AGENTS.md
-PROMPT_*.md
-IMPLEMENTATION_PLAN.md
-loop.sh
-specs/
+ralph/
