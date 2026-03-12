@@ -464,6 +464,41 @@ class TestFormatEodNews:
         assert "[보유종목 관련]" not in result
         assert "[관심종목 관련]" not in result
 
+    def test_scope_filter_hides_other_news(self, collector, sample_disclosures):
+        """scope_filter=True이면 기타 공시가 표시되지 않는다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(
+            disclosures=important,
+            holdings=["005930"],
+            watchlist=[],
+            scope_filter=True,
+        )
+        assert "[보유종목 관련]" in result
+        assert "[기타 주요 공시]" not in result
+
+    def test_scope_filter_no_match_shows_message(self, collector, sample_disclosures):
+        """scope_filter=True이고 매칭 공시 없으면 안내 메시지를 표시한다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(
+            disclosures=important,
+            holdings=["999888"],
+            watchlist=["999777"],
+            scope_filter=True,
+        )
+        assert "보유/관심 종목 관련 공시 없음" in result
+
+    def test_scope_filter_false_shows_all(self, collector, sample_disclosures):
+        """scope_filter=False이면 기존과 동일하게 기타 공시도 표시된다."""
+        important = collector.filter_important(sample_disclosures)
+        result = collector.format_eod_news(
+            disclosures=important,
+            holdings=["005930"],
+            watchlist=[],
+            scope_filter=False,
+        )
+        assert "[보유종목 관련]" in result
+        assert "[기타 주요 공시]" in result
+
 
 # ===================================================================
 # _categorize() 테스트

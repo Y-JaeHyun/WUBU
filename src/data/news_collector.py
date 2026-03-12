@@ -490,6 +490,7 @@ class NewsCollector:
         disclosures: Optional[list[dict[str, Any]]] = None,
         holdings: Optional[list[str]] = None,
         watchlist: Optional[list[str]] = None,
+        scope_filter: bool = False,
     ) -> str:
         """15:40 장 마감 뉴스를 생성한다.
 
@@ -500,6 +501,7 @@ class NewsCollector:
             disclosures: 공시 리스트. None이면 자동 수집.
             holdings: 보유 종목코드(stock_code) 리스트.
             watchlist: 전략 시그널 상위 종목코드 리스트 (관심종목).
+            scope_filter: True이면 보유/관심 종목 공시만 표시 (기타 제외).
 
         Returns:
             포매팅된 장 마감 뉴스.
@@ -562,10 +564,13 @@ class NewsCollector:
             for disc in watchlist_news:
                 lines.append(self._format_disc_with_sentiment(disc, tag="관심"))
 
-        if other_news:
+        if other_news and not scope_filter:
             lines.append(f"\n[기타 주요 공시] {len(other_news)}건")
             for disc in other_news[:10]:
                 lines.append(self._format_disc_with_sentiment(disc))
+
+        if scope_filter and not holding_news and not watchlist_news:
+            lines.append("보유/관심 종목 관련 공시 없음")
 
         return "\n".join(lines)
 

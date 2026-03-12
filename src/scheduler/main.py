@@ -2668,6 +2668,33 @@ class TradingBot:
             from src.data.news_collector import NewsCollector
             collector = NewsCollector()
             disclosures = collector.fetch_recent_disclosures(days=1)
+            important = collector.filter_important(disclosures)
+
+            # scope 필터: 보유/관심 종목만 표시
+            news_config = self.feature_flags.get_config("news_collector")
+            if news_config.get("scope_filter", False):
+                holding_tickers: list[str] = []
+                if self.kis_client.is_configured():
+                    try:
+                        balance = self.kis_client.get_balance()
+                        raw_holdings = balance.get("holdings", [])
+                        holding_tickers = [
+                            h.get("ticker", "") for h in raw_holdings
+                            if h.get("ticker")
+                        ]
+                    except Exception:
+                        pass
+                watchlist_tickers: list[str] = []
+                try:
+                    watchlist_tickers = self._collect_eod_watchlist()
+                except Exception:
+                    pass
+                scope_set = set(holding_tickers) | set(watchlist_tickers)
+                if scope_set:
+                    important = [
+                        d for d in important
+                        if d.get("stock_code", "") in scope_set
+                    ]
 
             # 매크로 데이터 추가
             macro_summary = None
@@ -2680,7 +2707,7 @@ class TradingBot:
                     logger.warning("매크로 데이터 수집 실패: %s", e)
 
             text = collector.format_morning_checklist(
-                disclosures, macro_data=macro_summary
+                important, macro_data=macro_summary
             )
             self._send_notification(text)
             logger.info("오전 뉴스 체크리스트 발송 완료")
@@ -2726,8 +2753,11 @@ class TradingBot:
             except Exception:
                 logger.debug("EOD 관심종목 수집 실패", exc_info=True)
 
+            news_config = self.feature_flags.get_config("news_collector")
+            scope_filter = news_config.get("scope_filter", False)
             text = collector.format_eod_news(
-                disclosures, holding_tickers, watchlist_tickers
+                disclosures, holding_tickers, watchlist_tickers,
+                scope_filter=scope_filter,
             )
             self._send_notification(text)
             logger.info("장마감 뉴스 요약 발송 완료")
@@ -3206,20 +3236,24 @@ class TradingBot:
                     h.get("name", "") for h in holdings
                 }
 
+                important = collector.filter_important(disclosures)
                 portfolio_disclosures = []
-                for d in disclosures:
+                for d in important:
                     corp_name = d.get("corp_name", "")
+                    stock_code = d.get("stock_code", "")
                     is_held = (
-                        d.get("corp_code", "") in held_tickers
+                        stock_code in held_tickers
                         or corp_name in held_names
                     )
                     category = d.get("category", "")
-                    portfolio_disclosures.append({
-                        "corp_name": corp_name,
-                        "report_nm": d.get("report_nm", ""),
-                        "category": category,
-                        "is_held": is_held,
-                    })
+                    # 보유종목 관련이거나 긴급 카테고리만 포함
+                    if is_held or category in {"delisting", "merger"}:
+                        portfolio_disclosures.append({
+                            "corp_name": corp_name,
+                            "report_nm": d.get("report_nm", ""),
+                            "category": category,
+                            "is_held": is_held,
+                        })
                 state["portfolio_disclosures"] = portfolio_disclosures
             except Exception as e:
                 logger.warning("긴급 모니터 공시 조회 실패: %s", e)

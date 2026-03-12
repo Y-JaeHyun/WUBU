@@ -77,7 +77,8 @@ class FeatureFlags:
         "news_collector": (
             "DART 공시와 뉴스를 주기적으로 수집하여 알림한다.\n"
             "보유 종목 관련 공시를 놓치지 않으려면 켜둘 것.\n"
-            "설정: check_interval_hours(수집 주기), important_only(중요 공시만)"
+            "설정: check_interval_hours(수집 주기), important_only(중요 공시만),\n"
+            "page_count(조회 건수), scope_filter(보유/관심 종목만 알림)"
         ),
         "macro_monitor": (
             "ECOS, FRED, VIX 등 매크로 데이터를 수집한다.\n"
@@ -210,6 +211,7 @@ class FeatureFlags:
                 "check_interval_hours": 1,
                 "important_only": True,
                 "page_count": 300,
+                "scope_filter": True,
             },
         },
         "macro_monitor": {
