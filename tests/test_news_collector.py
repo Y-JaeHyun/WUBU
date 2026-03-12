@@ -175,6 +175,30 @@ class TestFetchRecentDisclosures:
         )
         assert len(result) == 2
 
+    @patch("src.data.news_collector.requests.get")
+    def test_default_page_count(self, mock_get, collector):
+        """기본 page_count가 300이다."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "000", "list": []}
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        collector.fetch_recent_disclosures(days=1)
+        call_params = mock_get.call_args[1]["params"]
+        assert call_params["page_count"] == 300
+
+    @patch("src.data.news_collector.requests.get")
+    def test_custom_page_count(self, mock_get, collector):
+        """page_count 파라미터로 조회 건수를 변경할 수 있다."""
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"status": "000", "list": []}
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        collector.fetch_recent_disclosures(days=1, page_count=500)
+        call_params = mock_get.call_args[1]["params"]
+        assert call_params["page_count"] == 500
+
 
 # ===================================================================
 # filter_important() 테스트

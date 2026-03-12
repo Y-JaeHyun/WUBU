@@ -168,16 +168,20 @@ class NewsCollector:
         """API 키가 설정되어 있는지 확인한다."""
         return bool(self.dart_api_key)
 
+    DEFAULT_PAGE_COUNT = 300
+
     def fetch_recent_disclosures(
         self,
         corp_codes: Optional[list[str]] = None,
         days: int = 1,
+        page_count: Optional[int] = None,
     ) -> list[dict[str, Any]]:
         """최근 N일간 공시를 조회한다.
 
         Args:
             corp_codes: 조회할 기업 고유번호 리스트. None이면 전체.
             days: 조회할 일수 (기본 1일).
+            page_count: 한 페이지 조회 건수 (기본 300). None이면 DEFAULT_PAGE_COUNT 사용.
 
         Returns:
             공시 리스트. API 미설정이나 오류 시 빈 리스트.
@@ -186,6 +190,9 @@ class NewsCollector:
             logger.info("DART API 미설정, 빈 결과 반환")
             return []
 
+        if page_count is None:
+            page_count = self.DEFAULT_PAGE_COUNT
+
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
@@ -193,7 +200,7 @@ class NewsCollector:
             "crtfc_key": self.dart_api_key,
             "bgn_de": start_date.strftime("%Y%m%d"),
             "end_de": end_date.strftime("%Y%m%d"),
-            "page_count": 100,
+            "page_count": page_count,
         }
         if corp_codes and len(corp_codes) == 1:
             params["corp_code"] = corp_codes[0]

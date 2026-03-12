@@ -209,6 +209,7 @@ class FeatureFlags:
             "config": {
                 "check_interval_hours": 1,
                 "important_only": True,
+                "page_count": 300,
             },
         },
         "macro_monitor": {
