@@ -238,6 +238,21 @@ STRATEGY_REGISTRY: dict[str, dict[str, Any]] = {
             {"label": "default", "kwargs": {}},
         ],
     },
+    # ─── R&D: 신규 전략 ───
+    "size_value": {
+        "group": "C",
+        "module": "src.strategy.size_value",
+        "class": "SizeValueStrategy",
+        "base": "Strategy",
+        "configs": [
+            {"label": "default", "kwargs": {}},
+            {"label": "aggressive", "kwargs": {
+                "size_pct": 0.20,
+                "value_pct": 0.15,
+                "max_stocks": 15,
+            }},
+        ],
+    },
     # ─── Group D: 단기 전략 ───
     "bb_squeeze": {
         "group": "D",

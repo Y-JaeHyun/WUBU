@@ -12,7 +12,9 @@
 | 1 | enhanced_etf_rotation | default | B | 34.9% | -19.8% | 1.44 | 60% | 153 | 4,952,328원 |
 | 2 | etf_rotation | default | B | 30.8% | -19.5% | 1.22 | 65% | 86 | 4,377,566원 |
 | 3 | cross_asset_momentum | default | C | 22.8% | -16.6% | 1.12 | 58% | 112 | 3,406,791원 |
-| 4 | three_factor | default | A | 13.3% | -29.5% | 0.53 | 62% | 612 | 2,469,871원 |
+| 4 | size_value 🆕 | default | C | 14.4% | -31.3% | 0.53 | 50% | 674 | 2,568,070원 |
+| 5 | size_value 🆕 | aggressive | C | 13.6% | -28.3% | 0.48 | 50% | 613 | 2,494,196원 |
+| 6 | three_factor | default | A | 13.3% | -29.5% | 0.53 | 62% | 612 | 2,469,871원 |
 | 5 | value | default | A | 8.4% | -20.1% | 0.36 | 50% | 496 | 2,069,134원 |
 | 6 | pead | default | C | 8.3% | -35.5% | 0.31 | 54% | 354 | 2,066,213원 |
 | 7 | accrual | default | C | 8.2% | -36.0% | 0.31 | 54% | 355 | 2,053,052원 |
@@ -81,3 +83,4 @@
 4. **모멘텀 단독 전략 부진**: momentum이 -8.3%~-5.6%로 한국 시장에서 역효과
 5. **단기 전략 미작동**: Group D 전략들이 모두 거래 0건 (ShortTermBacktest 엔진 호환 문제)
 6. **운영 설정 개선 필요**: multi_factor_live(0.1%) vs backtest(6.2%) 격차가 크며, market_timing 효과 재검토 필요
+7. **신규 Size-Value 전략 검증**: R&D로 구현한 소형가치주 전략이 CAGR 14.4%로 기존 three_factor(13.3%)를 상회, 개별종목 전략 중 최고 성과
