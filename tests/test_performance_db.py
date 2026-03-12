@@ -6,6 +6,7 @@ tmp_path를 사용하여 테스트마다 격리된 DB를 사용한다.
 """
 
 import os
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -26,9 +27,10 @@ def db(tmp_path):
 
 @pytest.fixture
 def db_with_nav(db):
-    """NAV 데이터가 미리 입력된 DB."""
+    """NAV 데이터가 미리 입력된 DB (현재 날짜 기준 최근 30일)."""
+    today = datetime.now()
     for i in range(30):
-        date = f"2026-02-{i + 1:02d}" if i < 28 else f"2026-03-{i - 27:02d}"
+        date = (today - timedelta(days=29 - i)).strftime("%Y-%m-%d")
         nav = 1_000_000 + i * 10_000
         db.record_daily_nav(date, nav, cash=100_000, positions_value=nav - 100_000)
     return db

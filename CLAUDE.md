@@ -14,7 +14,7 @@
 
 ## Project Structure
 ```
-/mnt/data/quant/
+/mnt/data/quant-dev/
 ├── CLAUDE.md          # 프로젝트 설명
 ├── .env               # 환경변수 (API 키 등)
 ├── src/               # 소스 코드
