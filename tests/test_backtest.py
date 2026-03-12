@@ -945,3 +945,86 @@ class TestDifferentialRebalancing:
         assert sell_count == 0, (
             f"동일 시그널 반복 시 매도가 발생하면 안 됨 (발생: {sell_count}건)"
         )
+
+
+# ===================================================================
+# extract_signals_for_date() 테스트
+# ===================================================================
+
+
+class TestExtractSignalsForDate:
+    """extract_signals_for_date() 시그널 추출 테스트."""
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_returns_signals_dict(self, mock_price, mock_fund):
+        """특정 날짜의 시그널을 딕셔너리로 반환한다."""
+        Backtest.disable_price_store()
+        try:
+            signals = {"005930": 0.5, "000660": 0.5}
+            strategy = DummyStrategy(signals)
+            bt = Backtest(
+                strategy=strategy,
+                start_date="20240101",
+                end_date="20240331",
+            )
+            mock_fund.return_value = pd.DataFrame({
+                "ticker": ["005930", "000660"],
+                "name": ["삼성전자", "SK하이닉스"],
+            })
+            mock_price.return_value = _make_price_df("20230101", 400)
+
+            result = bt.extract_signals_for_date("20240301")
+            assert isinstance(result, dict)
+            assert result == signals
+        finally:
+            Backtest.enable_price_store()
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    def test_empty_fundamentals_returns_empty(self, mock_fund):
+        """펀더멘탈 데이터가 없으면 빈 시그널을 반환한다."""
+        Backtest.disable_price_store()
+        try:
+            strategy = DummyStrategy({"005930": 0.5})
+            bt = Backtest(
+                strategy=strategy,
+                start_date="20240101",
+                end_date="20240331",
+            )
+            mock_fund.return_value = pd.DataFrame()
+
+            result = bt.extract_signals_for_date("20240301")
+            # DummyStrategy는 data 무관하게 고정 시그널 반환
+            assert isinstance(result, dict)
+        finally:
+            Backtest.enable_price_store()
+
+    @patch("src.backtest.engine.get_all_fundamentals")
+    @patch("src.backtest.engine.get_price_data")
+    def test_signal_consistency_same_strategy(self, mock_price, mock_fund):
+        """동일 전략·동일 데이터면 직접 호출과 extract가 일치한다."""
+        Backtest.disable_price_store()
+        try:
+            signals = {"005930": 0.3, "000660": 0.3, "035420": 0.4}
+            strategy = DummyStrategy(signals)
+
+            mock_fund.return_value = pd.DataFrame({
+                "ticker": ["005930", "000660", "035420"],
+                "name": ["삼성전자", "SK하이닉스", "네이버"],
+            })
+            mock_price.return_value = _make_price_df("20230101", 400)
+
+            # 직접 호출
+            direct = strategy.generate_signals("20240301", {})
+
+            # extract 경로
+            bt = Backtest(
+                strategy=DummyStrategy(signals),
+                start_date="20240101",
+                end_date="20240331",
+            )
+            extracted = bt.extract_signals_for_date("20240301")
+
+            assert direct == extracted
+        finally:
+            Backtest.enable_price_store()

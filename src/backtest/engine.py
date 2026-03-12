@@ -877,3 +877,72 @@ class Backtest:
 
         logger.info(f"성과 지표: {results}")
         return results
+
+    def extract_signals_for_date(self, target_date: str) -> dict[str, float]:
+        """특정 날짜의 백테스트 시그널을 추출한다.
+
+        백테스트 엔진이 target_date에 생성하는 raw 시그널(오버레이 적용 전)을
+        반환한다. 4경로 정합성 검증에서 Path D로 사용된다.
+
+        Args:
+            target_date: 시그널을 추출할 날짜 ('YYYYMMDD' 또는 'YYYY-MM-DD').
+
+        Returns:
+            종목코드: 비중 딕셔너리.
+        """
+        target_date = target_date.replace("-", "")
+
+        # 데이터 수집
+        fundamentals = get_all_fundamentals(target_date)
+        price_cache: dict[str, pd.DataFrame] = {}
+        index_prices = pd.Series(dtype=float)
+
+        if fundamentals is not None and not fundamentals.empty:
+            tickers = fundamentals["ticker"].tolist()
+            for ticker in tickers:
+                try:
+                    price_cache[ticker] = self._fetch_price(ticker)
+                except Exception:
+                    pass
+
+            # 인덱스 가격
+            try:
+                from pykrx import stock as pykrx_stock
+                idx_start = (
+                    pd.Timestamp(self._data_start_date)
+                ).strftime("%Y%m%d")
+                kospi = pykrx_stock.get_index_ohlcv(
+                    idx_start, target_date, "1001"
+                )
+                if not kospi.empty:
+                    index_prices = kospi["종가"]
+            except Exception:
+                pass
+
+        # 미래 데이터 차단
+        target = pd.Timestamp(target_date)
+        truncated_prices: dict[str, pd.DataFrame] = {}
+        for ticker, df in price_cache.items():
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                truncated_prices[ticker] = df[df.index <= target]
+            else:
+                truncated_prices[ticker] = df
+
+        if isinstance(index_prices, pd.Series) and not index_prices.empty:
+            truncated_index = index_prices[index_prices.index <= target]
+        else:
+            truncated_index = index_prices
+
+        data = {
+            "fundamentals": fundamentals,
+            "prices": truncated_prices,
+            "index_prices": truncated_index,
+        }
+
+        try:
+            signals = self.strategy.generate_signals(target_date, data)
+        except Exception as e:
+            logger.error(f"시그널 추출 실패 ({target_date}): {e}")
+            signals = {}
+
+        return signals
