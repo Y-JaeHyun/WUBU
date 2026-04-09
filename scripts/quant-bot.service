@@ -6,11 +6,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/mnt/data/quant
-Environment="PATH=/mnt/data/quant/.venv/bin:/usr/bin:/bin"
-Environment="PYTHONPATH=/mnt/data/quant"
-EnvironmentFile=/mnt/data/quant/.env
-ExecStart=/mnt/data/quant/.venv/bin/python3 -u src/scheduler/main.py
+WorkingDirectory={{PROJECT_DIR}}
+Environment="PATH={{PROJECT_DIR}}/.venv/bin:/usr/bin:/bin"
+Environment="PYTHONPATH={{PROJECT_DIR}}"
+EnvironmentFile={{PROJECT_DIR}}/.env
+ExecStart=/bin/bash -c 'cd {{PROJECT_DIR}} && PYTHONPATH={{PROJECT_DIR}} {{PROJECT_DIR}}/.venv/bin/python3 -u src/scheduler/main.py'
 Restart=on-failure
 RestartSec=30
 StartLimitBurst=3

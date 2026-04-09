@@ -172,7 +172,9 @@ cp .env.example .env
 python3 src/scheduler/main.py
 
 # systemd 서비스로 배포
-sudo bash scripts/install.sh
+sudo bash scripts/install.sh [경로] [사용자명]
+sudo bash scripts/install.sh /data/quant          # 사용자 생성 없이
+sudo bash scripts/install.sh /data/quant quant     # quant 사용자 생성 포함
 systemctl status quant-bot
 ```
 
