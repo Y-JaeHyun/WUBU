@@ -2262,8 +2262,37 @@ class TradingBot:
                         lines.append("")
                         lines.append("[통합 매수/매도 예상]")
                         if sell_n or buy_n:
+                            # ETF 종목명 매핑 (etf_universe 활용)
+                            etf_names: dict[str, str] = {}
+                            try:
+                                etf_strat = self._create_etf_strategy()
+                                etf_names = etf_strat.etf_universe
+                            except Exception:
+                                pass
+
+                            def _name(ticker: str) -> str:
+                                if ticker in etf_names:
+                                    return etf_names[ticker]
+                                try:
+                                    from pykrx import stock as _stk
+                                    n = _stk.get_market_ticker_name(ticker)
+                                    return n or ticker
+                                except Exception:
+                                    return ticker
+                            for o in integrated.get("sell_orders", []):
+                                t = o.get("ticker", "?")
+                                n = _name(t)
+                                q = o.get("qty", 0)
+                                a = o.get("amount", 0)
+                                lines.append(f"  매도 {n}({t}) {q}주 ({a:,}원)")
+                            for o in integrated.get("buy_orders", []):
+                                t = o.get("ticker", "?")
+                                n = _name(t)
+                                q = o.get("qty", 0)
+                                a = o.get("amount", 0)
+                                lines.append(f"  매수 {n}({t}) {q}주 ({a:,}원)")
                             lines.append(
-                                f"  매도 {sell_n}건 ({sell_amt:,}원)"
+                                f"  합계: 매도 {sell_n}건 ({sell_amt:,}원)"
                                 f" / 매수 {buy_n}건 ({buy_amt:,}원)"
                             )
                         else:
