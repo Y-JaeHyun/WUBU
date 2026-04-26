@@ -3084,7 +3084,7 @@ class TradingBot:
             elif name == "three_factor":
                 from src.strategy.three_factor import ThreeFactorStrategy
 
-                tf_kwargs: dict = {"num_stocks": 10}
+                tf_kwargs: dict = {"num_stocks": 20}
 
                 # low_volatility_factor 연동
                 if self.feature_flags.is_enabled("low_volatility_factor"):
