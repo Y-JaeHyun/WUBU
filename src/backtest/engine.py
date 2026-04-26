@@ -148,6 +148,10 @@ class Backtest:
         self._rebalance_count: int = 0
         self._is_run = False
 
+        # 상세 리밸런싱 로그용 추가 데이터
+        self._signal_history: dict[str, dict[str, float]] = {}  # date → {ticker: weight}
+        self._position_entries: dict[str, dict] = {}  # ticker → {entry_date, entry_price, quantity}
+
     def _get_rebalance_dates(self) -> list[str]:
         """리밸런싱 날짜 리스트를 생성한다.
 
@@ -512,6 +516,10 @@ class Backtest:
                     logger.error(f"시그널 생성 실패 ({date}): {e}")
                     signals = {}
 
+                # 시그널 히스토리 기록 (오버레이 적용 전 원본)
+                if signals:
+                    self._signal_history[date] = dict(signals)
+
                 # C4: 마켓 타이밍 오버레이 적용 (전략 내부 MT가 있으면 스킵)
                 strategy_has_mt = (
                     hasattr(self.strategy, "market_timing")
@@ -630,14 +638,29 @@ class Backtest:
                                     sell_cost_rate = self._get_sell_cost(ticker)
                                     proceeds = qty * price * (1 - sell_cost_rate)
                                     cash += proceeds
-                                    self._trades.append({
+                                    trade_entry: dict = {
                                         "date": date,
                                         "ticker": ticker,
                                         "action": "sell",
                                         "quantity": qty,
                                         "price": price,
                                         "cost": qty * price * sell_cost_rate,
-                                    })
+                                    }
+                                    # 포지션 수익률 계산
+                                    pe = self._position_entries.get(ticker)
+                                    if pe:
+                                        trade_entry["entry_price"] = pe["avg_price"]
+                                        trade_entry["entry_date"] = pe["entry_date"]
+                                        if pe["avg_price"] > 0:
+                                            trade_entry["pnl_pct"] = round(
+                                                (price - pe["avg_price"]) / pe["avg_price"] * 100, 2
+                                            )
+                                        holding_days = (
+                                            pd.Timestamp(date) - pd.Timestamp(pe["entry_date"])
+                                        ).days
+                                        trade_entry["holding_days"] = holding_days
+                                        del self._position_entries[ticker]
+                                    self._trades.append(trade_entry)
                                     sold = True
                             # C2: 매도 성공 시에만 holdings에서 제거
                             if sold:
@@ -675,16 +698,32 @@ class Backtest:
                                     )
                                     cash += proceeds
                                     holdings[ticker] -= sell_qty
-                                    if holdings[ticker] <= 0:
-                                        del holdings[ticker]
-                                    self._trades.append({
+                                    trade_entry = {
                                         "date": date,
                                         "ticker": ticker,
                                         "action": "sell",
                                         "quantity": sell_qty,
                                         "price": price,
                                         "cost": sell_qty * price * sell_cost_rate,
-                                    })
+                                    }
+                                    # 부분 매도 수익률 계산
+                                    pe = self._position_entries.get(ticker)
+                                    if pe:
+                                        trade_entry["entry_price"] = pe["avg_price"]
+                                        trade_entry["entry_date"] = pe["entry_date"]
+                                        if pe["avg_price"] > 0:
+                                            trade_entry["pnl_pct"] = round(
+                                                (price - pe["avg_price"]) / pe["avg_price"] * 100, 2
+                                            )
+                                        trade_entry["holding_days"] = (
+                                            pd.Timestamp(date) - pd.Timestamp(pe["entry_date"])
+                                        ).days
+                                        pe["quantity"] -= sell_qty
+                                        if pe["quantity"] <= 0:
+                                            del self._position_entries[ticker]
+                                    self._trades.append(trade_entry)
+                                    if holdings[ticker] <= 0:
+                                        del holdings[ticker]
 
                     # C1: Step 2 완료 후 재계산
                     portfolio_value, current_weights = (
@@ -723,7 +762,8 @@ class Backtest:
 
                         if buy_qty > 0:
                             cash -= cost
-                            holdings[ticker] = holdings.get(ticker, 0) + buy_qty
+                            prev_qty = holdings.get(ticker, 0)
+                            holdings[ticker] = prev_qty + buy_qty
                             self._trades.append({
                                 "date": date,
                                 "ticker": ticker,
@@ -732,6 +772,21 @@ class Backtest:
                                 "price": price,
                                 "cost": buy_qty * price * self.buy_cost,
                             })
+                            # 포지션 진입 추적 (평균단가 갱신)
+                            if ticker in self._position_entries:
+                                pe = self._position_entries[ticker]
+                                total_qty = pe["quantity"] + buy_qty
+                                if total_qty > 0:
+                                    pe["avg_price"] = (
+                                        pe["avg_price"] * pe["quantity"] + price * buy_qty
+                                    ) / total_qty
+                                    pe["quantity"] = total_qty
+                            else:
+                                self._position_entries[ticker] = {
+                                    "entry_date": date,
+                                    "avg_price": price,
+                                    "quantity": buy_qty,
+                                }
 
             # 일별 포트폴리오 가치 기록
             portfolio_value = cash
@@ -795,6 +850,16 @@ class Backtest:
         df = pd.DataFrame(self._trades)
         df["date"] = pd.to_datetime(df["date"])
         return df
+
+    def get_signal_history(self) -> dict[str, dict[str, float]]:
+        """리밸런싱 시점별 시그널(목표 비중)을 반환한다.
+
+        Returns:
+            {date_str: {ticker: target_weight}} 딕셔너리
+        """
+        if not self._is_run:
+            raise RuntimeError("백테스트가 아직 실행되지 않았습니다. run()을 먼저 호출하세요.")
+        return dict(self._signal_history)
 
     def get_results(self) -> dict:
         """성과 지표를 반환한다.

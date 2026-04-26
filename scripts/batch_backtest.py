@@ -47,7 +47,8 @@ DEFAULT_CAPITAL = 1_500_000
 #   A: 기본 팩터 전략 (value, momentum, quality, three_factor, multi_factor)
 #   B: ETF/자산배분 전략 (etf_rotation, enhanced_etf_rotation, risk_parity, dual_momentum)
 #   C: 고급 팩터 전략 (low_volatility, low_vol_quality, shareholder_yield, accrual, pead,
-#                      cross_asset_momentum, hybrid_strategy, ml_factor)
+#                      cross_asset_momentum, hybrid_strategy, ml_factor,
+#                      residual_momentum, advanced_shareholder_yield, value_up_disclosure)
 #   D: 단기 전략 (bb_squeeze, high_breakout, swing_reversion, orb_daytrading)
 
 STRATEGY_REGISTRY: dict[str, dict[str, Any]] = {
@@ -290,6 +291,33 @@ STRATEGY_REGISTRY: dict[str, dict[str, Any]] = {
             {"label": "default", "kwargs": {}},
         ],
     },
+    "residual_momentum": {
+        "group": "C",
+        "module": "src.strategy.residual_momentum",
+        "class": "ResidualMomentumStrategy",
+        "base": "Strategy",
+        "configs": [
+            {"label": "default", "kwargs": {}},
+        ],
+    },
+    "advanced_shareholder_yield": {
+        "group": "C",
+        "module": "src.strategy.advanced_shareholder_yield",
+        "class": "AdvancedShareholderYieldStrategy",
+        "base": "Strategy",
+        "configs": [
+            {"label": "default", "kwargs": {}},
+        ],
+    },
+    "value_up_disclosure": {
+        "group": "C",
+        "module": "src.strategy.value_up_disclosure_score",
+        "class": "ValueUpDisclosureScore",
+        "base": "Strategy",
+        "configs": [
+            {"label": "default", "kwargs": {}},
+        ],
+    },
 }
 
 
@@ -414,9 +442,10 @@ def _run_long_term_backtest(
     results = bt.get_results()
     trades_df = bt.get_trades()
     history_df = bt.get_portfolio_history()
+    signal_history = bt.get_signal_history()
 
-    # 리밸런싱 로그 구축
-    rebalancing_log = _build_rebalancing_log(trades_df, history_df)
+    # 리밸런싱 로그 구축 (시그널 히스토리 포함)
+    rebalancing_log = _build_rebalancing_log(trades_df, history_df, signal_history)
 
     return {
         "strategy": strategy_name,
@@ -488,26 +517,68 @@ def _run_short_term_backtest(
 def _build_rebalancing_log(
     trades_df: pd.DataFrame,
     history_df: pd.DataFrame,
+    signal_history: Optional[dict] = None,
 ) -> list[dict]:
-    """거래 내역과 포트폴리오 이력에서 리밸런싱 로그를 생성한다."""
+    """거래 내역과 포트폴리오 이력에서 리밸런싱 로그를 생성한다.
+
+    Args:
+        trades_df: 거래 내역 DataFrame
+        history_df: 포트폴리오 이력 DataFrame
+        signal_history: {date_str: {ticker: target_weight}} 시그널 히스토리
+    """
     if trades_df.empty:
         return []
+
+    signal_history = signal_history or {}
+
+    # 이전 시그널 추적 (편입/퇴출 판단용)
+    prev_signal_tickers: set[str] = set()
 
     log: list[dict] = []
     for date, group in trades_df.groupby("date"):
         date_str = pd.Timestamp(date).strftime("%Y-%m-%d")
+        # 시그널 히스토리에서 해당 날짜 매칭 (YYYYMMDD 형식)
+        date_key = pd.Timestamp(date).strftime("%Y%m%d")
+        current_signals = signal_history.get(date_key, {})
+        current_signal_tickers = set(current_signals.keys())
+
+        # 편입/퇴출 종목 판별
+        new_entries = current_signal_tickers - prev_signal_tickers
+        exits = prev_signal_tickers - current_signal_tickers
+
         buys = []
         sells = []
 
         for _, trade in group.iterrows():
-            entry = {
-                "ticker": trade["ticker"],
+            ticker = trade["ticker"]
+            entry: dict = {
+                "ticker": ticker,
                 "quantity": int(trade.get("quantity", 0)),
                 "price": float(trade.get("price", 0)),
             }
+
             if trade["action"] == "buy":
+                # 매수 근거: 시그널 목표 비중 + 신규 편입 여부
+                target_weight = current_signals.get(ticker)
+                if target_weight is not None:
+                    entry["target_weight"] = round(target_weight, 4)
+                if ticker in new_entries:
+                    entry["reason"] = "신규 편입"
+                else:
+                    entry["reason"] = "비중 확대"
                 buys.append(entry)
             else:
+                # 매도: 수익률, 보유기간, 매도 근거
+                if "pnl_pct" in trade and pd.notna(trade["pnl_pct"]):
+                    entry["pnl_pct"] = float(trade["pnl_pct"])
+                if "entry_price" in trade and pd.notna(trade["entry_price"]):
+                    entry["entry_price"] = float(trade["entry_price"])
+                if "holding_days" in trade and pd.notna(trade["holding_days"]):
+                    entry["holding_days"] = int(trade["holding_days"])
+                if ticker in exits:
+                    entry["reason"] = "시그널 퇴출"
+                else:
+                    entry["reason"] = "비중 축소"
                 sells.append(entry)
 
         pv = None
@@ -517,13 +588,28 @@ def _build_rebalancing_log(
             pv = float(history_df.loc[ts, "portfolio_value"])
             cash = float(history_df.loc[ts, "cash"])
 
-        log.append({
+        log_entry: dict = {
             "date": date_str,
             "buys": buys,
             "sells": sells,
             "portfolio_value": pv,
             "cash": cash,
-        })
+        }
+
+        # 시그널 요약 (해당 날짜 전체 목표 비중)
+        if current_signals:
+            log_entry["target_portfolio"] = {
+                t: round(w, 4) for t, w in sorted(
+                    current_signals.items(), key=lambda x: -x[1]
+                )
+            }
+            log_entry["num_target_stocks"] = len(current_signals)
+
+        log.append(log_entry)
+
+        # 다음 리밸런싱 비교용
+        if current_signal_tickers:
+            prev_signal_tickers = current_signal_tickers
 
     return log
 
