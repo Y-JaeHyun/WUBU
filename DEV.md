@@ -15,6 +15,23 @@ source /mnt/data/quant/.venv/bin/activate
 
 **주의**: 운영 환경(`/mnt/data/quant`)의 venv를 공유합니다. 이는 prod와 dev의 의존성을 항상 동기화된 상태로 유지합니다.
 
+### 1b. 의존성 관리 (Dependency Management)
+
+**파일 구조**:
+- `requirements.txt`: 개발용 (범위 지정: `pandas>=2.0`)
+- `requirements-prod.txt`: 운영용 (정확한 버전: `pandas==2.3.3`)
+
+**운영 환경 재구성**:
+```bash
+# 정확한 버전으로 재설치 (운영에서만, 분기당 1회)
+pip install -r requirements-prod.txt --force-reinstall
+```
+
+**업데이트 주기**:
+- 정상: 분기당 1회 (3개월) 보안 패치 반영
+- 긴급: 보안 취약점 발견 시 즉시
+- 검증: 항상 dev에서 백테스트 후 prod에 적용
+
 ### 2. 환경변수 설정
 
 `.env` 파일에 API 키를 설정합니다:
