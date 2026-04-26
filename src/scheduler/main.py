@@ -61,6 +61,8 @@ from src.strategy.bb_squeeze import BBSqueezeStrategy
 from src.report.portfolio_tracker import PortfolioTracker
 from src.report.stock_reviewer import StockReviewer
 from src.scheduler.holidays import KRXHolidays
+from src.scheduler.watchdog import send_watchdog_ping, setup_watchdog
+from src.scheduler.health_endpoint import HealthEndpointServer
 from src.utils.feature_flags import FeatureFlags
 from src.utils.logger import get_logger
 
@@ -189,8 +191,14 @@ class TradingBot:
         # Phase 5-B: 단기 트레이딩 모듈 초기화
         self._init_short_term_modules()
 
+        # Systemd watchdog and health endpoint initialization
+        self._watchdog_enabled = setup_watchdog()
+        self.health_endpoint = HealthEndpointServer()
+
         logger.info(
-            "TradingBot 초기화 완료 (리밸런싱 주기: %s)", rebalance_freq
+            "TradingBot 초기화 완료 (리밸런싱 주기: %s, watchdog=%s)",
+            rebalance_freq,
+            "enabled" if self._watchdog_enabled else "disabled",
         )
 
     def set_strategy(self, strategy: object) -> None:
@@ -3478,6 +3486,17 @@ class TradingBot:
             misfire_grace_time=300,
         )
 
+        # Systemd watchdog heartbeat (every 90 seconds, must be < WatchdogSec/2)
+        if self._watchdog_enabled:
+            from apscheduler.triggers.interval import IntervalTrigger
+            self.scheduler.add_job(
+                send_watchdog_ping,
+                IntervalTrigger(seconds=90),
+                id="watchdog_ping",
+                name="Systemd 워치독 핑",
+                misfire_grace_time=30,
+            )
+
         logger.info(
             "스케줄 등록 완료: %d개 작업", len(self.scheduler.get_jobs())
         )
@@ -3537,6 +3556,10 @@ class TradingBot:
         # Telegram 양방향 커맨드 폴링 시작
         self.commander.start_polling()
 
+        # Start health endpoint server
+        self.health_endpoint.start(self)
+        logger.info("헬스 엔드포인트 서버 시작됨 (http://127.0.0.1:8000/health)")
+
         try:
             self.scheduler.start()
         except (KeyboardInterrupt, SystemExit):
@@ -3546,6 +3569,8 @@ class TradingBot:
             logger.debug(traceback.format_exc())
         finally:
             self.commander.stop_polling()
+            self.health_endpoint.stop()
+            logger.info("헬스 엔드포인트 서버 중지됨")
             self._send_notification(
                 f"[봇 종료] {datetime.now(KST).strftime('%Y-%m-%d %H:%M:%S')}"
             )
