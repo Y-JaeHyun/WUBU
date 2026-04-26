@@ -6,6 +6,8 @@ numpy>=1.24
 requests>=2.31
 beautifulsoup4>=4.12
 aiohttp>=3.9
+pykrx>=1.0
+finance-datareader>=0.9
 
 # Technical analysis
 ta>=0.11
@@ -14,8 +16,14 @@ ta>=0.11
 schedule>=1.2
 apscheduler>=3.10
 
+# Systemd integration
+systemd-python>=235
+
 # Visualization
 matplotlib>=3.7
+
+# Timezone
+pytz>=2024.1
 
 # Environment
 python-dotenv>=1.0
