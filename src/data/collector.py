@@ -349,8 +349,8 @@ def get_all_fundamentals(
             results.append(merged)
 
         if not results:
-            logger.warning(f"전 종목 기본 지표 데이터 없음: {d}")
-            return pd.DataFrame()
+            logger.warning(f"전 종목 기본 지표 데이터 없음: {d} — DART fallback 시도")
+            return _get_all_fundamentals_dart_fallback(d, market)
 
         df = pd.concat(results, ignore_index=True)
 
@@ -375,9 +375,35 @@ def get_all_fundamentals(
                 )
                 return pd.DataFrame()
 
+        # PBR 유효성 검사: 50% 이상이 0이면 pykrx API 깨진 것으로 판단 → DART fallback
+        if "pbr" in df.columns and len(df) > 0:
+            zero_pbr_ratio = (df["pbr"] == 0).sum() / len(df)
+            if zero_pbr_ratio > 0.5:
+                logger.warning(
+                    "pykrx PBR 데이터 이상: 0값 비율 %.1f%% > 50%% (%s). "
+                    "DART fallback으로 전환.",
+                    zero_pbr_ratio * 100,
+                    d,
+                )
+                dart_df = _get_all_fundamentals_dart_fallback(d, market)
+                if not dart_df.empty:
+                    return dart_df
+                logger.warning("DART fallback도 실패 — pykrx 데이터를 그대로 반환")
+
         logger.info(f"전 종목 기본 지표 조회 완료: {len(df)}개 종목")
         return df
 
     except Exception as e:
         logger.error(f"전 종목 기본 지표 조회 실패: {e}")
         raise
+
+
+def _get_all_fundamentals_dart_fallback(date: str, market: str = "ALL") -> pd.DataFrame:
+    """DART 기반 전종목 펀더멘탈 fallback. pykrx 실패 시 호출된다."""
+    try:
+        from src.data.dart_collector import get_all_fundamentals_dart
+        logger.info("DART fallback 실행: %s", date)
+        return get_all_fundamentals_dart(date, market)
+    except Exception as e:
+        logger.error("DART fallback 실패: %s", e)
+        return pd.DataFrame()

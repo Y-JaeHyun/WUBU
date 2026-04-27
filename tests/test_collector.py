@@ -415,16 +415,19 @@ class TestGetAllFundamentals:
         call_args = mock_pykrx.get_market_fundamental.call_args
         assert call_args[0][0] == "20240102"
 
+    @patch("src.data.collector._get_all_fundamentals_dart_fallback")
     @patch("src.data.collector.pykrx_stock")
-    def test_empty_when_no_data(self, mock_pykrx):
-        """데이터가 없으면 빈 DataFrame을 반환한다."""
+    def test_empty_when_no_data(self, mock_pykrx, mock_dart_fallback):
+        """pykrx와 DART fallback 모두 실패하면 빈 DataFrame을 반환한다."""
         mock_pykrx.get_market_fundamental.return_value = pd.DataFrame()
         mock_pykrx.get_market_cap.return_value = pd.DataFrame()
+        mock_dart_fallback.return_value = pd.DataFrame()
 
         df = get_all_fundamentals("20240102", market="KOSPI")
 
         assert isinstance(df, pd.DataFrame)
         assert df.empty
+        mock_dart_fallback.assert_called_once()
 
     @patch("src.data.collector.pykrx_stock")
     def test_empty_when_all_market_cap_zero(self, mock_pykrx):

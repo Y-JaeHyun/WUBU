@@ -46,18 +46,35 @@ def init() -> bool:
     """환경변수에서 KRX 로그인 정보를 읽고 세션을 초기화한다.
 
     환경변수:
-        KRX_DATA_ID: KRX 데이터 포털 아이디
-        KRX_DATA_PW: KRX 데이터 포털 비밀번호
+        KRX_DATA_ID: KRX 데이터 포털 아이디 (기존 컨벤션)
+        KRX_DATA_PW: KRX 데이터 포털 비밀번호 (기존 컨벤션)
+        KRX_ID: pykrx 1.2.7+ 내장 로그인 env var (자동 브릿지)
+        KRX_PW: pykrx 1.2.7+ 내장 로그인 env var (자동 브릿지)
 
     Returns:
         로그인 성공 시 True, 환경변수 미설정 또는 실패 시 False.
     """
     global _login_id, _login_pw
-    _login_id = os.environ.get("KRX_DATA_ID", "").strip()
-    _login_pw = os.environ.get("KRX_DATA_PW", "").strip()
+    _login_id = (
+        os.environ.get("KRX_DATA_ID", "").strip()
+        or os.environ.get("KRX_ID", "").strip()
+    )
+    _login_pw = (
+        os.environ.get("KRX_DATA_PW", "").strip()
+        or os.environ.get("KRX_PW", "").strip()
+    )
     if not _login_id or not _login_pw:
         logger.debug("KRX_DATA_ID/PW 미설정 — 세션 쿠키 주입 건너뜀")
         return False
+
+    # pykrx 1.2.7+은 KRX_ID/KRX_PW env var로 내장 로그인을 수행한다.
+    # data_proxy.py에서 pykrx import 전에 이 함수가 호출되므로,
+    # 여기서 env var를 설정하면 pykrx 1.2.7 내장 로그인이 올바른 계정으로 동작한다.
+    if not os.environ.get("KRX_ID"):
+        os.environ["KRX_ID"] = _login_id
+    if not os.environ.get("KRX_PW"):
+        os.environ["KRX_PW"] = _login_pw
+
     return login(_login_id, _login_pw)
 
 

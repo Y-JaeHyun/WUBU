@@ -3,19 +3,29 @@
 opendartreader 라이브러리를 활용하여 DART(전자공시시스템)에서
 재무제표 데이터를 수집하고, 퀄리티 팩터 산출에 필요한 지표를 제공한다.
 
+pykrx get_market_fundamental() 대체 파이프라인:
+- DART fnlttMultiAcnt API로 분기별 재무데이터 배치 수집 (100개사/요청)
+- get_all_fundamentals_dart()가 collector.get_all_fundamentals()의 fallback 역할
+
 DART API key가 없을 경우 pykrx 기본 데이터로 퀄리티 근사치를 산출한다.
 """
 
+import io
 import os
 import time
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+import requests
 
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_DART_REST_URL = "https://opendart.fss.or.kr/api"
 
 # DART API Rate limiting 간격 (초)
 _RATE_LIMIT_SLEEP = 0.5
@@ -373,3 +383,336 @@ def get_quality_data(
     )
 
     return df
+
+
+# ─── DART 배치 펀더멘탈 파이프라인 ─────────────────────────────────────────────
+
+
+def _get_dart_api_key() -> str:
+    """DART API 키를 환경변수에서 읽는다."""
+    return os.environ.get("DART_API_KEY", "").strip()
+
+
+def _build_corp_code_map() -> dict[str, str]:
+    """DART corp_code.xml에서 상장종목 ticker → corp_code 매핑을 만든다.
+
+    Returns:
+        {stock_code: corp_code} 딕셔너리 (상장사만 포함)
+    """
+    api_key = _get_dart_api_key()
+    if not api_key:
+        logger.warning("DART_API_KEY 미설정 — corp_code 매핑 불가")
+        return {}
+
+    try:
+        resp = requests.get(
+            f"{_DART_REST_URL}/corpCode.xml",
+            params={"crtfc_key": api_key},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        zf = zipfile.ZipFile(io.BytesIO(resp.content))
+        with zf.open("CORPCODE.xml") as f:
+            root = ET.parse(f).getroot()
+
+        mapping: dict[str, str] = {}
+        for item in root.findall("list"):
+            stock_code = (item.findtext("stock_code") or "").strip()
+            corp_code = (item.findtext("corp_code") or "").strip()
+            if stock_code and corp_code:
+                mapping[stock_code] = corp_code
+
+        logger.info("DART corp_code 매핑 완료: %d개 상장사", len(mapping))
+        return mapping
+    except Exception as e:
+        logger.error("DART corp_code 매핑 실패: %s", e)
+        return {}
+
+
+def _determine_latest_report(date_str: str) -> tuple[str, str]:
+    """기준일 기준 최근 공시 완료된 보고서의 (사업연도, 보고서코드)를 결정한다.
+
+    공시 일정 기준:
+      - 사업보고서(11011): 당해 3월 31일 공시 → 4월 이후 사용 가능
+      - 1분기(11013): 5월 15일 공시 → 6월 이후 사용 가능
+      - 반기(11012): 8월 14일 공시 → 9월 이후 사용 가능
+      - 3분기(11014): 11월 14일 공시 → 12월 이후 사용 가능
+
+    Args:
+        date_str: 'YYYYMMDD' 형식
+
+    Returns:
+        (bsns_year, reprt_code) 튜플
+    """
+    year = int(date_str[:4])
+    month = int(date_str[4:6])
+
+    if month >= 12:
+        return str(year), "11014"    # 3분기 보고서
+    elif month >= 9:
+        return str(year), "11012"    # 반기 보고서
+    elif month >= 6:
+        return str(year), "11013"    # 1분기 보고서
+    elif month >= 4:
+        return str(year - 1), "11011"  # 전년도 사업보고서
+    else:
+        return str(year - 2), "11011"  # 전전년도 사업보고서 (Q4 실적 미공시)
+
+
+def _fetch_dart_accounts_batch(
+    corp_codes: list[str],
+    bsns_year: str,
+    reprt_code: str,
+    batch_size: int = 80,
+) -> dict[str, dict[str, float]]:
+    """DART fnlttMultiAcnt API로 여러 기업의 재무계정을 배치 조회한다.
+
+    자본총계(equity)와 당기순이익(net_income)을 수집한다.
+    연결재무제표(CFS) 우선, 없으면 개별(OFS).
+
+    Args:
+        corp_codes: DART 고유번호 리스트
+        bsns_year: 사업연도 (e.g., "2025")
+        reprt_code: 보고서 코드
+        batch_size: 배치당 최대 요청 수 (DART 권장 최대: 100)
+
+    Returns:
+        {corp_code: {"equity": float, "net_income": float}} 딕셔너리
+    """
+    api_key = _get_dart_api_key()
+    if not api_key or not corp_codes:
+        return {}
+
+    # 관심 계정명 집합 — 한국어 표기 변형 모두 포함
+    _EQUITY_NAMES = {"자본총계"}
+    _INCOME_NAMES = {"당기순이익", "당기순손익", "당기순이익(손실)", "당기순손익(손실)"}
+
+    results: dict[str, dict[str, float]] = {}
+
+    for i in range(0, len(corp_codes), batch_size):
+        batch = corp_codes[i:i + batch_size]
+        code_str = ",".join(batch)
+
+        try:
+            resp = requests.get(
+                f"{_DART_REST_URL}/fnlttMultiAcnt.json",
+                params={
+                    "crtfc_key": api_key,
+                    "corp_code": code_str,
+                    "bsns_year": bsns_year,
+                    "reprt_code": reprt_code,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            logger.warning("DART fnlttMultiAcnt 배치 실패 (%d~%d): %s", i, i + batch_size, e)
+            time.sleep(_RATE_LIMIT_SLEEP)
+            continue
+
+        if data.get("status") != "000":
+            logger.debug("DART API 응답 이상 (status=%s): %s", data.get("status"), data.get("message"))
+            time.sleep(_RATE_LIMIT_SLEEP)
+            continue
+
+        # fs_div 기준으로 연결재무(CFS) 우선, 없으면 개별(OFS) 폴백
+        cfs_data: dict[str, dict[str, float]] = {}
+        ofs_data: dict[str, dict[str, float]] = {}
+
+        for item in data.get("list", []):
+            corp = item.get("corp_code", "").strip()
+            fs_div = item.get("fs_div", "").strip()   # CFS=연결, OFS=별도
+            acct_nm = (item.get("account_nm") or "").strip()
+            amount_raw = (item.get("thstrm_amount") or "").replace(",", "").strip()
+
+            if not corp or not amount_raw:
+                continue
+
+            try:
+                amount = float(amount_raw)
+            except ValueError:
+                continue
+
+            target = cfs_data if fs_div == "CFS" else ofs_data
+
+            if corp not in target:
+                target[corp] = {}
+
+            if acct_nm in _EQUITY_NAMES and "equity" not in target[corp]:
+                target[corp]["equity"] = amount
+            elif acct_nm in _INCOME_NAMES and "net_income" not in target[corp]:
+                target[corp]["net_income"] = amount
+
+        # 연결 우선 병합
+        for corp in set(list(cfs_data.keys()) + list(ofs_data.keys())):
+            entry = {}
+            if corp in cfs_data:
+                entry.update(cfs_data[corp])
+            if corp in ofs_data:
+                for k, v in ofs_data[corp].items():
+                    if k not in entry:
+                        entry[k] = v
+            if entry:
+                results[corp] = entry
+
+        time.sleep(_RATE_LIMIT_SLEEP)
+
+    logger.info(
+        "DART 재무 배치 수집 완료: %d개 요청 → %d개 기업 데이터",
+        len(corp_codes),
+        len(results),
+    )
+    return results
+
+
+def get_all_fundamentals_dart(
+    date: str,
+    market: str = "ALL",
+) -> pd.DataFrame:
+    """DART 재무제표 + KRX 시장데이터 기반으로 전종목 펀더멘탈을 산출한다.
+
+    pykrx get_market_fundamental() 대체 함수.
+    BPS/EPS는 DART 최신 분기 재무제표에서 계산하고,
+    PBR/PER은 KRX/pykrx 시장가격으로 계산한다.
+
+    반환 형식은 collector.get_all_fundamentals()와 동일하다:
+        ticker, name, market, sector, bps, per, pbr, eps, div_yield, close, market_cap, volume
+
+    Args:
+        date: 기준일 ('YYYYMMDD' 또는 'YYYY-MM-DD')
+        market: "KOSPI", "KOSDAQ", "ALL" (기본)
+
+    Returns:
+        전종목 펀더멘탈 DataFrame (실패 시 빈 DataFrame)
+    """
+    formatted_date = date.replace("-", "")
+    logger.info("DART 기반 전종목 펀더멘탈 수집 시작: %s (market=%s)", formatted_date, market)
+
+    api_key = _get_dart_api_key()
+    if not api_key:
+        logger.warning("DART_API_KEY 미설정 — get_all_fundamentals_dart 불가")
+        return pd.DataFrame()
+
+    markets = ["KOSPI", "KOSDAQ"] if market.upper() == "ALL" else [market.upper()]
+
+    # ── 1. ticker → corp_code 매핑 ──────────────────────────────
+    corp_map = _build_corp_code_map()
+    if not corp_map:
+        logger.error("DART corp_code 매핑 실패 — 펀더멘탈 수집 중단")
+        return pd.DataFrame()
+
+    # ── 2. pykrx 시장데이터 수집 (가격, 시가총액, 상장주식수) ──────
+    # pykrx get_market_cap은 KRX 로그인 후에도 동작한다 (krx_session 패치 적용)
+    market_dfs: list[pd.DataFrame] = []
+    for mkt in markets:
+        try:
+            from src.data.data_proxy import create_stock_api
+            pykrx = create_stock_api()
+            cap_df = pykrx.get_market_cap(formatted_date, market=mkt)
+            if cap_df.empty:
+                logger.warning("%s 시장데이터 없음 (date=%s)", mkt, formatted_date)
+                continue
+            cap_df = cap_df.rename(columns={
+                "종가": "close",
+                "시가총액": "market_cap",
+                "거래량": "volume",
+                "상장주식수": "listed_shares",
+            })
+            cap_df["market"] = mkt
+
+            # 종목명 / 업종 보완
+            pykrx.get_market_ticker_list(formatted_date, market=mkt)
+            cap_df["name"] = [
+                pykrx.get_market_ticker_name(t) for t in cap_df.index
+            ]
+            try:
+                sec_df = pykrx.get_market_sector_classifications(formatted_date, market=mkt)
+                if not sec_df.empty and "업종명" in sec_df.columns:
+                    cap_df["sector"] = cap_df.index.map(sec_df["업종명"]).fillna("")
+                else:
+                    cap_df["sector"] = ""
+            except Exception:
+                cap_df["sector"] = ""
+
+            market_dfs.append(cap_df)
+        except Exception as e:
+            logger.warning("pykrx 시장데이터 수집 실패 (%s): %s", mkt, e)
+
+    if not market_dfs:
+        logger.error("모든 시장 데이터 수집 실패 — DART fallback 중단")
+        return pd.DataFrame()
+
+    all_market = pd.concat(market_dfs)
+    all_tickers = all_market.index.tolist()
+
+    # ── 3. DART 재무 배치 수집 ───────────────────────────────────
+    bsns_year, reprt_code = _determine_latest_report(formatted_date)
+    logger.info("DART 기준 사업연도: %s, 보고서코드: %s", bsns_year, reprt_code)
+
+    # ticker → corp_code 매핑 (상장종목 필터)
+    ticker_to_corp = {t: corp_map[t] for t in all_tickers if t in corp_map}
+    corp_codes_needed = list(ticker_to_corp.values())
+
+    financial_data = _fetch_dart_accounts_batch(
+        corp_codes_needed, bsns_year, reprt_code
+    )
+
+    # corp_code → ticker 역매핑
+    corp_to_ticker = {v: k for k, v in ticker_to_corp.items()}
+
+    # ── 4. 지표 계산 ─────────────────────────────────────────────
+    rows: list[dict] = []
+    for ticker in all_tickers:
+        cap_row = all_market.loc[ticker] if ticker in all_market.index else None
+        if cap_row is None:
+            continue
+
+        close = float(cap_row.get("close", 0) or 0)
+        market_cap = float(cap_row.get("market_cap", 0) or 0)
+        volume = float(cap_row.get("volume", 0) or 0)
+        listed_shares = float(cap_row.get("listed_shares", 0) or 0)
+
+        # DART 재무데이터
+        corp_code = ticker_to_corp.get(ticker)
+        fin = financial_data.get(corp_code, {}) if corp_code else {}
+        equity = fin.get("equity")
+        net_income = fin.get("net_income")
+
+        # BPS = 자본총계 / 상장주식수
+        bps = (equity / listed_shares) if (equity is not None and listed_shares > 0) else np.nan
+        # EPS = 당기순이익 / 상장주식수
+        eps = (net_income / listed_shares) if (net_income is not None and listed_shares > 0) else np.nan
+        # PBR = 현재가 / BPS
+        pbr = (close / bps) if (bps and not np.isnan(bps) and bps != 0) else np.nan
+        # PER = 현재가 / EPS
+        per = (close / eps) if (eps and not np.isnan(eps) and eps != 0 and eps > 0) else np.nan
+
+        rows.append({
+            "ticker": ticker,
+            "name": cap_row.get("name", ""),
+            "market": cap_row.get("market", ""),
+            "sector": cap_row.get("sector", ""),
+            "bps": round(bps) if not np.isnan(bps) else 0,
+            "per": round(per, 2) if not np.isnan(per) else 0.0,
+            "pbr": round(pbr, 4) if not np.isnan(pbr) else 0.0,
+            "eps": round(eps) if not np.isnan(eps) else 0,
+            "div_yield": 0.0,  # DART에서 배당수익률 미제공
+            "close": int(close),
+            "market_cap": int(market_cap),
+            "volume": int(volume),
+        })
+
+    if not rows:
+        logger.warning("DART 기반 펀더멘탈 계산 결과 없음")
+        return pd.DataFrame()
+
+    result = pd.DataFrame(rows)
+    valid_pbr = (result["pbr"] > 0).sum()
+    logger.info(
+        "DART 기반 펀더멘탈 수집 완료: %d개 종목, 유효 PBR %d개 (%.1f%%)",
+        len(result),
+        valid_pbr,
+        valid_pbr / len(result) * 100,
+    )
+    return result
