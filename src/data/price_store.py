@@ -293,6 +293,41 @@ class PriceStore:
 
         return df
 
+    def check_fundamentals_quality(self, date: str) -> tuple[bool, float]:
+        """캐시된 펀더멘탈 데이터의 품질을 검사한다.
+
+        PBR 0값 비율이 50% 초과이거나 캐시 파일이 없으면 품질 불량으로 판정한다.
+
+        Args:
+            date: 조회일 (YYYYMMDD 또는 YYYY-MM-DD)
+
+        Returns:
+            (is_valid, zero_pbr_ratio) 튜플.
+            is_valid=True: 정상, False: 재수집 필요
+        """
+        date = self._normalize_date(date)
+        parquet_path = self._fundamentals_dir / f"{date}.parquet"
+        if not parquet_path.exists():
+            return False, 1.0
+
+        df = self._read_parquet(parquet_path)
+        if df.empty:
+            return False, 1.0
+
+        if "pbr" not in df.columns or len(df) == 0:
+            return False, 1.0
+
+        zero_ratio = (df["pbr"] == 0).sum() / len(df)
+        is_valid = zero_ratio <= 0.5
+        return is_valid, float(zero_ratio)
+
+    def list_fundamentals_dates(self) -> list[str]:
+        """캐시에 존재하는 펀더멘탈 날짜 목록을 반환한다 (YYYYMMDD 정렬)."""
+        dates = sorted(
+            p.stem for p in self._fundamentals_dir.glob("*.parquet")
+        )
+        return dates
+
     def get_index(
         self,
         index_name: str,
