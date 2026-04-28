@@ -13,7 +13,13 @@ from src.backtest.engine import Strategy
 from src.strategy.conglomerate import detect_conglomerate
 from src.strategy.value import ValueStrategy
 from src.strategy.momentum import MomentumStrategy
-from src.strategy.factor_combiner import combine_zscore, combine_rank
+from src.strategy.quality import QualityStrategy
+from src.strategy.factor_combiner import (
+    combine_zscore,
+    combine_rank,
+    combine_n_factors_zscore,
+    combine_n_factors_rank,
+)
 from src.strategy.market_timing import MarketTimingOverlay
 from src.utils.logger import get_logger
 
@@ -57,6 +63,11 @@ class MultiFactorStrategy(Strategy):
         min_f_score: 간소화 F-Score 하한 (기본 0, 비활성).
             현재 데이터로는 최대 1점(EPS>0). 1 설정 시 적자 기업 제외.
             주의: pykrx EPS 미제공 종목도 제외되므로 성능 저하 가능.
+        quality_params: QualityStrategy 초기화 파라미터 (기본 {}).
+        adj_pbr: 가격 기반 PBR 실시간 보정 여부 (기본 True).
+            fundamentals에 bps > 0 & close > 0 인 종목에 대해
+            adj_pbr = close / bps 로 재계산한다.
+            bps 또는 close 데이터가 없으면 기존 pbr 사용.
     """
 
     def __init__(
@@ -78,6 +89,8 @@ class MultiFactorStrategy(Strategy):
         value_trap_filter: bool = False,
         min_roe: float = 0.0,
         min_f_score: int = 0,
+        quality_params: Optional[dict] = None,
+        adj_pbr: bool = True,
     ):
         self.factors = factors or ["value", "momentum"]
         self.weights = weights or [0.5, 0.5]
@@ -93,6 +106,7 @@ class MultiFactorStrategy(Strategy):
         self.value_trap_filter = value_trap_filter
         self.min_roe = min_roe
         self.min_f_score = min_f_score
+        self.adj_pbr = adj_pbr
         # 이전 포트폴리오 종목 저장 (회전율 페널티용)
         self._prev_holdings: set[str] = set()
         # 최근 결합 스코어 저장 (affordability 필터 스코어 하한선용)
@@ -111,14 +125,18 @@ class MultiFactorStrategy(Strategy):
         # 팩터별 전략 객체 생성
         self._value_strategy: Optional[ValueStrategy] = None
         self._momentum_strategy: Optional[MomentumStrategy] = None
+        self._quality_strategy: Optional[QualityStrategy] = None
 
         vp = value_params or {}
         mp = momentum_params or {}
+        qp = quality_params or {}
 
         if "value" in self.factors:
             self._value_strategy = ValueStrategy(**vp)
         if "momentum" in self.factors:
             self._momentum_strategy = MomentumStrategy(**mp)
+        if "quality" in self.factors:
+            self._quality_strategy = QualityStrategy(**qp)
 
         # 마켓 타이밍 오버레이
         self._market_timing: Optional[MarketTimingOverlay] = None
@@ -132,7 +150,8 @@ class MultiFactorStrategy(Strategy):
             f"num_stocks={num_stocks}, market_timing={apply_market_timing}, "
             f"turnover_penalty={turnover_penalty}, "
             f"max_group_weight={max_group_weight}, "
-            f"max_stocks_per_conglomerate={max_stocks_per_conglomerate}"
+            f"max_stocks_per_conglomerate={max_stocks_per_conglomerate}, "
+            f"adj_pbr={adj_pbr}"
         )
         if spike_filter:
             logger.info(
@@ -155,6 +174,8 @@ class MultiFactorStrategy(Strategy):
             filter_parts.append("spike")
         if self.value_trap_filter:
             filter_parts.append("vtrap")
+        if self.adj_pbr and "value" in self.factors:
+            filter_parts.append("adjPBR")
         filter_str = "+" + "+".join(filter_parts) if filter_parts else ""
         return f"MultiFactor({factor_str}, {self.combine_method}, top{self.num_stocks}{mt_str}{filter_str})"
 
@@ -174,6 +195,17 @@ class MultiFactorStrategy(Strategy):
             return pd.Series(dtype=float)
 
         df = fundamentals.copy()
+
+        # 가격 기반 PBR 실시간 보정: adj_pbr = close / bps
+        # bps와 close 모두 양수인 종목에만 적용
+        if self.adj_pbr and "bps" in df.columns and "close" in df.columns:
+            valid_mask = (df["bps"] > 0) & (df["close"] > 0)
+            if valid_mask.sum() > 0:
+                adj_count = valid_mask.sum()
+                df.loc[valid_mask, "pbr"] = (
+                    df.loc[valid_mask, "close"] / df.loc[valid_mask, "bps"]
+                )
+                logger.info(f"PBR 실시간 보정 적용: {adj_count}개 종목 (close/BPS)")
 
         # 기본 필터: PBR > 0
         if "pbr" in df.columns:
@@ -223,6 +255,23 @@ class MultiFactorStrategy(Strategy):
             return pd.Series(dtype=float)
 
         return self._momentum_strategy.get_scores(data)
+
+    def _get_quality_scores(self, data: dict) -> pd.Series:
+        """퀄리티 팩터 스코어를 추출한다.
+
+        QualityStrategy.get_scores()를 통해 ROE, GP/A, 부채비율, 발생액
+        지표를 종합한 퀄리티 스코어를 반환한다.
+
+        Args:
+            data: {'fundamentals': DataFrame, ...} 형태
+
+        Returns:
+            pd.Series (index=ticker, values=quality_score)
+        """
+        if self._quality_strategy is None:
+            return pd.Series(dtype=float)
+
+        return self._quality_strategy.get_scores(data)
 
     def _apply_concentration_filter(
         self,
@@ -486,33 +535,36 @@ class MultiFactorStrategy(Strategy):
                 if not scores.empty:
                     factor_scores["momentum"] = scores
                     factor_weights["momentum"] = weight
+            elif factor == "quality":
+                scores = self._get_quality_scores(data)
+                if not scores.empty:
+                    factor_scores["quality"] = scores
+                    factor_weights["quality"] = weight
 
-        if len(factor_scores) < 2:
-            # 팩터가 하나만 있으면 해당 팩터만으로 종목 선정
-            if factor_scores:
-                factor_name, scores = next(iter(factor_scores.items()))
-                logger.info(f"단일 팩터({factor_name})로 종목 선정")
-                combined = scores
-            else:
-                logger.warning(f"유효한 팩터 스코어 없음 ({date})")
-                return {}
+        if not factor_scores:
+            logger.warning(f"유효한 팩터 스코어 없음 ({date})")
+            return {}
+
+        if len(factor_scores) == 1:
+            factor_name, combined = next(iter(factor_scores.items()))
+            logger.info(f"단일 팩터({factor_name})로 종목 선정")
         else:
-            # 팩터 결합
-            value_scores = factor_scores.get("value", pd.Series(dtype=float))
-            momentum_scores = factor_scores.get("momentum", pd.Series(dtype=float))
-            vw = factor_weights.get("value", 0.5)
-            mw = factor_weights.get("momentum", 0.5)
-
+            # N팩터 결합 (2팩터 포함 모두 동일 경로 사용)
             if self.combine_method == "zscore":
-                combined = combine_zscore(value_scores, momentum_scores, vw, mw)
+                combined = combine_n_factors_zscore(factor_scores, factor_weights)
             elif self.combine_method == "rank":
-                combined = combine_rank(value_scores, momentum_scores, vw, mw)
+                combined = combine_n_factors_rank(factor_scores, factor_weights)
             else:
                 combined = pd.Series(dtype=float)
 
             if combined.empty:
                 logger.warning(f"팩터 결합 결과 없음 ({date})")
                 return {}
+
+            logger.info(
+                f"팩터 결합 완료: {list(factor_scores.keys())}, "
+                f"weights={factor_weights}"
+            )
 
         # 회전율 페널티 적용: 이전 포트폴리오에 없던 새 종목 스코어 차감
         if self.turnover_penalty > 0 and self._prev_holdings:

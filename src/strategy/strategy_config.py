@@ -3,12 +3,21 @@
 모든 운영/백테스트/시뮬레이션 코드에서 동일한 설정을 사용하도록
 프로필 기반 설정 + 팩토리 함수를 제공한다.
 
+전략 전환 (코드 수정 없이):
+    data/feature_flags.json 의 ``multi_factor_quality_mode`` 로 제어한다.
+    - enabled=true  → ``quality_live`` 프로필 (V+M+Q+adjPBR, 7종목)
+    - enabled=false → ``live`` 프로필 (Baseline V+M, 7종목)
+    config.profile 값으로 임의 프로필 지정도 가능.
+
 사용법::
 
     from src.strategy.strategy_config import create_multi_factor
 
-    # 운영 (num_stocks=7, market_timing=True)
+    # 운영 Baseline (V+M, num_stocks=7, market_timing=True)
     strategy = create_multi_factor("live")
+
+    # 운영 Quality (V+M+Q, num_stocks=7, market_timing=True, adj_pbr=True)
+    strategy = create_multi_factor("quality_live")
 
     # 백테스트 (num_stocks=10, market_timing=False)
     strategy = create_multi_factor("backtest")
@@ -37,11 +46,13 @@ MULTI_FACTOR_BASE: dict = {
     "value_trap_filter": False,
     "min_roe": 0.0,
     "min_f_score": 0,
+    "adj_pbr": True,
 }
 
 # 프로필별 오버라이드 (BASE 위에 덮어씀)
 # live=7종목: 소규모 자본(~145만원)에서 종목당 최소 주문금액(7만원) 확보를 위해 축소
 # backtest=10종목: 충분한 분산 효과 측정을 위한 통계적 유의성 확보용
+# quality: V+M+Q 3팩터 (value=0.35, momentum=0.35, quality=0.30)
 MULTI_FACTOR_PROFILES: dict[str, dict] = {
     "live": {
         "num_stocks": 7,
@@ -50,6 +61,20 @@ MULTI_FACTOR_PROFILES: dict[str, dict] = {
     "backtest": {
         "num_stocks": 10,
         "apply_market_timing": False,
+    },
+    "quality": {
+        "num_stocks": 20,
+        "factors": ["value", "momentum", "quality"],
+        "weights": [0.35, 0.35, 0.30],
+        "apply_market_timing": False,
+        "adj_pbr": True,
+    },
+    "quality_live": {
+        "num_stocks": 7,
+        "factors": ["value", "momentum", "quality"],
+        "weights": [0.35, 0.35, 0.30],
+        "apply_market_timing": True,
+        "adj_pbr": True,
     },
 }
 

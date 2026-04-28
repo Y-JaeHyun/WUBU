@@ -3079,7 +3079,12 @@ class TradingBot:
         try:
             if name == "multi_factor":
                 from src.strategy.strategy_config import create_multi_factor
-                return create_multi_factor("live")
+                if self.feature_flags.is_enabled("multi_factor_quality_mode"):
+                    _cfg = self.feature_flags.get_config("multi_factor_quality_mode")
+                    _profile = _cfg.get("profile", "quality_live")
+                else:
+                    _profile = "live"
+                return create_multi_factor(_profile)
             elif name == "three_factor":
                 from src.strategy.three_factor import ThreeFactorStrategy
 
@@ -3575,11 +3580,19 @@ def main() -> None:
     """트레이딩 봇 진입점."""
     bot = TradingBot()
 
-    # 전략 설정 (실제 운영 시 원하는 전략으로 교체)
+    # 전략 설정 — feature_flags.json의 multi_factor_quality_mode로 전환 가능
+    # enabled=true → quality_live (V+M+Q+adjPBR), false → live (Baseline V+M)
     try:
         from src.strategy.strategy_config import create_multi_factor
+        from src.utils.feature_flags import FeatureFlags
 
-        strategy = create_multi_factor("live")
+        _ff = FeatureFlags()
+        _mf_profile = (
+            _ff.get_config("multi_factor_quality_mode").get("profile", "quality_live")
+            if _ff.is_enabled("multi_factor_quality_mode")
+            else "live"
+        )
+        strategy = create_multi_factor(_mf_profile)
         bot.set_strategy(strategy)
     except Exception as e:
         logger.warning("기본 전략 로드 실패: %s. 전략 없이 시작합니다.", e)
