@@ -294,8 +294,8 @@ def get_quality_data(
 ) -> pd.DataFrame:
     """전 종목의 퀄리티 팩터 데이터를 조회한다.
 
-    DART API key가 있으면 DART에서 재무제표를 수집하고,
-    없으면 pykrx 데이터로 근사치를 산출한다.
+    DART fnlttMultiAcnt 배치 API로 전 종목을 한 번에 수집한다.
+    DART API key가 없으면 pykrx 데이터로 근사치를 산출한다.
 
     Args:
         date: 조회일 ('YYYYMMDD' 또는 'YYYY-MM-DD')
@@ -305,83 +305,95 @@ def get_quality_data(
         DataFrame with columns:
             - ticker: 종목코드
             - roe: 자기자본이익률 (%)
-            - gp_over_assets: 매출총이익/총자산
+            - gp_over_assets: 매출총이익/총자산 (Novy-Marx GP/A)
             - debt_ratio: 부채비율 (%)
-            - accruals: 발생액 비율
+            - accruals: 발생액 비율 (NaN — 현금흐름표 배치 미지원)
     """
     formatted_date = date.replace("-", "")
-    logger.info(f"퀄리티 데이터 조회 시작: {formatted_date} (market={market})")
+    logger.info("퀄리티 데이터 조회 시작: %s (market=%s)", formatted_date, market)
 
-    dart = _get_dart_reader()
-
-    if dart is None:
-        # DART API 없음: pykrx fallback
-        logger.info("DART API 미사용, pykrx fallback으로 퀄리티 근사치 산출")
+    api_key = _get_dart_api_key()
+    if not api_key:
+        logger.info("DART_API_KEY 미설정 — pykrx fallback으로 퀄리티 근사치 산출")
         return _estimate_quality_from_pykrx(formatted_date, market)
 
-    # DART API 사용 경로
+    # ── 1. ticker → corp_code 매핑 ──────────────────────────────
+    corp_map = _build_corp_code_map()
+    if not corp_map:
+        logger.warning("DART corp_code 매핑 실패 — pykrx fallback으로 전환")
+        return _estimate_quality_from_pykrx(formatted_date, market)
+
+    # ── 2. 종목 리스트 수집 ──────────────────────────────────────
     try:
         from src.data.collector import get_stock_list
         stock_list = get_stock_list(market)
     except Exception as e:
-        logger.error(f"종목 리스트 조회 실패: {e}")
+        logger.error("종목 리스트 조회 실패: %s", e)
         return _estimate_quality_from_pykrx(formatted_date, market)
 
     if stock_list.empty:
-        logger.warning("종목 리스트가 비어 있습니다.")
+        logger.warning("종목 리스트 비어있음")
         return pd.DataFrame()
 
-    # 조회 연도 결정 (date 기준 직전 사업연도)
-    year = int(formatted_date[:4])
-    month = int(formatted_date[4:6])
-    # 3월 말 이전이면 전전년도 데이터 사용 (사업보고서 공시 시점 고려)
-    if month <= 3:
-        fiscal_year = year - 2
-    else:
-        fiscal_year = year - 1
+    all_tickers: list[str] = stock_list["ticker"].tolist()
 
-    results = []
-    total = len(stock_list)
-    success_count = 0
+    # ── 3. 최신 보고서 결정 ──────────────────────────────────────
+    bsns_year, reprt_code = _determine_latest_report(formatted_date)
+    logger.info("DART 기준 사업연도: %s, 보고서코드: %s", bsns_year, reprt_code)
 
-    for idx, row in stock_list.iterrows():
-        ticker = row["ticker"]
+    # ── 4. 배치 재무 수집 ─────────────────────────────────────────
+    ticker_to_corp = {t: corp_map[t] for t in all_tickers if t in corp_map}
+    corp_codes_needed = list(ticker_to_corp.values())
 
-        try:
-            fs = get_financial_statements(ticker, fiscal_year)
-            if not fs.empty:
-                fs["ticker"] = ticker
-                results.append(fs)
-                success_count += 1
-        except Exception as e:
-            logger.debug(f"재무제표 조회 실패 (무시): {ticker} - {e}")
-
-        # 진행 상황 로깅 (100개마다)
-        if (idx + 1) % 100 == 0:
-            logger.info(
-                f"퀄리티 데이터 수집 진행: {idx + 1}/{total} "
-                f"(성공: {success_count})"
-            )
-
-    if not results:
-        logger.warning(
-            "DART에서 퀄리티 데이터를 수집하지 못했습니다. "
-            "pykrx fallback으로 전환합니다."
-        )
-        return _estimate_quality_from_pykrx(formatted_date, market)
-
-    df = pd.concat(results, ignore_index=True)
-
-    # 필요한 컬럼 정리
-    result_cols = ["ticker", "roe", "gp_over_assets", "debt_ratio", "accruals"]
-    available_cols = [c for c in result_cols if c in df.columns]
-    df = df[available_cols]
-
-    logger.info(
-        f"퀄리티 데이터 조회 완료: {len(df)}개 종목 "
-        f"(DART 성공률: {success_count}/{total})"
+    financial_data = _fetch_dart_accounts_batch(
+        corp_codes_needed, bsns_year, reprt_code
     )
 
+    # ── 5. 지표 산출 ─────────────────────────────────────────────
+    rows: list[dict] = []
+    for ticker in all_tickers:
+        corp_code = ticker_to_corp.get(ticker)
+        fin = financial_data.get(corp_code, {}) if corp_code else {}
+
+        equity = fin.get("equity")
+        net_income = fin.get("net_income")
+        total_assets = fin.get("total_assets")
+        gross_profit = fin.get("gross_profit")
+        total_liabilities = fin.get("total_liabilities")
+        if total_liabilities is None and total_assets is not None and equity is not None:
+            total_liabilities = total_assets - equity
+
+        roe = (net_income / equity * 100) if (
+            net_income is not None and equity and equity != 0
+        ) else np.nan
+        gp_over_assets = (gross_profit / total_assets) if (
+            gross_profit is not None and total_assets and total_assets != 0
+        ) else np.nan
+        debt_ratio = (total_liabilities / equity * 100) if (
+            total_liabilities is not None and equity and equity != 0
+        ) else np.nan
+
+        rows.append({
+            "ticker": ticker,
+            "roe": roe,
+            "gp_over_assets": gp_over_assets,
+            "debt_ratio": debt_ratio,
+            "accruals": np.nan,  # 현금흐름표는 배치 API 미지원
+        })
+
+    if not rows:
+        logger.warning("DART 퀄리티 데이터 없음 — pykrx fallback 전환")
+        return _estimate_quality_from_pykrx(formatted_date, market)
+
+    df = pd.DataFrame(rows)
+    valid_gpa = df["gp_over_assets"].notna().sum()
+    valid_roe = df["roe"].notna().sum()
+    logger.info(
+        "퀄리티 데이터 수집 완료: %d개 종목, 유효 GP/A %d개 (%.1f%%), 유효 ROE %d개 (%.1f%%)",
+        len(df),
+        valid_gpa, valid_gpa / len(df) * 100,
+        valid_roe, valid_roe / len(df) * 100,
+    )
     return df
 
 
@@ -486,6 +498,12 @@ def _fetch_dart_accounts_batch(
     # 관심 계정명 집합 — 한국어 표기 변형 모두 포함
     _EQUITY_NAMES = {"자본총계"}
     _INCOME_NAMES = {"당기순이익", "당기순손익", "당기순이익(손실)", "당기순손익(손실)"}
+    _ASSET_NAMES = {
+        "자산총계", "부채와자본총계", "부채와 자본 총계",
+        "자본과부채총계", "부채및자본총계",
+    }
+    _GROSS_PROFIT_NAMES = {"매출총이익"}
+    _LIABILITIES_NAMES = {"부채총계"}
 
     results: dict[str, dict[str, float]] = {}
 
@@ -543,6 +561,12 @@ def _fetch_dart_accounts_batch(
                 target[corp]["equity"] = amount
             elif acct_nm in _INCOME_NAMES and "net_income" not in target[corp]:
                 target[corp]["net_income"] = amount
+            elif acct_nm in _ASSET_NAMES and "total_assets" not in target[corp]:
+                target[corp]["total_assets"] = amount
+            elif acct_nm in _GROSS_PROFIT_NAMES and "gross_profit" not in target[corp]:
+                target[corp]["gross_profit"] = amount
+            elif acct_nm in _LIABILITIES_NAMES and "total_liabilities" not in target[corp]:
+                target[corp]["total_liabilities"] = amount
 
         # 연결 우선 병합
         for corp in set(list(cfs_data.keys()) + list(ofs_data.keys())):
@@ -678,6 +702,12 @@ def get_all_fundamentals_dart(
         fin = financial_data.get(corp_code, {}) if corp_code else {}
         equity = fin.get("equity")
         net_income = fin.get("net_income")
+        total_assets = fin.get("total_assets")
+        gross_profit = fin.get("gross_profit")
+        total_liabilities = fin.get("total_liabilities")
+        # 부채총계가 없으면 자산 - 자본으로 추산
+        if total_liabilities is None and total_assets is not None and equity is not None:
+            total_liabilities = total_assets - equity
 
         # BPS = 자본총계 / 상장주식수
         bps = (equity / listed_shares) if (equity is not None and listed_shares > 0) else np.nan
@@ -687,6 +717,18 @@ def get_all_fundamentals_dart(
         pbr = (close / bps) if (bps and not np.isnan(bps) and bps != 0) else np.nan
         # PER = 현재가 / EPS
         per = (close / eps) if (eps and not np.isnan(eps) and eps != 0 and eps > 0) else np.nan
+        # GP/A = 매출총이익 / 총자산 (Novy-Marx 2013)
+        gp_over_assets = (
+            gross_profit / total_assets
+            if (gross_profit is not None and total_assets and total_assets != 0)
+            else np.nan
+        )
+        # 부채비율 = 부채총계 / 자본총계 * 100
+        debt_ratio = (
+            total_liabilities / equity * 100
+            if (total_liabilities is not None and equity and equity != 0)
+            else np.nan
+        )
 
         rows.append({
             "ticker": ticker,
@@ -701,6 +743,8 @@ def get_all_fundamentals_dart(
             "close": int(close),
             "market_cap": int(market_cap),
             "volume": int(volume),
+            "gp_over_assets": gp_over_assets if not np.isnan(gp_over_assets) else np.nan,
+            "debt_ratio": debt_ratio if not np.isnan(debt_ratio) else np.nan,
         })
 
     if not rows:
