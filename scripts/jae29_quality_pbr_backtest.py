@@ -31,7 +31,9 @@ PERIODS = {
 }
 
 STRATEGIES = {
-    "Baseline(V+M)": create_multi_factor("backtest", num_stocks=20),
+    # adj_pbr=False: 보고서 기준 PBR 그대로 사용 (개선 전 기준선)
+    "Baseline(V+M)": create_multi_factor("backtest", num_stocks=20, adj_pbr=False),
+    # adj_pbr=True: close/BPS 가격 보정 추가
     "V+M+adjPBR": MultiFactorStrategy(
         factors=["value", "momentum"],
         weights=[0.5, 0.5],
@@ -39,6 +41,7 @@ STRATEGIES = {
         adj_pbr=True,
         apply_market_timing=False,
     ),
+    # Quality 팩터 추가 (value=0.35, momentum=0.35, quality=0.30) + adjPBR
     "V+M+Q+adjPBR": create_multi_factor(
         "quality", num_stocks=20, adj_pbr=True
     ),
