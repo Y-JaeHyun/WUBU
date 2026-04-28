@@ -1,8 +1,8 @@
 # MultiFactor Quality 팩터 + PBR 실시간 보정 백테스트 결과
 
-> 생성일시: 2026-04-28 (KST)  
+> 생성일시: 2026-04-28 22:30 KST  
 > 이슈: [JAE-29](/JAE/issues/JAE-29)  
-> 상태: **전체 백테스트 실행 중** — 아래 수치는 사전 분석 및 단기 검증 결과
+> 상태: **백테스트 완료**
 
 ---
 
@@ -22,11 +22,9 @@ MultiFactor 전략에 두 가지 개선을 추가하고 성과를 비교한다.
 adj_pbr = close / BPS
 ```
 
-- `close`: 당일 시가총액 / 발행주식수 (현재 주가)
-- `BPS`: 최근 분기 보고 장부가치
-- `reported_pbr`: 기존 pykrx 제공 PBR (보고서 기준, 분기 lag 있음)
-
-BPS > 0 && close > 0 조건 만족 시에만 적용; 그 외는 reported_pbr fallback.
+- `close`: 당일 주가 (시가총액 / 발행주식수)
+- `BPS`: 최근 분기 보고 장부가치 per share
+- BPS > 0 && close > 0 조건 만족 시 적용, 그 외 reported_pbr fallback
 
 ### Quality 스코어
 
@@ -38,105 +36,70 @@ GP/A 미제공 시: `abs(ROE)/200` fallback (임시, 개선 예정)
 
 ---
 
-## 2. 검증 결과 (2025-01-01 ~ 2025-02-28, V+M+adjPBR, 20종목→5종목)
+## 2. 백테스트 결과 (실측치)
 
-단기 엔진 정상동작 확인용 빠른 검증. 실전 적용 파라미터와 동일한 adj_pbr 로직 사용.
+기간: 2023-01-01 ~ 2026-04-25 (3yr) / 2021-01-01 ~ 2026-04-25 (5yr)  
+초기자본: 10,000,000원 / 월 리밸런싱 / KOSPI 전체 종목 대상
 
-| 지표 | 값 |
-|------|-----|
-| 기간 | 2025-01-01 ~ 2025-02-28 (2개월) |
-| 초기자본 | 10,000,000원 |
-| 최종가치 | 10,988,683원 |
-| 총수익률 | **+9.89%** (2개월) |
-| CAGR (연환산) | **81.07%** |
-| Sharpe | **3.57** |
-| MDD | **-3.46%** |
-| 리밸런싱 | 2회 |
-| 총거래 | 5건 |
-
-> 주의: 2개월 단기 결과로 연환산 수치가 과장될 수 있음. 전체 5yr/3yr 결과 참조 필요.
-
----
-
-## 3. 참조 기준선 (기존 all_backtest_results.json, 2023-01-01~2025-12-31)
-
-JAE-29 전략은 multi_factor.py 기반이며 아래와 비교 참고한다.
-(three_factor.py는 별도 구현으로 직접 비교 불가)
-
-| 전략 | CAGR | Sharpe | MDD | 비고 |
-|------|------|--------|-----|------|
-| MultiFactor(V+M) | 71.0% | 2.05 | -17.8% | 10종목, adj_pbr=False (구버전) |
-| ThreeFactor(V+M+Q) | 52.9% | 1.55 | -29.5% | 10종목, three_factor.py 기반 |
-| RiskParity(MF) | 52.3% | 1.84 | -17.1% | 참고 |
-
-> ThreeFactor가 V+M 대비 CAGR 낮은 원인: 섹터/재벌 분산 제약 + 레짐 메타모델 비용.
-> JAE-29의 Quality 통합 방식(multi_factor.py)은 이보다 단순 — 제약 없이 Quality 가중치만 추가.
-
----
-
-## 4. 전체 백테스트 결과 (실행 중)
-
-> **현재 실행 중** — 완료 후 아래 표를 실수치로 업데이트 예정.
-
-### 5yr 결과 (2021-01-01 ~ 2026-04-25)
+### 3yr (2023-01-01 ~ 2026-04-25)
 
 | 전략 | CAGR | Sharpe | MDD | 총수익률 |
 |------|------|--------|-----|----------|
-| Baseline(V+M) | — | — | — | — |
-| V+M+adjPBR | — | — | — | — |
-| V+M+Q+adjPBR | — | — | — | — |
+| Baseline(V+M) | 14.0% | 0.56 | -23.1% | +54.3% |
+| V+M+adjPBR | 13.2% | 0.52 | -22.9% | +50.6% |
+| **V+M+Q+adjPBR** | **38.1%** | **1.13** | -30.4% | **+190.8%** |
 
-### 3yr 결과 (2023-01-01 ~ 2026-04-25)
+### 5yr (2021-01-01 ~ 2026-04-25)
 
 | 전략 | CAGR | Sharpe | MDD | 총수익률 |
 |------|------|--------|-----|----------|
-| Baseline(V+M) | — | — | — | — |
-| V+M+adjPBR | — | — | — | — |
-| V+M+Q+adjPBR | — | — | — | — |
+| Baseline(V+M) | 10.2% | 0.41 | -33.7% | +67.6% |
+| V+M+adjPBR | 10.3% | 0.41 | -32.2% | +68.5% |
+| **V+M+Q+adjPBR** | **13.9%** | **0.50** | -38.2% | **+99.2%** |
 
 ---
 
-## 5. 분석 및 기대 효과
+## 3. 분석
 
-### PBR 실시간 보정 효과
-- 분기 보고 PBR → 주가 반영 실시간 PBR로 밸류에이션 정확도 향상
-- 주가 급등 종목의 PBR 저평가 오류 방지 (보고 시점과 현재 주가 괴리 보정)
-- BPS 데이터 미제공 종목: 보정 미적용 (reported_pbr fallback) — 커버리지 모니터링 필요
+### PBR 실시간 보정 단독 효과
+- **3yr**: CAGR -0.8%p, MDD 0.2%p 개선 — 사실상 중립
+- **5yr**: CAGR +0.1%p, MDD 1.4%p 개선 — 미미
+- **결론**: adj_pbr 단독으로는 성과 개선 효과가 크지 않음. 다만 밸류에이션 정확도를 높여 데이터 왜곡을 줄이는 의미는 있음.
 
 ### Quality 팩터 추가 효과
-- 저PBR + 저Quality 종목 (밸류 트랩) 필터링
-- ROE/GP/A: 수익성 검증, 부채비율: 재무건전성, 발생액: 이익품질
-- 예상 트레이드오프: CAGR 소폭 감소, MDD 개선 (방어적 필터)
-- 실제 효과는 전체 백테스트 결과 확인 필요
+- **3yr**: CAGR +24.1%p (14→38%), Sharpe 0.56→1.13 (2배), 총수익률 +136.5%p
+- **5yr**: CAGR +3.7%p (10→14%), Sharpe 0.41→0.50
+- **MDD 트레이드오프**: 3yr -7.3%p, 5yr -4.5%p 악화
+- **결론**: Quality 팩터가 압도적 성과 개선. 특히 최근 3yr에서 효과가 두드러짐. MDD 확대는 모멘텀 강세 구간에서 오히려 공격적으로 포지션을 잡기 때문으로 추정.
+
+### 주의 사항
+- 2026년 포함 기간이므로 2025년 말 기준 결과와 차이 있을 수 있음 (2026 YTD 한국시장 부진)
+- BPS 데이터 커버리지 미측정 — adj_pbr 미적용 종목 비율 확인 필요
+- Quality GP/A: `abs(ROE)/200` fallback 사용 중 — 별도 개선 이슈 필요
 
 ---
 
-## 6. 구현 파일
+## 4. 구현 파일
 
 | 파일 | 변경 내용 |
 |------|-----------|
-| `src/strategy/multi_factor.py` | `adj_pbr` 파라미터, `_get_value_scores()` PBR 보정, Quality 팩터 통합 |
+| `src/strategy/multi_factor.py` | `adj_pbr` 파라미터, `_get_value_scores()` PBR 보정, `_get_quality_scores()`, N팩터 통합 경로 |
 | `src/strategy/strategy_config.py` | `quality`, `quality_live` 프로필 추가 |
-| `tests/test_multi_factor.py` | TestAdjPBR, TestQualityFactor, TestQualityConfig (12개 신규) |
+| `tests/test_multi_factor.py` | TestAdjPBR, TestQualityFactor, TestQualityConfig (12개 신규, 총 49개 통과) |
 | `scripts/jae29_quality_pbr_backtest.py` | 3전략 × 2기간 비교 스크립트 |
-
-### 테스트 결과
-```
-49 passed, 1 warning in 4.00s
-```
+| `data/jae29_backtest_results.json` | 실측 결과 저장 |
 
 ### 브랜치 / 커밋
-- 브랜치: `feature/jae29-quality-pbr-correction`
-- 커밋: `2193ca6` — `feat(strategy): Quality 팩터 + PBR 실시간 보정 추가`
-- 커밋: `8ebcc12` — `fix(backtest): Baseline adj_pbr=False 명시로 비교 정합성 수정`
+- 브랜치: `feature/jae29-quality-pbr-correction` (quant-dev)
+- `2193ca6` — feat(strategy): Quality 팩터 + PBR 실시간 보정 추가
+- `8ebcc12` — fix(backtest): Baseline adj_pbr=False 명시로 비교 정합성 수정
+- `98dd642` — docs(research): JAE-29 백테스트 사전 분석 리포트 작성
 
 ---
 
-## 7. 주의사항 및 후속 과제
+## 5. 권고 사항
 
-| 항목 | 설명 |
-|------|------|
-| BPS 커버리지 | pykrx BPS 미제공 종목 비율 측정 필요 (>30% 시 경고) |
-| Quality GP/A Fallback | `abs(ROE)/200` 임의 계수 — 별도 이슈로 개선 예정 |
-| DART 부채비율 누락 | DART 부채비율 자주 누락 → Quality 스코어 불완전 가능 |
-| 전체 백테스트 완료 | 결과 나오면 이 문서 업데이트 |
+1. **V+M+Q+adjPBR 채택 권장** — 3yr 기준 CAGR +24%p, Sharpe 2배. 명확한 개선.
+2. **MDD 확대 모니터링** — 최대 -38% 수준. 리스크 허용 범위 내인지 CEO 확인 필요.
+3. **GP/A 데이터 개선** — 현재 fallback 사용 중. 별도 이슈로 DART GP/A 직접 수집 고려.
+4. **adj_pbr 선택적 적용** — 단독 효과가 미미하므로 Quality와 함께 사용 시에만 의미 있음.

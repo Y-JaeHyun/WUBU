@@ -1,0 +1,48 @@
+{
+  "3yr": {
+    "Baseline(V+M)": {
+      "cagr": 14.02,
+      "sharpe_ratio": 0.56,
+      "mdd": -23.1,
+      "total_return": 54.32,
+      "elapsed": 1062.3663539886475
+    },
+    "V+M+adjPBR": {
+      "cagr": 13.18,
+      "sharpe_ratio": 0.52,
+      "mdd": -22.91,
+      "total_return": 50.61,
+      "elapsed": 39.97058844566345
+    },
+    "V+M+Q+adjPBR": {
+      "cagr": 38.09,
+      "sharpe_ratio": 1.13,
+      "mdd": -30.37,
+      "total_return": 190.8,
+      "elapsed": 38.56267786026001
+    }
+  },
+  "5yr": {
+    "Baseline(V+M)": {
+      "cagr": 10.21,
+      "sharpe_ratio": 0.41,
+      "mdd": -33.67,
+      "total_return": 67.55,
+      "elapsed": 1342.5088846683502
+    },
+    "V+M+adjPBR": {
+      "cagr": 10.33,
+      "sharpe_ratio": 0.41,
+      "mdd": -32.23,
+      "total_return": 68.52,
+      "elapsed": 58.52750539779663
+    },
+    "V+M+Q+adjPBR": {
+      "cagr": 13.86,
+      "sharpe_ratio": 0.5,
+      "mdd": -38.18,
+      "total_return": 99.2,
+      "elapsed": 59.41442537307739
+    }
+  }
+}
