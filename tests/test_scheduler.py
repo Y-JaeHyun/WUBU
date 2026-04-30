@@ -292,6 +292,63 @@ class TestKRXHolidays:
             "2028-01-03(월)은 거래일이어야 합니다 (신정은 대체 미적용)."
         )
 
+    def test_labor_day_may_1_not_trading_day(self):
+        """5월 1일(근로자의 날)은 거래일이 아니다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 2026-05-01 (금요일) — 근로자의 날
+        labor_day = datetime.date(2026, 5, 1)
+
+        assert holidays.is_holiday(labor_day) is True, (
+            "2026-05-01(근로자의 날)은 공휴일이어야 합니다."
+        )
+        assert holidays.is_trading_day(labor_day) is False, (
+            "2026-05-01(근로자의 날)은 거래일이 아닙니다."
+        )
+
+    def test_labor_day_no_substitute(self):
+        """근로자의 날(05-01)은 대체공휴일 적용 대상이 아니다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 2027-05-01은 토요일 — 대체공휴일 미적용
+        may_3 = datetime.date(2027, 5, 3)  # 월요일
+
+        assert holidays.is_trading_day(may_3) is True, (
+            "2027-05-03(월)은 거래일이어야 합니다 (근로자의 날 대체공휴일 미적용)."
+        )
+
+    def test_may_2026_first_trading_day_is_may_4(self):
+        """2026년 5월 첫 거래일은 05-04(월)이다 (05-01 근로자의 날 휴장)."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 2026-04-30 (목요일) 다음 거래일 확인
+        apr_30 = datetime.date(2026, 4, 30)
+        next_td = holidays.next_trading_day(apr_30)
+
+        assert next_td == datetime.date(2026, 5, 4), (
+            f"2026-04-30 다음 거래일은 2026-05-04(월)이어야 합니다: {next_td}"
+        )
+
+    def test_may_2026_rebalance_day_is_may_4(self):
+        """2026년 5월 리밸런싱일은 05-04(월)이다 (05-01 근로자의 날 제외)."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 05-01은 리밸런싱일이 아님
+        may_1 = datetime.date(2026, 5, 1)
+        assert holidays.is_rebalance_day(may_1, freq="monthly") is False, (
+            "2026-05-01(근로자의 날)은 리밸런싱일이 아닙니다."
+        )
+
+        # 05-04가 리밸런싱일
+        may_4 = datetime.date(2026, 5, 4)
+        assert holidays.is_rebalance_day(may_4, freq="monthly") is True, (
+            "2026-05-04(월)은 5월 첫 거래일이므로 리밸런싱일이어야 합니다."
+        )
+
 
 # ===================================================================
 # TradingBot 테스트
