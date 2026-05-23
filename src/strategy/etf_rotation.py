@@ -27,7 +27,7 @@ DEFAULT_ETF_UNIVERSE: dict[str, str] = {
     "117700": "KODEX 건설",
     "132030": "KODEX 골드선물(H)",
     "464310": "TIGER 글로벌AI&로보틱스INDXX",
-    "469150": "ACE AI반도체포커스",
+    "469150": "ACE AI반도체TOP3+",
     "439870": "KODEX 단기채권",
     "445290": "KODEX 로봇액티브",
     "434730": "HANARO 원자력iSelect",
