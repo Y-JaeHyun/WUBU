@@ -107,7 +107,7 @@ class KRXHolidays:
     # 특별 공휴일 (선거일, 임시공휴일 등 — 연도별 MM-DD 리스트)
     SPECIAL_HOLIDAYS: dict[int, list[str]] = {
         2026: [
-            "06-03",  # 제8회 전국 동시 지방선거일
+            "06-03",  # 제9회 전국동시지방선거
         ],
     }
 

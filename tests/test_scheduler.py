@@ -349,6 +349,67 @@ class TestKRXHolidays:
             "2026-05-04(월)은 5월 첫 거래일이므로 리밸런싱일이어야 합니다."
         )
 
+    def test_chuseok_substitute_holiday_2026(self):
+        """2026-09-28은 추석 대체공휴일이다 (추석 마지막날 09-26이 토요일)."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 추석 연휴: 09-24(목), 09-25(금), 09-26(토, 추석당일) → 09-28(월) 대체
+        # LUNAR_HOLIDAYS에 수동 등록된 대체공휴일
+        substitute = datetime.date(2026, 9, 28)
+
+        assert holidays.is_holiday(substitute) is True, (
+            "2026-09-28은 추석 대체공휴일이어야 합니다."
+        )
+        assert holidays.is_trading_day(substitute) is False, (
+            "2026-09-28(추석 대체공휴일)는 거래일이 아닙니다."
+        )
+
+    def test_constitution_day_2026(self):
+        """2026-07-17(제헌절)은 공휴일이다 (2026년부터 공휴일 재지정)."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 07-17은 금요일 → 대체공휴일 없음, 당일만 공휴일
+        constitution_day = datetime.date(2026, 7, 17)
+
+        assert holidays.is_holiday(constitution_day) is True, (
+            "2026-07-17(제헌절)은 공휴일이어야 합니다."
+        )
+        assert holidays.is_trading_day(constitution_day) is False, (
+            "2026-07-17(제헌절)은 거래일이 아닙니다."
+        )
+
+    def test_local_election_day_2026(self):
+        """2026-06-03(전국동시지방선거)은 SPECIAL_HOLIDAYS에 등록된 공휴일이다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        election_day = datetime.date(2026, 6, 3)
+
+        assert holidays.is_holiday(election_day) is True, (
+            "2026-06-03(지방선거일)은 공휴일이어야 합니다."
+        )
+        assert holidays.is_trading_day(election_day) is False, (
+            "2026-06-03(지방선거일)은 거래일이 아닙니다."
+        )
+
+    def test_memorial_day_saturday_no_substitute_2026(self):
+        """2026-06-06(현충일)은 토요일이지만 대체공휴일이 없다."""
+        KRXHolidays = _import_krx_holidays()
+        holidays = KRXHolidays()
+
+        # 현충일(06-06)은 SUBSTITUTE_ELIGIBLE_FIXED에 포함되지 않음 → 대체 없음
+        memorial_day = datetime.date(2026, 6, 6)
+        assert holidays.is_weekend(memorial_day) is True, (
+            "2026-06-06은 토요일이어야 합니다."
+        )
+        # 다음 월요일(06-08)은 대체공휴일이 아닌 일반 거래일
+        monday_after = datetime.date(2026, 6, 8)
+        assert holidays.is_trading_day(monday_after) is True, (
+            "2026-06-08(월)은 거래일이어야 합니다 (현충일은 대체공휴일 미적용)."
+        )
+
 
 # ===================================================================
 # TradingBot 테스트

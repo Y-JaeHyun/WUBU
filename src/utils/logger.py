@@ -25,9 +25,12 @@ def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     console.setFormatter(formatter)
     logger.addHandler(console)
 
-    # 파일 핸들러
-    file_handler = logging.FileHandler(LOG_DIR / "quant.log", encoding="utf-8")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    # 파일 핸들러 (권한 없는 환경에서는 콘솔만 사용)
+    try:
+        file_handler = logging.FileHandler(LOG_DIR / "quant.log", encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    except (PermissionError, OSError):
+        pass
 
     return logger
