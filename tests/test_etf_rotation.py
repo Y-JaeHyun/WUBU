@@ -54,8 +54,8 @@ class TestETFRotationInit:
         assert "469150" in DEFAULT_ETF_UNIVERSE  # ACE AI반도체포커스
 
     def test_default_universe_size(self):
-        """기본 유니버스는 10개 ETF를 포함한다."""
-        assert len(DEFAULT_ETF_UNIVERSE) == 10
+        """기본 유니버스는 16개 ETF를 포함한다."""
+        assert len(DEFAULT_ETF_UNIVERSE) == 16
 
     def test_invalid_weighting_raises(self):
         """지원하지 않는 가중 방식은 ValueError를 발생시킨다."""

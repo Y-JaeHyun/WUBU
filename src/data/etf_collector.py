@@ -27,6 +27,12 @@ ETF_UNIVERSE: dict[str, dict[str, str]] = {
     "gold": {"ticker": "132030", "name": "KODEX 골드선물(H)"},
     "inverse_200": {"ticker": "114800", "name": "KODEX 인버스"},
     "gov_bond_10y": {"ticker": "148070", "name": "KOSEF 국고채10년"},
+    "robot_active": {"ticker": "445290", "name": "KODEX 로봇액티브"},
+    "nuclear_energy": {"ticker": "434730", "name": "HANARO 원자력iSelect"},
+    "space_uam": {"ticker": "421320", "name": "PLUS 우주항공&UAM"},
+    "defense_space": {"ticker": "463250", "name": "TIGER K방산&우주"},
+    "ev_battery": {"ticker": "305540", "name": "TIGER 2차전지테마"},
+    "bio": {"ticker": "244580", "name": "KODEX 바이오"},
 }
 
 
