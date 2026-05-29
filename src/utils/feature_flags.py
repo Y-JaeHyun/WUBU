@@ -189,7 +189,7 @@ class FeatureFlags:
                 "n_select": 3,
                 "rebalance_freq": "monthly",
                 "volatility_target": 0.0,
-                "etf_rotation_pct": 0.30,
+                "etf_rotation_pct": 0.40,
                 "max_same_sector": 1,
                 "momentum_cap": 3.0,
                 "top1_weight": 0.5,
