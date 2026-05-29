@@ -748,15 +748,15 @@ class TestDaytradingClose:
 class TestSetupScheduleShortTerm:
     """setup_schedule에 단기 스케줄이 추가되는지 검증."""
 
-    def test_schedule_has_21_jobs(self):
-        """setup_schedule 후 21개의 작업이 등록된다 (기존 20 + prewarm_cache 1)."""
+    def test_schedule_has_22_jobs(self):
+        """setup_schedule 후 22개의 작업이 등록된다 (기존 21 + cash_injection_check 1)."""
         bot = _make_bot_with_flag(False)
 
         bot.setup_schedule()
 
         jobs = bot.scheduler.get_jobs()
-        assert len(jobs) == 21, (
-            f"21개 작업이 등록되어야 합니다. 실제: {len(jobs)}개"
+        assert len(jobs) == 22, (
+            f"22개 작업이 등록되어야 합니다. 실제: {len(jobs)}개"
         )
 
     def test_short_term_job_ids_exist(self):
@@ -2047,3 +2047,284 @@ class TestLiveSignalsFallback:
         assert len(collected_dates) == 1
         assert collected_dates[0] == "20260306"
         bot.holidays.prev_trading_day.assert_called_once()
+
+
+# ===================================================================
+# JAE-65: 자본주입 감지 및 ETF 풀 자동 보충 매수 트리거 테스트
+# ===================================================================
+
+def _make_etf_bot():
+    """ETF 로테이션 활성화된 TradingBot mock을 반환한다."""
+    TradingBot = _import_trading_bot()
+
+    with patch.dict("os.environ", {
+        "TELEGRAM_BOT_TOKEN": "",
+        "TELEGRAM_CHAT_ID": "",
+    }):
+        with patch("src.scheduler.main.KISClient") as mock_kis_cls, \
+             patch("src.scheduler.main.TelegramNotifier") as mock_notifier_cls, \
+             patch("src.scheduler.main.PortfolioAllocator") as mock_allocator_cls, \
+             patch("src.scheduler.main.FeatureFlags") as mock_flags_cls, \
+             patch("src.scheduler.main.DataCache"), \
+             patch("src.scheduler.main.TelegramCommander"), \
+             patch("src.scheduler.main.PortfolioTracker"), \
+             patch("src.scheduler.main.StockReviewer"), \
+             patch("src.scheduler.main.NightResearcher"):
+
+            mock_kis = MagicMock()
+            mock_kis.is_paper = True
+            mock_kis.is_configured.return_value = True
+            mock_kis.mode_tag = "[모의]"
+            mock_kis_cls.return_value = mock_kis
+
+            mock_notifier = MagicMock()
+            mock_notifier.is_configured.return_value = False
+            mock_notifier_cls.return_value = mock_notifier
+
+            mock_flags = MagicMock()
+            mock_flags.is_enabled.side_effect = lambda name: name in (
+                "etf_rotation",
+            )
+            mock_flags.get_config.return_value = {
+                "etf_rotation_pct": 0.30,
+                "lookback_months": 12,
+                "n_select": 2,
+                "max_same_sector": 1,
+            }
+            mock_flags_cls.return_value = mock_flags
+
+            mock_allocator = MagicMock()
+            mock_allocator._etf_rotation_pct = 0.30
+            mock_allocator_cls.return_value = mock_allocator
+
+            bot = TradingBot()
+            bot._is_trading_day = MagicMock(return_value=True)
+            bot._is_rebalance_day = MagicMock(return_value=False)
+            bot._send_notification = MagicMock()
+            bot.allocator = mock_allocator
+
+            return bot
+
+
+class TestCheckEtfTopupTrigger:
+    """check_etf_topup_trigger 조건 검증."""
+
+    def test_condition_a_cash_ratio_exceeds_threshold(self):
+        """조건 A: ETF 현금 비중 > 25%이면 트리거된다."""
+        bot = _make_etf_bot()
+
+        # ETF 예산 1000만원 중 현금 300만원 (30% > 25%)
+        bot.allocator.get_etf_rotation_budget.return_value = 10_000_000
+        bot.allocator.get_etf_rotation_cash.return_value = 3_000_000
+
+        bot._load_nav_snapshot = MagicMock(return_value={})  # 이전 NAV 없음
+
+        triggered, reason = bot.check_etf_topup_trigger(10_000_000)
+
+        assert triggered is True
+        assert "조건A" in reason
+
+    def test_condition_b_capital_injection_detected(self):
+        """조건 B: 자본주입 > NAV 10%이면 트리거된다."""
+        bot = _make_etf_bot()
+
+        # ETF 현금 비중은 10% (25% 이하 → 조건A 미충족)
+        # 하지만 1000만원 → 1200만원으로 200만원(20%) 주입됨
+        bot.allocator.get_etf_rotation_budget.return_value = 12_000_000
+        bot.allocator.get_etf_rotation_cash.return_value = 1_200_000  # 10%
+
+        bot._load_nav_snapshot = MagicMock(return_value={
+            "last_nav": 10_000_000,
+            "last_nav_timestamp": "2026-05-24T16:00:00+09:00",
+        })
+
+        triggered, reason = bot.check_etf_topup_trigger(12_000_000)
+
+        assert triggered is True
+        assert "조건B" in reason
+
+    def test_no_trigger_when_conditions_not_met(self):
+        """조건 A·B 모두 미충족이면 트리거되지 않는다."""
+        bot = _make_etf_bot()
+
+        # ETF 현금 비중 15% (25% 미만)
+        bot.allocator.get_etf_rotation_budget.return_value = 10_000_000
+        bot.allocator.get_etf_rotation_cash.return_value = 1_500_000
+
+        # NAV 변동 5% (10% 미만)
+        bot._load_nav_snapshot = MagicMock(return_value={
+            "last_nav": 10_000_000,
+        })
+
+        triggered, reason = bot.check_etf_topup_trigger(10_500_000)
+
+        assert triggered is False
+
+    def test_no_trigger_on_rebalance_day(self):
+        """정규 리밸런싱일이면 트리거되지 않는다 (09:05에 처리)."""
+        bot = _make_etf_bot()
+        bot._is_rebalance_day = MagicMock(return_value=True)
+
+        bot.allocator.get_etf_rotation_budget.return_value = 10_000_000
+        bot.allocator.get_etf_rotation_cash.return_value = 5_000_000  # 50%
+
+        triggered, reason = bot.check_etf_topup_trigger(10_000_000)
+
+        assert triggered is False
+        assert "리밸런싱일" in reason
+
+    def test_no_trigger_overbuy_prevention(self):
+        """ETF 풀 현금 비중이 5% 이하면 과매수 방지로 트리거되지 않는다."""
+        bot = _make_etf_bot()
+
+        # ETF 현금 비중 3% (5% 이하)
+        bot.allocator.get_etf_rotation_budget.return_value = 10_000_000
+        bot.allocator.get_etf_rotation_cash.return_value = 300_000
+
+        # 자본주입 감지됐어도
+        bot._load_nav_snapshot = MagicMock(return_value={
+            "last_nav": 8_000_000,
+        })
+
+        triggered, reason = bot.check_etf_topup_trigger(10_000_000)
+
+        assert triggered is False
+        assert "이미 충분히 투자됨" in reason
+
+    def test_no_trigger_when_etf_disabled(self):
+        """ETF 로테이션 비활성화 시 트리거되지 않는다."""
+        bot = _make_etf_bot()
+        bot.feature_flags.is_enabled.side_effect = lambda name: False
+
+        triggered, reason = bot.check_etf_topup_trigger(10_000_000)
+
+        assert triggered is False
+        assert "ETF 로테이션 비활성화" in reason
+
+
+class TestExecuteEtfTopup:
+    """execute_etf_topup 실행 경로 검증."""
+
+    def test_skips_when_no_etf_signals(self):
+        """ETF 시그널이 없으면 매수를 스킵한다."""
+        bot = _make_etf_bot()
+        bot._generate_etf_signals = MagicMock(return_value={})
+        bot.allocator.get_etf_rotation_budget.return_value = 10_000_000
+        bot.allocator.get_etf_rotation_cash.return_value = 3_000_000
+        bot.executor = MagicMock()
+
+        bot.execute_etf_topup()
+
+        bot.executor.execute_rebalance.assert_not_called()
+        bot._send_notification.assert_called()
+
+    def test_executes_etf_rebalance_when_signals_exist(self):
+        """ETF 시그널이 있으면 etf_rotation 풀로 리밸런싱을 실행한다."""
+        bot = _make_etf_bot()
+        etf_signals = {"069500": 0.6, "148070": 0.4}
+        bot._generate_etf_signals = MagicMock(return_value=etf_signals)
+        bot.allocator.get_etf_rotation_budget.return_value = 10_000_000
+        bot.allocator.get_etf_rotation_cash.return_value = 3_000_000
+
+        mock_executor = MagicMock()
+        mock_executor.execute_rebalance.return_value = {
+            "success": True, "buys": [], "total_buy_amount": 2_500_000, "errors": [],
+        }
+        bot.executor = mock_executor
+
+        bot.execute_etf_topup()
+
+        mock_executor.execute_rebalance.assert_called_once_with(
+            etf_signals, pool="etf_rotation"
+        )
+
+    def test_skips_on_non_trading_day(self):
+        """비거래일이면 매수를 실행하지 않는다."""
+        bot = _make_etf_bot()
+        bot._is_trading_day = MagicMock(return_value=False)
+        bot.executor = MagicMock()
+
+        bot.execute_etf_topup()
+
+        bot.executor.execute_rebalance.assert_not_called()
+
+
+class TestDailyCashInjectionCheck:
+    """daily_cash_injection_check 스케줄 작업 검증."""
+
+    def test_skips_when_etf_disabled(self):
+        """ETF 로테이션 비활성화 시 체크를 스킵한다."""
+        bot = _make_etf_bot()
+        bot.feature_flags.is_enabled.side_effect = lambda name: False
+        bot.check_etf_topup_trigger = MagicMock()
+
+        bot.daily_cash_injection_check()
+
+        bot.check_etf_topup_trigger.assert_not_called()
+
+    def test_initializes_snapshot_on_first_run(self):
+        """첫 실행 시 NAV 스냅샷을 초기화하고 매수를 실행하지 않는다."""
+        bot = _make_etf_bot()
+        bot.kis_client.get_balance.return_value = {"total_eval": 10_000_000}
+        bot._load_nav_snapshot = MagicMock(return_value={})
+        bot._save_nav_snapshot = MagicMock()
+        bot.execute_etf_topup = MagicMock()
+
+        bot.daily_cash_injection_check()
+
+        bot._save_nav_snapshot.assert_called_once_with(10_000_000)
+        bot.execute_etf_topup.assert_not_called()
+
+    def test_triggers_topup_when_condition_met(self):
+        """트리거 조건 충족 시 execute_etf_topup을 호출한다."""
+        bot = _make_etf_bot()
+        bot.kis_client.get_balance.return_value = {"total_eval": 12_000_000}
+        bot._load_nav_snapshot = MagicMock(return_value={
+            "last_nav": 10_000_000,
+        })
+        bot._save_nav_snapshot = MagicMock()
+        bot.check_etf_topup_trigger = MagicMock(
+            return_value=(True, "조건B(자본주입 2000000원 ≥ NAV 10%)")
+        )
+        bot.execute_etf_topup = MagicMock()
+
+        bot.daily_cash_injection_check()
+
+        bot.execute_etf_topup.assert_called_once()
+        bot._save_nav_snapshot.assert_called_with(12_000_000)
+
+    def test_no_topup_when_conditions_not_met(self):
+        """조건 미충족 시 execute_etf_topup을 호출하지 않는다."""
+        bot = _make_etf_bot()
+        bot.kis_client.get_balance.return_value = {"total_eval": 10_100_000}
+        bot._load_nav_snapshot = MagicMock(return_value={
+            "last_nav": 10_000_000,
+        })
+        bot._save_nav_snapshot = MagicMock()
+        bot.check_etf_topup_trigger = MagicMock(
+            return_value=(False, "조건 미충족")
+        )
+        bot.execute_etf_topup = MagicMock()
+
+        bot.daily_cash_injection_check()
+
+        bot.execute_etf_topup.assert_not_called()
+
+    def test_cash_injection_check_job_exists_in_schedule(self):
+        """setup_schedule 후 cash_injection_check 작업이 등록된다."""
+        bot = _make_etf_bot()
+        with patch("src.scheduler.main.BlockingScheduler"):
+            from apscheduler.schedulers.blocking import BlockingScheduler
+            bot.scheduler = MagicMock()
+            bot.setup_schedule()
+
+        job_ids = [
+            call.kwargs.get("id") or call.args[2]
+            for call in bot.scheduler.add_job.call_args_list
+            if len(call.args) >= 3 or "id" in call.kwargs
+        ]
+        add_job_kwargs = [
+            call.kwargs.get("id")
+            for call in bot.scheduler.add_job.call_args_list
+        ]
+        assert "cash_injection_check" in add_job_kwargs
