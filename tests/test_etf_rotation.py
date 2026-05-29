@@ -1280,3 +1280,155 @@ class TestMomentumCap:
         defaults = FeatureFlags.DEFAULT_FLAGS["etf_rotation"]
         assert "momentum_cap" in defaults["config"]
         assert defaults["config"]["momentum_cap"] == 3.0
+
+
+# ===================================================================
+# top1_weight 테스트
+# ===================================================================
+
+class TestTop1Weight:
+    """top1_weight 파라미터 검증."""
+
+    @staticmethod
+    def _make_etf_price(start, end, n_days=100):
+        dates = pd.date_range("2023-01-01", periods=n_days, freq="B")
+        prices = np.linspace(start, end, n_days)
+        return pd.DataFrame({"close": prices, "volume": [1_000_000] * n_days}, index=dates)
+
+    @staticmethod
+    def _make_3sector_universe():
+        """섹터가 서로 다른 3개 ETF 유니버스 (섹터 필터 통과 보장)."""
+        return {
+            "069500": "KODEX 200",       # 국내지수
+            "360750": "TIGER 미국S&P500",  # 미국지수
+            "091160": "KODEX 반도체",      # 반도체
+            "439870": "KODEX 단기채권",
+        }
+
+    def test_default_top1_weight_is_zero(self):
+        """기본 top1_weight는 0.0이다."""
+        s = ETFRotationStrategy()
+        assert s.top1_weight == 0.0
+
+    def test_invalid_top1_weight_raises(self):
+        """top1_weight가 [0, 1) 범위를 벗어나면 ValueError를 발생시킨다."""
+        with pytest.raises(ValueError, match="top1_weight"):
+            ETFRotationStrategy(top1_weight=-0.1)
+        with pytest.raises(ValueError, match="top1_weight"):
+            ETFRotationStrategy(top1_weight=1.0)
+
+    def test_top1_weight_50_gives_50_25_25_split(self):
+        """top1_weight=0.5이면 1위 50%, 2위 25%, 3위 25% 비중이 배분된다."""
+        universe = self._make_3sector_universe()
+        s = ETFRotationStrategy(
+            lookback=60,
+            num_etfs=3,
+            etf_universe=universe,
+            safe_asset="439870",
+            weighting="equal",
+            top1_weight=0.50,
+            abs_momentum=False,
+            max_same_sector=1,
+        )
+
+        etf_prices = {
+            "069500": self._make_etf_price(10000, 13000),  # 1위
+            "360750": self._make_etf_price(10000, 11000),  # 2위
+            "091160": self._make_etf_price(10000, 10500),  # 3위
+        }
+
+        signals = s.generate_signals("20240101", {"etf_prices": etf_prices})
+
+        assert len(signals) == 3
+        sorted_w = sorted(signals.values(), reverse=True)
+        assert abs(sorted_w[0] - 0.50) < 1e-6, f"top-1 비중은 50%여야 함: {sorted_w[0]}"
+        assert abs(sorted_w[1] - 0.25) < 1e-6, f"top-2 비중은 25%여야 함: {sorted_w[1]}"
+        assert abs(sorted_w[2] - 0.25) < 1e-6, f"top-3 비중은 25%여야 함: {sorted_w[2]}"
+        assert abs(sum(signals.values()) - 1.0) < 1e-6
+
+    def test_top1_weight_55_gives_55_225_225_split(self):
+        """top1_weight=0.55이면 1위 55%, 2위/3위 각 22.5% 비중이 배분된다."""
+        universe = self._make_3sector_universe()
+        s = ETFRotationStrategy(
+            lookback=60,
+            num_etfs=3,
+            etf_universe=universe,
+            safe_asset="439870",
+            weighting="equal",
+            top1_weight=0.55,
+            abs_momentum=False,
+            max_same_sector=1,
+        )
+
+        etf_prices = {
+            "069500": self._make_etf_price(10000, 13000),
+            "360750": self._make_etf_price(10000, 11000),
+            "091160": self._make_etf_price(10000, 10500),
+        }
+
+        signals = s.generate_signals("20240101", {"etf_prices": etf_prices})
+
+        sorted_w = sorted(signals.values(), reverse=True)
+        assert abs(sorted_w[0] - 0.55) < 1e-6
+        assert abs(sorted_w[1] - 0.225) < 1e-6
+        assert abs(sorted_w[2] - 0.225) < 1e-6
+
+    def test_top1_weight_zero_gives_equal_weight(self):
+        """top1_weight=0이면 기존 equal weight와 동일하다."""
+        universe = self._make_3sector_universe()
+        s = ETFRotationStrategy(
+            lookback=60,
+            num_etfs=3,
+            etf_universe=universe,
+            safe_asset="439870",
+            weighting="equal",
+            top1_weight=0.0,
+            abs_momentum=False,
+            max_same_sector=1,
+        )
+
+        etf_prices = {
+            "069500": self._make_etf_price(10000, 13000),
+            "360750": self._make_etf_price(10000, 11000),
+            "091160": self._make_etf_price(10000, 10500),
+        }
+
+        signals = s.generate_signals("20240101", {"etf_prices": etf_prices})
+
+        for w in signals.values():
+            assert abs(w - 1 / 3) < 1e-6
+
+    def test_top1_weight_with_safe_asset_replacement(self):
+        """절대모멘텀 필터로 일부 ETF가 안전자산으로 대체될 때 비중이 올바르다."""
+        universe = self._make_3sector_universe()
+        s = ETFRotationStrategy(
+            lookback=60,
+            num_etfs=3,
+            etf_universe=universe,
+            safe_asset="439870",
+            weighting="equal",
+            top1_weight=0.50,
+            abs_momentum=True,
+            max_same_sector=1,
+        )
+
+        etf_prices = {
+            "069500": self._make_etf_price(10000, 13000),   # +30% 양의 모멘텀
+            "360750": self._make_etf_price(10000, 11000),   # +10% 양의 모멘텀
+            "091160": self._make_etf_price(13000, 10500),   # 음의 모멘텀 → safe_asset
+        }
+
+        signals = s.generate_signals("20240101", {"etf_prices": etf_prices})
+
+        # 음의 모멘텀 ETF는 제외, total_slots=3이므로 safe_asset 포함
+        assert sum(signals.values()) == pytest.approx(1.0, abs=1e-6)
+        # 2개 ETF + 안전자산 슬롯 → 총 3슬롯
+        assert "439870" in signals
+
+    def test_feature_flag_has_top1_weight(self):
+        """etf_rotation DEFAULT_FLAGS에 top1_weight가 포함된다."""
+        from src.utils.feature_flags import FeatureFlags
+
+        defaults = FeatureFlags.DEFAULT_FLAGS["etf_rotation"]
+        assert "top1_weight" in defaults["config"]
+        assert defaults["config"]["top1_weight"] == 0.5

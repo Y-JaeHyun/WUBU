@@ -78,6 +78,10 @@ class ETFRotationStrategy(Strategy):
         momentum_cap: 모멘텀 절대 상한 (기본 3.0 = 300%).
             극단적 모멘텀(예: +400%)이 z-score를 왜곡하는 것을 방지.
             0 이하이면 캡 비활성화.
+        top1_weight: top-1 ETF의 초과 비중 (0.0 = 동일가중, 0.5~0.55 권장).
+            0.0보다 크면 1위 ETF가 해당 비율을 가져가고 나머지 ETF가 나눈다.
+            예: num_etfs=3, top1_weight=0.50 → 50%/25%/25%.
+            0.0이면 기존 equal 또는 inverse_vol 방식 그대로.
     """
 
     def __init__(
@@ -90,6 +94,7 @@ class ETFRotationStrategy(Strategy):
         abs_momentum: bool = True,
         max_same_sector: int = 1,
         momentum_cap: float = 3.0,
+        top1_weight: float = 0.0,
     ):
         self.lookback = lookback
         self.num_etfs = num_etfs
@@ -99,11 +104,17 @@ class ETFRotationStrategy(Strategy):
         self.abs_momentum = abs_momentum
         self.max_same_sector = max_same_sector
         self.momentum_cap = momentum_cap
+        self.top1_weight = top1_weight
 
         if weighting not in ("equal", "inverse_vol"):
             raise ValueError(
                 f"지원하지 않는 가중 방식: {weighting}. "
                 "'equal' 또는 'inverse_vol' 중 선택하세요."
+            )
+
+        if not (0.0 <= top1_weight < 1.0):
+            raise ValueError(
+                f"top1_weight는 0.0 이상 1.0 미만이어야 합니다: {top1_weight}"
             )
 
         # 단계적 fallback lookback 목록
@@ -116,7 +127,7 @@ class ETFRotationStrategy(Strategy):
             f"ETFRotationStrategy 초기화: lookback={lookback}, "
             f"num_etfs={num_etfs}, safe_asset={safe_asset}, "
             f"weighting={weighting}, max_same_sector={max_same_sector}, "
-            f"momentum_cap={momentum_cap}, "
+            f"momentum_cap={momentum_cap}, top1_weight={top1_weight}, "
             f"universe={len(self.etf_universe)}개"
         )
 
@@ -418,10 +429,22 @@ class ETFRotationStrategy(Strategy):
             return {}
 
         if self.weighting == "equal":
-            slot_weight = 1.0 / total_slots
-            signals = {t: slot_weight for t in selected_tickers}
-            if safe_asset_count > 0:
-                signals[self.safe_asset] = slot_weight * safe_asset_count
+            if self.top1_weight > 0 and len(selected_tickers) >= 2:
+                # top-1 집중 가중: 1위가 top1_weight, 나머지가 균등 분배
+                risky_slots = len(selected_tickers)
+                risky_portion = risky_slots / total_slots
+                others_weight = (1.0 - self.top1_weight) / (risky_slots - 1)
+                signals = {}
+                for i, t in enumerate(selected_tickers):
+                    base_w = self.top1_weight if i == 0 else others_weight
+                    signals[t] = base_w * risky_portion
+                if safe_asset_count > 0:
+                    signals[self.safe_asset] = safe_asset_count / total_slots
+            else:
+                slot_weight = 1.0 / total_slots
+                signals = {t: slot_weight for t in selected_tickers}
+                if safe_asset_count > 0:
+                    signals[self.safe_asset] = slot_weight * safe_asset_count
         elif self.weighting == "inverse_vol":
             if selected_tickers:
                 risk_weights = self._calculate_inverse_vol_weights(
