@@ -54,8 +54,25 @@ class TestETFRotationInit:
         assert "469150" in DEFAULT_ETF_UNIVERSE  # ACE AI반도체포커스
 
     def test_default_universe_size(self):
-        """기본 유니버스는 16개 ETF를 포함한다."""
-        assert len(DEFAULT_ETF_UNIVERSE) == 16
+        """기본 유니버스는 22개 ETF를 포함한다 (JAE-63: 6종 신규 편입)."""
+        assert len(DEFAULT_ETF_UNIVERSE) == 22
+
+    def test_jae63_etfs_in_default_universe(self):
+        """JAE-63 승인 6종 ETF가 기본 유니버스와 섹터맵에 포함된다."""
+        jae63_tickers = {
+            "0102A0": "미국AI-SW",
+            "0086B0": "리츠",
+            "0104N0": "인컴",
+            "0098F0": "에너지",
+            "491820": "전력인프라",
+            "0105E0": "고배당",
+        }
+        for ticker, expected_sector in jae63_tickers.items():
+            assert ticker in DEFAULT_ETF_UNIVERSE, f"{ticker} 유니버스 누락"
+            assert ticker in ETF_SECTOR_MAP, f"{ticker} 섹터맵 누락"
+            assert ETF_SECTOR_MAP[ticker] == expected_sector, (
+                f"{ticker} 섹터 불일치: {ETF_SECTOR_MAP[ticker]} != {expected_sector}"
+            )
 
     def test_invalid_weighting_raises(self):
         """지원하지 않는 가중 방식은 ValueError를 발생시킨다."""
