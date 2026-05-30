@@ -27,8 +27,8 @@ class RiskGuard:
     Config keys (from env or dict):
         max_order_pct: 1건당 최대 비중 (기본 0.10 = 10%).
         max_daily_turnover: 일일 최대 회전율 (기본 0.30 = 30%).
-        max_single_stock_pct: 개별종목 최대 비중 (기본 0.15 = 15%).
-        max_single_etf_pct: ETF 최대 비중 (기본 0.25 = 25%).
+        max_single_stock_pct: 개별종목 최대 비중 (기본 1.0 = 제한 없음).
+        max_single_etf_pct: ETF 최대 비중 (기본 1.0 = 제한 없음).
         blocked_tickers: 매매 금지 종목 리스트 (콤마 구분 문자열).
         etf_tickers: ETF 종목코드 집합 (차등 비중 한도 적용).
 
@@ -44,15 +44,15 @@ class RiskGuard:
     # 모의투자 기본 한도
     DEFAULT_MAX_ORDER_PCT = 0.10
     DEFAULT_MAX_DAILY_TURNOVER = 1.50
-    DEFAULT_MAX_SINGLE_STOCK_PCT = 0.15
-    DEFAULT_MAX_SINGLE_ETF_PCT = 0.25
+    DEFAULT_MAX_SINGLE_STOCK_PCT = 1.0
+    DEFAULT_MAX_SINGLE_ETF_PCT = 1.0
 
     # 실전투자 기본 한도
     # 월 1회 통합 리밸런싱: (매도+매수)/총액 기준 60~100% 정상 범위
     LIVE_MAX_ORDER_PCT = 0.05
     LIVE_MAX_DAILY_TURNOVER = 1.00
-    LIVE_MAX_SINGLE_STOCK_PCT = 0.10
-    LIVE_MAX_SINGLE_ETF_PCT = 0.20
+    LIVE_MAX_SINGLE_STOCK_PCT = 1.0
+    LIVE_MAX_SINGLE_ETF_PCT = 1.0
 
     def __init__(
         self,

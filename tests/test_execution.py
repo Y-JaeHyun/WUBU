@@ -626,15 +626,17 @@ class TestDualTradingMode:
         """실전 모드 RiskGuard가 보수적 한도를 사용한다."""
         RiskGuard = _import_risk_guard()
 
-        paper_rg = RiskGuard()
         live_rg = RiskGuard(is_live=True)
 
-        assert live_rg.max_order_pct < paper_rg.max_order_pct
-        assert live_rg.max_daily_turnover < paper_rg.max_daily_turnover
-        assert live_rg.max_single_stock_pct < paper_rg.max_single_stock_pct
+        # 주문 비중·회전율 한도는 실전이 더 보수적
+        assert live_rg.max_order_pct == 0.05
+        assert live_rg.max_daily_turnover == 1.0
+        # 개별 비중 제약 없음 (1.0 = 무제한)
+        assert live_rg.max_single_stock_pct == 1.0
+        assert live_rg.max_single_etf_pct == 1.0
 
     def test_etf_higher_weight_limit(self):
-        """ETF 종목은 개별주식보다 높은 비중 한도를 적용한다."""
+        """ETF/주식 비중 제약 없이 포트폴리오 비중을 허용한다."""
         RiskGuard = _import_risk_guard()
 
         etf_tickers = {"069500", "371460", "132030"}
@@ -643,13 +645,13 @@ class TestDualTradingMode:
             etf_tickers=etf_tickers,
         )
 
-        # ETF 12.3% → 실전 ETF 한도 20% 이내 → 통과
-        target = {"069500": 0.123, "371460": 0.101, "005930": 0.076}
+        # ETF 13.3%, 주식 6% → 비중 제약 없으므로 통과
+        target = {"069500": 0.133, "371460": 0.133, "005930": 0.06}
         passed, warnings = rg.check_rebalance(target)
-        assert passed is True, f"ETF 12.3%는 통과해야 합니다: {warnings}"
+        assert passed is True, f"비중 제약 없이 통과해야 합니다: {warnings}"
 
     def test_etf_exceeds_etf_limit(self):
-        """ETF도 ETF 한도를 초과하면 거부된다."""
+        """개별 비중 제약이 없으므로 높은 비중도 허용된다."""
         RiskGuard = _import_risk_guard()
 
         etf_tickers = {"069500"}
@@ -658,14 +660,13 @@ class TestDualTradingMode:
             etf_tickers=etf_tickers,
         )
 
-        # ETF 25% → 실전 ETF 한도 20% 초과 → 거부
+        # 비중 제약 없음 → 25%도 통과
         target = {"069500": 0.25}
         passed, warnings = rg.check_rebalance(target)
-        assert passed is False, "ETF 25%는 거부되어야 합니다"
-        assert any("ETF 비중 초과" in w for w in warnings)
+        assert passed is True, "비중 제약 없으므로 25%도 통과해야 합니다"
 
     def test_stock_still_blocked_at_stock_limit(self):
-        """주식 종목은 ETF 한도가 아닌 주식 한도가 적용된다."""
+        """개별 비중 제약이 없으므로 주식 30% 비중도 허용된다."""
         RiskGuard = _import_risk_guard()
 
         etf_tickers = {"069500"}
@@ -674,11 +675,10 @@ class TestDualTradingMode:
             etf_tickers=etf_tickers,
         )
 
-        # 주식 12% → 실전 주식 한도 10% 초과 → 거부
-        target = {"005930": 0.12}
+        # 비중 제약 없음 → 30%도 통과
+        target = {"005930": 0.30}
         passed, warnings = rg.check_rebalance(target)
-        assert passed is False, "주식 12%는 거부되어야 합니다"
-        assert any("개별종목 비중 초과" in w for w in warnings)
+        assert passed is True, "비중 제약 없으므로 30%도 통과해야 합니다"
 
     def test_set_etf_tickers(self):
         """set_etf_tickers로 ETF 목록을 갱신할 수 있다."""
@@ -686,26 +686,24 @@ class TestDualTradingMode:
 
         rg = RiskGuard(is_live=True)
 
-        # 초기: ETF 미등록 → 주식 한도 적용 → 12% 거부
+        # 비중 제약 없음 → 등록 전/후 모두 통과
         target = {"069500": 0.12}
         passed, _ = rg.check_rebalance(target)
-        assert passed is False
+        assert passed is True
 
-        # ETF 등록 후 → ETF 한도 적용 → 12% 통과
         rg.set_etf_tickers({"069500"})
         passed, _ = rg.check_rebalance(target)
         assert passed is True
 
     def test_live_etf_defaults(self):
-        """실전/모의 모드별 ETF 한도 기본값이 다르다."""
+        """실전/모의 모드 모두 개별 비중 제약 없음(1.0)."""
         RiskGuard = _import_risk_guard()
 
         paper_rg = RiskGuard()
         live_rg = RiskGuard(is_live=True)
 
-        assert live_rg.max_single_etf_pct < paper_rg.max_single_etf_pct
-        assert live_rg.max_single_etf_pct == 0.20
-        assert paper_rg.max_single_etf_pct == 0.25
+        assert live_rg.max_single_etf_pct == 1.0
+        assert paper_rg.max_single_etf_pct == 1.0
 
 
 # ===================================================================
