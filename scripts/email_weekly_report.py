@@ -1,7 +1,9 @@
 """주간 리포트 마크다운 파일을 HTML로 변환해 이메일로 발송한다.
 
 사용:
-    python scripts/email_weekly_report.py <markdown_file_path>
+    python scripts/email_weekly_report.py <markdown_file_path> [<markdown_file_path> ...]
+
+여러 파일을 전달하면 입력 순서대로 `---` 구분선으로 연결해 1통의 메일로 발송한다.
 
 요건:
 - SMTP_HOST, SMTP_SENDER, SMTP_PASSWORD, SMTP_RECIPIENTS 환경변수 설정 (.env)
@@ -17,7 +19,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Sequence, Union
 from zoneinfo import ZoneInfo
 
 import markdown as md_lib  # type: ignore[import-not-found]
@@ -34,6 +36,7 @@ logger = get_logger(__name__)
 
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 _KST = ZoneInfo("Asia/Seoul")
+_FILE_SEPARATOR = "\n\n---\n\n"
 
 _HTML_STYLE = """
 <style>
@@ -104,24 +107,52 @@ def _build_subject(report_date: Optional[str]) -> str:
     return f"[주간 리포트] {date_str} 밸류체인 분석"
 
 
-def send_weekly_report(report_path: Path) -> bool:
-    """주간 리포트 마크다운 파일을 읽어 이메일로 발송한다.
+def _combine_markdown(paths: Sequence[Path]) -> str:
+    """전달된 파일을 입력 순서대로 `---` 구분선으로 연결한다.
+
+    존재하지 않는 파일은 건너뛰고 경고 로그만 남긴다.
+    """
+    chunks: list[str] = []
+    for path in paths:
+        if not path.is_file():
+            logger.warning("리포트 파일 누락 — 건너뜁니다: %s", path)
+            continue
+        chunks.append(path.read_text(encoding="utf-8"))
+    return _FILE_SEPARATOR.join(chunks)
+
+
+def send_weekly_report(
+    report_paths: Union[Path, str, Iterable[Union[Path, str]]],
+) -> bool:
+    """주간 리포트 마크다운 파일(들)을 읽어 이메일로 발송한다.
 
     Args:
-        report_path: 마크다운 리포트 파일 경로.
+        report_paths: 단일 경로 또는 경로 시퀀스. 시퀀스이면 입력 순서대로 연결해
+            한 통의 메일로 발송한다.
 
     Returns:
         발송 성공 시 True, 미설정/실패/파일 부재 시 False.
         예외는 던지지 않는다 (graceful degradation).
     """
-    path = Path(report_path)
-    if not path.is_file():
-        logger.error("리포트 파일을 찾을 수 없습니다: %s", path)
+    if isinstance(report_paths, (str, Path)):
+        paths = [Path(report_paths)]
+    else:
+        paths = [Path(p) for p in report_paths]
+
+    if not paths:
+        logger.error("리포트 파일이 지정되지 않았습니다.")
         return False
 
-    markdown_text = path.read_text(encoding="utf-8")
-    html_body = render_html(markdown_text)
-    subject = _build_subject(extract_report_date(path))
+    existing = [p for p in paths if p.is_file()]
+    if not existing:
+        logger.error(
+            "리포트 파일을 찾을 수 없습니다: %s", ", ".join(str(p) for p in paths)
+        )
+        return False
+
+    combined_md = _combine_markdown(paths)
+    html_body = render_html(combined_md)
+    subject = _build_subject(extract_report_date(existing[0]))
 
     notifier = EmailNotifier()
     if not notifier.is_configured():
@@ -136,12 +167,16 @@ def send_weekly_report(report_path: Path) -> bool:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="주간 리포트 마크다운 파일을 이메일로 발송한다."
+        description="주간 리포트 마크다운 파일(들)을 이메일로 발송한다."
     )
-    parser.add_argument("report_path", help="마크다운 리포트 파일 경로")
+    parser.add_argument(
+        "report_paths",
+        nargs="+",
+        help="마크다운 리포트 파일 경로 (여러 개 전달 가능, 입력 순서대로 연결)",
+    )
     args = parser.parse_args(argv)
 
-    success = send_weekly_report(Path(args.report_path))
+    success = send_weekly_report([Path(p) for p in args.report_paths])
     return 0 if success else 1
 
 

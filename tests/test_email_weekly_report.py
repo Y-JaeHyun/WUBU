@@ -1,6 +1,7 @@
 """scripts/email_weekly_report.py 헬퍼 테스트.
 
-마크다운→HTML 변환, 이메일 제목 형식, SMTP 미설정 시 graceful degradation을 검증한다.
+마크다운→HTML 변환, 이메일 제목 형식, 다중 파일 연결,
+SMTP 미설정 시 graceful degradation을 검증한다.
 """
 
 from __future__ import annotations
@@ -142,4 +143,82 @@ class TestSendWeeklyReport:
     def test_returns_false_when_file_missing(self, tmp_path):
         missing = tmp_path / "missing.md"
         result = send_weekly_report(missing)
+        assert result is False
+
+
+class TestMultiFile:
+    def test_concatenates_files_in_input_order_with_separator(self, tmp_path):
+        first = tmp_path / "2026-05-30-weekly-sector-summary.md"
+        second = tmp_path / "2026-05-30-weekly-sector-ai.md"
+        third = tmp_path / "2026-05-30-weekly-valuechain-report.md"
+        first.write_text("# 섹터 요약\n\n핵심 메시지", encoding="utf-8")
+        second.write_text("# AI 섹터\n\nNVDA 기반", encoding="utf-8")
+        third.write_text("# 밸류체인\n\n종합 분석", encoding="utf-8")
+
+        fake_notifier = MagicMock()
+        fake_notifier.is_configured.return_value = True
+        fake_notifier.send_html_report.return_value = True
+
+        with patch(
+            "scripts.email_weekly_report.EmailNotifier",
+            return_value=fake_notifier,
+        ):
+            result = send_weekly_report([first, second, third])
+
+        assert result is True
+        args = fake_notifier.send_html_report.call_args.args
+        kwargs = fake_notifier.send_html_report.call_args.kwargs
+        html_body = kwargs.get("html") or args[0]
+        # 세 본문이 모두 결합됐고 입력 순서대로 등장한다
+        assert html_body.index("섹터 요약") < html_body.index("AI 섹터")
+        assert html_body.index("AI 섹터") < html_body.index("밸류체인")
+        # `---` 마크다운 구분선은 HTML <hr> 로 렌더링된다
+        assert "<hr" in html_body
+
+    def test_subject_uses_first_existing_file_date(self, tmp_path):
+        first = tmp_path / "2026-05-30-weekly-sector-summary.md"
+        second = tmp_path / "2026-05-30-weekly-sector-ai.md"
+        first.write_text("# A", encoding="utf-8")
+        second.write_text("# B", encoding="utf-8")
+
+        fake_notifier = MagicMock()
+        fake_notifier.is_configured.return_value = True
+        fake_notifier.send_html_report.return_value = True
+
+        with patch(
+            "scripts.email_weekly_report.EmailNotifier",
+            return_value=fake_notifier,
+        ):
+            send_weekly_report([first, second])
+
+        args = fake_notifier.send_html_report.call_args.args
+        kwargs = fake_notifier.send_html_report.call_args.kwargs
+        subject = kwargs.get("subject") or args[1]
+        assert subject == "[주간 리포트] 2026-05-30 밸류체인 분석"
+
+    def test_skips_missing_files_but_sends_remaining(self, tmp_path):
+        present = tmp_path / "2026-05-30-weekly-sector-ai.md"
+        present.write_text("# 있는 파일", encoding="utf-8")
+        missing = tmp_path / "2026-05-30-weekly-sector-missing.md"
+
+        fake_notifier = MagicMock()
+        fake_notifier.is_configured.return_value = True
+        fake_notifier.send_html_report.return_value = True
+
+        with patch(
+            "scripts.email_weekly_report.EmailNotifier",
+            return_value=fake_notifier,
+        ):
+            result = send_weekly_report([present, missing])
+
+        assert result is True
+        args = fake_notifier.send_html_report.call_args.args
+        kwargs = fake_notifier.send_html_report.call_args.kwargs
+        html_body = kwargs.get("html") or args[0]
+        assert "있는 파일" in html_body
+
+    def test_returns_false_when_all_files_missing(self, tmp_path):
+        result = send_weekly_report(
+            [tmp_path / "a.md", tmp_path / "b.md"]
+        )
         assert result is False

@@ -1,7 +1,7 @@
 """scripts/push_weekly_report_to_github.py 헬퍼 테스트.
 
 GitHub 토큰/레포 환경변수 검증, README 인덱스 렌더링, graceful degradation,
-git 커맨드 시퀀스(클론/리셋/커밋/푸시)를 mock 으로 검증한다.
+git 커맨드 시퀀스(클론/리셋/커밋/푸시) 및 다중 파일 업로드를 mock 으로 검증한다.
 """
 
 from __future__ import annotations
@@ -37,6 +37,26 @@ def report_md(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def sector_reports(tmp_path: Path) -> list[Path]:
+    """JAE-83 표준 섹터 파일 셋트 — summary 먼저, valuechain 마지막."""
+    names = [
+        "2026-05-30-weekly-sector-summary.md",
+        "2026-05-30-weekly-sector-ai.md",
+        "2026-05-30-weekly-sector-physical-ai.md",
+        "2026-05-30-weekly-sector-energy.md",
+        "2026-05-30-weekly-sector-game.md",
+        "2026-05-30-weekly-sector-other.md",
+        "2026-05-30-weekly-valuechain-report.md",
+    ]
+    paths: list[Path] = []
+    for name in names:
+        p = tmp_path / name
+        p.write_text(f"# {name}", encoding="utf-8")
+        paths.append(p)
+    return paths
+
+
 class TestExtractReportDate:
     def test_uses_filename_date(self, tmp_path: Path) -> None:
         path = tmp_path / "2026-05-30-weekly-report.md"
@@ -70,6 +90,24 @@ class TestReadmeRendering:
         assert out.index("### 2026") < out.index("### 2025"), "최신 연도가 먼저 와야 한다"
         assert out.index("2026-05-30") < out.index("2026-05-23")
         assert "reports/2026/2026-05-30-weekly-report.md" in out
+
+    def test_render_index_groups_multiple_files_per_date(self) -> None:
+        reports = [
+            ("2026-05-30", Path("reports/2026/2026-05-30-weekly-sector-ai.md")),
+            ("2026-05-30", Path("reports/2026/2026-05-30-weekly-sector-energy.md")),
+            ("2026-05-30", Path("reports/2026/2026-05-30-weekly-valuechain-report.md")),
+            ("2026-05-23", Path("reports/2026/2026-05-23-weekly-valuechain-report.md")),
+        ]
+        out = _render_index_section(reports)
+        # 같은 날짜의 여러 파일은 sublist 로 표시
+        assert "- 2026-05-30" in out
+        assert "[sector-ai](reports/2026/2026-05-30-weekly-sector-ai.md)" in out
+        assert "[sector-energy](reports/2026/2026-05-30-weekly-sector-energy.md)" in out
+        assert "[종합](reports/2026/2026-05-30-weekly-valuechain-report.md)" in out
+        # 종합이 같은 날 sector 들 뒤에 위치
+        assert out.index("[sector-ai]") < out.index("[종합]")
+        # 단일 파일 날짜는 기존처럼 한 라인
+        assert "- [2026-05-23](reports/2026/2026-05-23-weekly-valuechain-report.md)" in out
 
     def test_update_readme_creates_new_when_missing(self, tmp_path: Path) -> None:
         reports = [("2026-05-30", Path("reports/2026/2026-05-30-weekly-report.md"))]
@@ -116,6 +154,21 @@ class TestCollectExistingReports:
         out = _collect_existing_reports(tmp_path)
         assert [d for d, _ in out] == ["2026-05-30", "2025-12-29"]
 
+    def test_collects_sector_files_with_weekly_pattern(self, tmp_path: Path) -> None:
+        (tmp_path / "reports" / "2026").mkdir(parents=True)
+        for name in [
+            "2026-05-30-weekly-sector-ai.md",
+            "2026-05-30-weekly-sector-energy.md",
+            "2026-05-30-weekly-valuechain-report.md",
+        ]:
+            (tmp_path / "reports" / "2026" / name).write_text("x", encoding="utf-8")
+
+        out = _collect_existing_reports(tmp_path)
+        names = [path.name for _, path in out]
+        assert "2026-05-30-weekly-sector-ai.md" in names
+        assert "2026-05-30-weekly-sector-energy.md" in names
+        assert "2026-05-30-weekly-valuechain-report.md" in names
+
 
 class TestGracefulDegradation:
     def test_returns_false_when_token_missing(
@@ -145,6 +198,15 @@ class TestGracefulDegradation:
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
         monkeypatch.setenv("GITHUB_RESEARCH_REPO", "owner/repo")
         assert push_weekly_report(tmp_path / "missing.md") is False
+
+    def test_returns_false_when_any_file_in_list_missing(
+        self, report_md: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_x")
+        monkeypatch.setenv("GITHUB_RESEARCH_REPO", "owner/repo")
+        assert (
+            push_weekly_report([report_md, tmp_path / "missing.md"]) is False
+        )
 
 
 def _make_fake_git_runner(cache_dir: Path):
@@ -186,7 +248,8 @@ class TestFullFlow:
             result = push_weekly_report(report_md)
 
         assert result is True
-        copied = cache_dir / "reports" / "2026" / "2026-05-30-weekly-report.md"
+        # 원본 파일명을 그대로 유지
+        copied = cache_dir / "reports" / "2026" / "2026-05-30-weekly-valuechain-report.md"
         assert copied.is_file()
         assert copied.read_text(encoding="utf-8") == SAMPLE_MD
 
@@ -284,3 +347,74 @@ class TestFullFlow:
             result = push_weekly_report(report_md)
 
         assert result is False
+
+
+class TestMultiFileUpload:
+    def test_copies_all_files_with_original_names(
+        self,
+        sector_reports: list[Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache_dir = tmp_path / "cache" / "quant-research-repo"
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+        monkeypatch.setenv("GITHUB_RESEARCH_REPO", "wogus3314/quant-research")
+        monkeypatch.setenv("GITHUB_RESEARCH_CACHE", str(cache_dir))
+
+        history, fake_run = _make_fake_git_runner(cache_dir)
+        with patch("scripts.push_weekly_report_to_github.subprocess.run", side_effect=fake_run):
+            result = push_weekly_report(sector_reports)
+
+        assert result is True
+        for src in sector_reports:
+            copied = cache_dir / "reports" / "2026" / src.name
+            assert copied.is_file(), f"missing: {copied}"
+            assert copied.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+
+        # README 에 sublist 인덱스가 들어갔는지
+        readme = (cache_dir / "README.md").read_text(encoding="utf-8")
+        assert "- 2026-05-30" in readme
+        assert "[종합]" in readme
+        assert "[sector-ai]" in readme
+
+    def test_commit_message_includes_file_count_when_multi(
+        self,
+        sector_reports: list[Path],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache_dir = tmp_path / "cache" / "quant-research-repo"
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+        monkeypatch.setenv("GITHUB_RESEARCH_REPO", "wogus3314/quant-research")
+        monkeypatch.setenv("GITHUB_RESEARCH_CACHE", str(cache_dir))
+
+        history, fake_run = _make_fake_git_runner(cache_dir)
+        with patch("scripts.push_weekly_report_to_github.subprocess.run", side_effect=fake_run):
+            push_weekly_report(sector_reports)
+
+        commits = [cmd for cmd in history if cmd[1] == "commit"]
+        assert commits, "commit 호출이 있어야 한다"
+        message = commits[0][commits[0].index("-m") + 1]
+        assert "2026-05-30" in message
+        assert f"{len(sector_reports)}개 파일" in message
+
+    def test_single_file_commit_message_unchanged(
+        self,
+        report_md: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        cache_dir = tmp_path / "cache" / "quant-research-repo"
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
+        monkeypatch.setenv("GITHUB_RESEARCH_REPO", "wogus3314/quant-research")
+        monkeypatch.setenv("GITHUB_RESEARCH_CACHE", str(cache_dir))
+
+        history, fake_run = _make_fake_git_runner(cache_dir)
+        with patch("scripts.push_weekly_report_to_github.subprocess.run", side_effect=fake_run):
+            push_weekly_report(report_md)
+
+        commits = [cmd for cmd in history if cmd[1] == "commit"]
+        message = commits[0][commits[0].index("-m") + 1]
+        # 단일 파일은 (n개 파일) suffix 없이 기존 메시지 유지
+        assert "개 파일" not in message
+        assert message == "chore(weekly): 2026-05-30 주간 리포트 업로드"
