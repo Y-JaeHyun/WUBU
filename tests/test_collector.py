@@ -461,3 +461,50 @@ class TestGetAllFundamentals:
 
         assert isinstance(df, pd.DataFrame)
         assert df.empty, "market_cap 전부 0이면 빈 DataFrame이어야 한다"
+
+    @patch("src.data.collector._get_all_fundamentals_dart_fallback")
+    @patch("src.data.collector.pykrx_stock")
+    def test_dart_fallback_on_pykrx_exception(self, mock_pykrx, mock_dart_fallback):
+        """pykrx가 예외를 던지면 DART fallback이 호출되고 결과가 비어있지 않으면 그 결과를 반환한다.
+
+        Regression: JAE-92 — KRX 포털 인증 실패(CD010)로 pykrx가
+        ``KeyError("None of [Index([... 'PBR'...])] are in the [columns]")``
+        같은 예외를 던질 때 DART fallback이 우회 경로로 동작해야 한다.
+        """
+        mock_pykrx.get_market_fundamental.side_effect = KeyError(
+            "None of [Index(['BPS', 'PER', 'PBR', 'EPS', 'DIV', 'DPS'], "
+            "dtype='object')] are in the [columns]"
+        )
+        dart_df = pd.DataFrame(
+            {
+                "ticker": ["005930"],
+                "name": ["삼성전자"],
+                "market": ["KOSPI"],
+                "per": [10.0],
+                "pbr": [1.2],
+                "close": [70000],
+                "market_cap": [400_000_000_000_000],
+            }
+        )
+        mock_dart_fallback.return_value = dart_df
+
+        df = get_all_fundamentals("20240102", market="KOSPI")
+
+        assert not df.empty
+        assert "ticker" in df.columns
+        assert df.iloc[0]["ticker"] == "005930"
+        mock_dart_fallback.assert_called()
+
+    @patch("src.data.collector._get_all_fundamentals_dart_fallback")
+    @patch("src.data.collector.pykrx_stock")
+    def test_raises_when_pykrx_and_dart_both_fail(self, mock_pykrx, mock_dart_fallback):
+        """pykrx 예외 + DART fallback도 빈 결과면 retry 후 원본 예외를 raise한다."""
+        original_exc = RuntimeError("pykrx broken")
+        mock_pykrx.get_market_fundamental.side_effect = original_exc
+        mock_dart_fallback.return_value = pd.DataFrame()  # DART도 비어있음
+
+        with pytest.raises(RuntimeError, match="pykrx broken"):
+            get_all_fundamentals("20240102", market="KOSPI")
+
+        # retry decorator(max_retries=2)로 2회 호출 — 각 호출마다 DART fallback이 시도된다.
+        assert mock_dart_fallback.call_count >= 1
