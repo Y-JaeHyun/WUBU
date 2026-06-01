@@ -395,6 +395,19 @@ def get_all_fundamentals(
 
     except Exception as e:
         logger.error(f"전 종목 기본 지표 조회 실패: {e}")
+        # pykrx 호출이 예외로 실패해도 DART fallback을 시도한다.
+        # KRX 포털 인증 실패(CD010 등)로 pykrx 응답이 깨진 경우에도 리밸런싱이 SKIP되지 않도록.
+        try:
+            logger.warning("pykrx 예외 발생 — DART fallback 시도: %s", d)
+            dart_df = _get_all_fundamentals_dart_fallback(d, market)
+            if not dart_df.empty:
+                logger.info(
+                    "DART fallback 성공: %d종목 (pykrx 예외 우회)", len(dart_df)
+                )
+                return dart_df
+            logger.error("DART fallback도 빈 결과를 반환했습니다 — 원본 예외 전파")
+        except Exception as dart_exc:
+            logger.error("DART fallback 자체가 실패: %s — 원본 예외 전파", dart_exc)
         raise
 
 
