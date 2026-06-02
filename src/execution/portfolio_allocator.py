@@ -473,20 +473,36 @@ class PortfolioAllocator:
             )
             tagged_count += 1
 
-        # 시그널에 없는 기존 태그 정리
-        with self._lock:
-            positions = self._data.get("positions", {})
-            stale = [
-                t for t in positions
-                if t not in ticker_best_pool
-                and positions[t].get("pool") != "short_term"
-            ]
-            for t in stale:
-                del positions[t]
-            if stale:
-                self._data["positions"] = positions
-                self._save()
-                logger.info("자동 태그 정리: %d개 종목 태그 제거", len(stale))
+        # 시그널에 없는 기존 태그 정리 — KIS 잔고 기반 (JAE-101)
+        # 정책: 보유 종목 태그는 보존한다. "시그널 미포함"은 stale 판정 근거가 아니다.
+        # 실제 매도되어 KIS 잔고에 없는 종목만 제거한다.
+        # 잔고 조회 실패 시 정리 자체를 스킵 (보수적 처리).
+        try:
+            balance = self._kis_client.get_balance()
+            held_tickers: Optional[set[str]] = {
+                h.get("ticker")
+                for h in balance.get("holdings", [])
+                if h.get("ticker") and h.get("qty", 0) > 0
+            }
+        except Exception as e:
+            logger.warning("자동 태깅 stale 정리 중 잔고 조회 실패 — 정리 스킵: %s", e)
+            held_tickers = None
+
+        if held_tickers is not None:
+            with self._lock:
+                positions = self._data.get("positions", {})
+                stale = [
+                    t for t in positions
+                    if t not in held_tickers
+                    and t not in ticker_best_pool
+                    and positions[t].get("pool") != "short_term"
+                ]
+                for t in stale:
+                    del positions[t]
+                if stale:
+                    self._data["positions"] = positions
+                    self._save()
+                    logger.info("자동 태그 정리: %d개 종목 태그 제거", len(stale))
 
         logger.info("자동 태깅 완료: %d개 종목", tagged_count)
 
