@@ -460,3 +460,110 @@ class TestBackfillUntaggedPositions:
         count = alloc.backfill_untagged_positions(etf_tickers={"069500"})
 
         assert count == 0
+
+
+# ===================================================================
+# 5. JAE-101: auto_tag stale 정리 — KIS 잔고 기반
+# ===================================================================
+
+
+class TestAutoTagStaleCleanupJae101:
+    """JAE-101: stale 정리는 KIS 잔고에 없는 종목에만 적용한다.
+
+    배경: 기존 정책은 새 시그널에 없는 모든 long_term/etf_rotation 태그를
+    매 리밸런싱마다 삭제했다. 전략 num_stocks 제약으로 시그널 종목이 보유
+    종목보다 적은 경우, 실제 보유 중인 종목 태그가 wipe되어 allocation.json이
+    부분 정보 상태가 되었다. 새 정책은 'KIS 잔고에 없는 종목'만 stale로 판정한다.
+    """
+
+    def test_held_position_not_in_signal_keeps_tag(self, tmp_path):
+        """KIS 잔고에 보유 중이지만 새 시그널에 없는 종목은 태그를 유지한다."""
+        holdings = [
+            {"ticker": "002380", "eval_amount": 500_000, "current_price": 250000,
+             "qty": 2, "pnl": 0, "pnl_pct": 0.0},
+            {"ticker": "005930", "eval_amount": 300_000, "current_price": 75000,
+             "qty": 4, "pnl": 0, "pnl_pct": 0.0},
+        ]
+        alloc = _make_allocator(tmp_path, holdings=holdings)
+
+        alloc.tag_position("002380", "long_term")
+        alloc.tag_position("005930", "long_term")
+
+        pool_signals = {
+            "long_term": {"005930": 1.0},
+            "etf_rotation": {},
+        }
+        alloc.auto_tag_from_pool_signals(pool_signals)
+
+        assert alloc.get_position_pool("002380") == "long_term"
+        assert alloc.get_position_pool("005930") == "long_term"
+
+    def test_sold_position_tag_removed(self, tmp_path):
+        """실제 매도되어 KIS 잔고에 없는 종목은 태그를 제거한다."""
+        holdings = [
+            {"ticker": "005930", "eval_amount": 500_000, "current_price": 75000,
+             "qty": 6, "pnl": 0, "pnl_pct": 0.0},
+        ]
+        alloc = _make_allocator(tmp_path, holdings=holdings)
+
+        alloc.tag_position("002380", "long_term")
+        alloc.tag_position("005930", "long_term")
+
+        pool_signals = {
+            "long_term": {"005930": 1.0},
+            "etf_rotation": {},
+        }
+        alloc.auto_tag_from_pool_signals(pool_signals)
+
+        assert alloc.get_position_pool("002380") is None
+        assert alloc.get_position_pool("005930") == "long_term"
+
+    def test_balance_query_failure_skips_cleanup(self, tmp_path):
+        """KIS 점검 시간대 등 잔고 조회 실패 시 stale 정리를 스킵한다.
+
+        보수적 처리: 잔고를 알 수 없는 상태에서 임의로 태그를 제거하면
+        데이터 정합성이 깨질 수 있으므로, 정리 자체를 스킵하고 태깅만 수행한다.
+        """
+        kis = _mock_kis()
+        alloc = PortfolioAllocator(
+            kis,
+            long_term_pct=0.70,
+            etf_rotation_pct=0.30,
+            allocation_path=_alloc_path(tmp_path),
+        )
+
+        alloc.tag_position("002380", "long_term")
+        alloc.tag_position("005930", "long_term")
+
+        kis.get_balance.side_effect = Exception("KIS 점검 중")
+
+        pool_signals = {
+            "long_term": {"069500": 1.0},
+            "etf_rotation": {},
+        }
+        alloc.auto_tag_from_pool_signals(pool_signals)
+
+        assert alloc.get_position_pool("002380") == "long_term"
+        assert alloc.get_position_pool("005930") == "long_term"
+        assert alloc.get_position_pool("069500") == "long_term"
+
+    def test_new_signal_ticker_not_yet_in_balance(self, tmp_path):
+        """방금 시그널에 포함되어 태깅된 종목은 KIS 잔고 반영 전이라도 보존한다.
+
+        리밸런싱 주문 직후 KIS 잔고 동기화 전 race condition 방어:
+        새 시그널에 포함된 종목(ticker_best_pool)은 잔고에 없더라도 stale로 보지 않는다.
+        """
+        holdings = [
+            {"ticker": "005930", "eval_amount": 500_000, "current_price": 75000,
+             "qty": 6, "pnl": 0, "pnl_pct": 0.0},
+        ]
+        alloc = _make_allocator(tmp_path, holdings=holdings)
+
+        pool_signals = {
+            "long_term": {"005930": 1.0},
+            "etf_rotation": {"069500": 1.0},
+        }
+        alloc.auto_tag_from_pool_signals(pool_signals)
+
+        assert alloc.get_position_pool("005930") == "long_term"
+        assert alloc.get_position_pool("069500") == "etf_rotation"
