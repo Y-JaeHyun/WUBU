@@ -473,20 +473,41 @@ class PortfolioAllocator:
             )
             tagged_count += 1
 
-        # 시그널에 없는 기존 태그 정리
-        with self._lock:
-            positions = self._data.get("positions", {})
-            stale = [
-                t for t in positions
-                if t not in ticker_best_pool
-                and positions[t].get("pool") != "short_term"
-            ]
-            for t in stale:
-                del positions[t]
-            if stale:
-                self._data["positions"] = positions
-                self._save()
-                logger.info("자동 태그 정리: %d개 종목 태그 제거", len(stale))
+        # JAE-100: stale 태그 정리는 "실제 매도되어 보유하지 않는" 종목에만 적용한다.
+        # 기존 로직은 새 시그널에 없는 모든 태그를 제거해, 백필된 장기 종목을 매 리밸런싱마다
+        # 무력화해 ETF 단독 리밸런싱 시 미태깅 포지션 전량 매도 사고를 유발했다.
+        try:
+            balance = self._kis_client.get_balance()
+            held_tickers = {
+                h.get("ticker")
+                for h in balance.get("holdings", [])
+                if h.get("ticker") and h.get("qty", 0) > 0
+            }
+        except Exception as e:
+            logger.warning(
+                "자동 태깅 stale 정리 중 잔고 조회 실패 — 정리 스킵: %s", e
+            )
+            held_tickers = None
+
+        if held_tickers is not None:
+            with self._lock:
+                positions = self._data.get("positions", {})
+                # 보호 대상: short_term 풀, 새 시그널에 포함된 종목(방금 태깅됨),
+                # KIS 잔고에 있는 종목(아직 보유 중)
+                stale = [
+                    t for t in positions
+                    if t not in held_tickers
+                    and t not in ticker_best_pool
+                    and positions[t].get("pool") != "short_term"
+                ]
+                for t in stale:
+                    del positions[t]
+                if stale:
+                    self._data["positions"] = positions
+                    self._save()
+                    logger.info(
+                        "자동 태그 정리: 미보유 %d개 종목 태그 제거", len(stale)
+                    )
 
         logger.info("자동 태깅 완료: %d개 종목", tagged_count)
 

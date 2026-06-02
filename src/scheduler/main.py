@@ -1648,6 +1648,25 @@ class TradingBot:
                 )
                 return
 
+            # JAE-100: ETF 풀 단독 리밸런싱 전에 미태깅 포지션을 보강한다.
+            # 미태깅 종목이 ETF 풀로 잘못 분류되어 전량 매도되는 사고를 방지한다.
+            if self.allocator is not None:
+                try:
+                    tagged = self.allocator.backfill_untagged_positions(
+                        etf_tickers=self._get_etf_universe_tickers(),
+                        default_pool="long_term",
+                    )
+                    if isinstance(tagged, int) and tagged > 0:
+                        logger.warning(
+                            "ETF 자동 보충: 미태깅 포지션 %d개를 long_term으로 보강",
+                            tagged,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "ETF 자동 보충: backfill 실패 — 보호 로직(target pool 한정)에 의존: %s",
+                        e,
+                    )
+
             cash_ratio, etf_cash, etf_budget = self._get_etf_cash_ratio()
             self._send_notification(
                 f"[ETF 자동 보충 매수 실행] {today.strftime('%Y-%m-%d')}\n"

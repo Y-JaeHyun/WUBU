@@ -1024,21 +1024,22 @@ class TestPositionManagerWithAllocator:
         return pm
 
     def test_allocator_excludes_short_term_positions(self):
-        """allocator가 있으면 단기 포지션이 리밸런싱에서 제외된다."""
-        # 현재 보유: A=10주, B=5주 (B는 단기)
-        # 목표: A=100%
-        # allocator 없이: B 5주 매도 발생
-        # allocator 있으면: B는 제외, A만 조정
+        """allocator가 있으면 단기 포지션이 장기 리밸런싱에서 제외된다."""
+        # 현재 보유: A=10주(장기), B=5주(단기)
+        # 목표(장기 풀): A=100%
+        # allocator 있으면: B는 다른 풀이므로 매도 대상에서 제외
         current = {"005930": 10, "000660": 5}
         prices = {"005930": 100_000, "000660": 200_000}
         portfolio_value = 2_000_000
 
         pm = self._make_position_manager(current, portfolio_value, prices)
 
-        # allocator mock: 000660이 단기
+        # allocator mock: 005930이 장기, 000660이 단기
         mock_allocator = MagicMock()
 
         def _get_by_pool(pool):
+            if pool == "long_term":
+                return [{"ticker": "005930", "pool": "long_term"}]
             if pool == "short_term":
                 return [{"ticker": "000660", "pool": "short_term"}]
             return []
@@ -1050,12 +1051,11 @@ class TestPositionManagerWithAllocator:
             allocator=mock_allocator,
         )
 
-        # short_term과 etf_rotation 2개 풀이 제외 대상으로 조회됨
+        # JAE-100: 새 의미론은 target pool(long_term)에 태깅된 종목 + target_weights만 허용
         call_args = [
             c[0][0] for c in mock_allocator.get_positions_by_pool.call_args_list
         ]
-        assert "short_term" in call_args
-        assert "etf_rotation" in call_args
+        assert "long_term" in call_args
 
         # 000660에 대한 매도 주문이 없어야 함
         sell_tickers = {o["ticker"] for o in sell_orders}
@@ -1082,7 +1082,7 @@ class TestPositionManagerWithAllocator:
         )
 
     def test_allocator_no_short_term_positions(self):
-        """allocator가 있지만 단기 포지션이 없으면 기존과 동일하게 동작한다."""
+        """allocator가 있지만 단기 포지션이 없으면 정상적으로 리밸런싱한다."""
         current = {"005930": 10}
         prices = {"005930": 100_000}
         portfolio_value = 1_000_000
@@ -1090,21 +1090,33 @@ class TestPositionManagerWithAllocator:
         pm = self._make_position_manager(current, portfolio_value, prices)
 
         mock_allocator = MagicMock()
-        mock_allocator.get_positions_by_pool.return_value = []
+        # 005930만 long_term으로 태깅된 상태
+        def _get_by_pool(pool):
+            if pool == "long_term":
+                return [{"ticker": "005930", "pool": "long_term"}]
+            return []
+
+        mock_allocator.get_positions_by_pool.side_effect = _get_by_pool
 
         sell_orders, buy_orders = pm.calculate_rebalance_orders(
             {"005930": 1.0},
             allocator=mock_allocator,
         )
 
-        # 단기/ETF 포지션이 없으므로 정상적으로 리밸런싱
+        # target_pool인 long_term이 조회됨
         called_pools = {c.args[0] for c in mock_allocator.get_positions_by_pool.call_args_list}
-        assert "short_term" in called_pools
-        assert "etf_rotation" in called_pools
+        assert "long_term" in called_pools
+
+        # 005930은 target_pool에 포함됨 → 전량 매도 대상이 아니어야 함
+        # (buy_cost 보정으로 인한 미세 조정 매도는 허용)
+        sell_for_005930 = [o for o in sell_orders if o["ticker"] == "005930"]
+        if sell_for_005930:
+            # 전량 매도가 아니라 미세 조정인지 확인
+            assert sell_for_005930[0]["qty"] < 10
 
     def test_allocator_excludes_multiple_short_term(self):
         """allocator가 여러 단기 종목을 제외한다."""
-        # 현재 보유: A, B, C, D (C, D가 단기)
+        # 현재 보유: A, B(장기), C, D(단기)
         current = {"A": 10, "B": 20, "C": 5, "D": 3}
         prices = {"A": 10_000, "B": 10_000, "C": 10_000, "D": 10_000}
         portfolio_value = 1_000_000
@@ -1112,12 +1124,23 @@ class TestPositionManagerWithAllocator:
         pm = self._make_position_manager(current, portfolio_value, prices)
 
         mock_allocator = MagicMock()
-        mock_allocator.get_positions_by_pool.return_value = [
-            {"ticker": "C", "pool": "short_term"},
-            {"ticker": "D", "pool": "short_term"},
-        ]
 
-        # 목표: A=50%, B=50% -> C, D 매도 X
+        def _get_by_pool(pool):
+            if pool == "long_term":
+                return [
+                    {"ticker": "A", "pool": "long_term"},
+                    {"ticker": "B", "pool": "long_term"},
+                ]
+            if pool == "short_term":
+                return [
+                    {"ticker": "C", "pool": "short_term"},
+                    {"ticker": "D", "pool": "short_term"},
+                ]
+            return []
+
+        mock_allocator.get_positions_by_pool.side_effect = _get_by_pool
+
+        # 목표(장기): A=50%, B=50% -> C, D 매도 X
         sell_orders, buy_orders = pm.calculate_rebalance_orders(
             {"A": 0.50, "B": 0.50},
             allocator=mock_allocator,
@@ -1130,6 +1153,48 @@ class TestPositionManagerWithAllocator:
         assert "D" not in sell_tickers, "단기 포지션 D는 매도 대상에서 제외되어야 합니다."
         assert "C" not in buy_tickers, "단기 포지션 C는 매수 대상에도 포함되지 않아야 합니다."
         assert "D" not in buy_tickers, "단기 포지션 D는 매수 대상에도 포함되지 않아야 합니다."
+
+    def test_jae100_untagged_position_protected_from_etf_topup(self):
+        """JAE-100 회귀: ETF 단독 리밸런싱 시 미태깅 장기 포지션은 매도되지 않는다.
+
+        시나리오: 6/2 ETF 자동 보충 매수가 trigger되었을 때, allocation.json에
+        ETF 종목만 태깅되어 있고 장기 보유 종목(KCC 등)이 untagged 상태로 남아 있다면,
+        기존 버그에서는 ETF target_weights에 없는 모든 보유 종목이 매도 대상이 되었다.
+        새 fix는 target pool(etf_rotation)에 태깅된 종목 + 새 시그널 종목만 허용한다.
+        """
+        # 보유: 002380(KCC, 미태깅 장기), 360750(ETF), 469150(ETF)
+        current = {"002380": 100, "360750": 50, "469150": 30}
+        prices = {"002380": 10_000, "360750": 20_000, "469150": 15_000}
+        portfolio_value = 3_000_000
+
+        pm = self._make_position_manager(current, portfolio_value, prices)
+
+        mock_allocator = MagicMock()
+
+        def _get_by_pool(pool):
+            if pool == "etf_rotation":
+                return [
+                    {"ticker": "360750", "pool": "etf_rotation"},
+                    {"ticker": "469150", "pool": "etf_rotation"},
+                ]
+            # 002380은 어떤 풀에도 태깅되지 않음 (미태깅 상태)
+            return []
+
+        mock_allocator.get_positions_by_pool.side_effect = _get_by_pool
+
+        # ETF 단독 리밸런싱: target = ETF 종목만, pool="etf_rotation"
+        sell_orders, _ = pm.calculate_rebalance_orders(
+            {"360750": 0.5, "469150": 0.5},
+            allocator=mock_allocator,
+            pool="etf_rotation",
+            integrated=False,
+        )
+
+        sell_tickers = {o["ticker"] for o in sell_orders}
+        # JAE-100 핵심 검증: 미태깅 장기 종목 002380이 매도 대상에 포함되면 안 됨
+        assert "002380" not in sell_tickers, (
+            "JAE-100 회귀: 미태깅 포지션은 ETF 단독 리밸런싱에서 보호되어야 합니다."
+        )
 
     def test_allocator_none_default_parameter(self):
         """allocator 파라미터의 기본값이 None이다."""

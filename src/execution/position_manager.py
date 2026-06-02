@@ -231,36 +231,34 @@ class PositionManager:
             logger.error("포트폴리오 가치가 0원입니다. 리밸런싱을 중단합니다.")
             return [], []
 
-        # 1-1. allocator가 있으면 다른 풀의 포지션을 현재 포지션에서 제외
-        # 통합 모드에서는 전체 포트폴리오를 대상으로 하므로 제외하지 않음
+        # 1-1. allocator가 있으면 풀-스코프로 현재 포지션을 필터링한다.
+        # 통합 모드에서는 전체 포트폴리오를 대상으로 하므로 필터링하지 않는다.
+        # JAE-100: 기존 로직(다른 풀 제외)은 미태깅 포지션을 무방어 상태로 두어
+        # ETF 단독 리밸런싱 시 장기 종목을 전량 매도하는 사고가 발생했다.
+        # 변경: 대상 풀에 명시적으로 태깅된 포지션만 diff 대상에 포함한다.
         if allocator is not None and not integrated:
-            all_pools = {"long_term", "short_term", "etf_rotation"}
             target_pool = pool or "long_term"
-            exclude_pools = all_pools - {target_pool}
+            target_tickers = {
+                p["ticker"]
+                for p in allocator.get_positions_by_pool(target_pool)
+            }
+            # target_weights에 포함된 신규 진입 종목은 보호(매수 가능하도록 허용)
+            allow_tickers = target_tickers | set(target_weights.keys())
 
-            exclude_tickers: set[str] = set()
-            for excl_pool in exclude_pools:
-                tickers = {
-                    p["ticker"]
-                    for p in allocator.get_positions_by_pool(excl_pool)
-                }
-                exclude_tickers |= tickers
-
-            if exclude_tickers:
-                excluded = {
-                    t for t in current_positions if t in exclude_tickers
-                }
-                current_positions = {
-                    t: q for t, q in current_positions.items()
-                    if t not in exclude_tickers
-                }
-                if excluded:
-                    logger.info(
-                        "allocator: %s 외 풀 포지션 %d개 제외: %s",
-                        target_pool,
-                        len(excluded),
-                        ", ".join(sorted(excluded)),
-                    )
+            excluded = {
+                t for t in current_positions if t not in allow_tickers
+            }
+            current_positions = {
+                t: q for t, q in current_positions.items()
+                if t in allow_tickers
+            }
+            if excluded:
+                logger.info(
+                    "allocator: %s 풀 외 포지션 %d개 보호(매도 대상 제외): %s",
+                    target_pool,
+                    len(excluded),
+                    ", ".join(sorted(excluded)),
+                )
 
         # 2. 목표 수량 계산
         target_quantities = self.calculate_target_quantities(
