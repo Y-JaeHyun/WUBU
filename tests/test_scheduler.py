@@ -1683,16 +1683,19 @@ class TestRebalanceDataValidation:
             },
         })
         bot._send_notification = MagicMock()
+        bot.scheduler = MagicMock()
 
-        bot.execute_rebalance()
+        status = bot.execute_rebalance()
 
-        # 시그널 생성도 시도하지 않아야 함
+        # 데이터 실패로 중단되고 시그널 생성도 시도하지 않아야 함
+        assert status == "data_failure"
         bot._strategy.generate_signals.assert_not_called()
+        # 정규 실행(attempt=0) 실패 → 자동 재시도가 예약되어야 함
+        bot.scheduler.add_job.assert_called_once()
+        # 재시도 여력이 있으므로 재시도 예약 알림이 발송되어야 함
         bot._send_notification.assert_called()
-        call_kwargs = bot._send_notification.call_args[1]
-        assert call_kwargs.get("level") == "CRITICAL"
         call_text = bot._send_notification.call_args[0][0]
-        assert "리밸런싱 중단" in call_text
+        assert "재시도" in call_text
 
 
 class TestScheduleTime:
@@ -2047,3 +2050,77 @@ class TestLiveSignalsFallback:
         assert len(collected_dates) == 1
         assert collected_dates[0] == "20260306"
         bot.holidays.prev_trading_day.assert_called_once()
+
+
+class TestRebalanceRetry:
+    """리밸런싱 데이터 일시장애 자동 재시도 (재발 방지 C)."""
+
+    def _prep_bot(self):
+        bot = _make_bot_with_flag(True)
+        bot._is_trading_day = MagicMock(return_value=True)
+        bot._is_rebalance_day = MagicMock(return_value=True)
+        bot._strategy = MagicMock()
+        bot.kis_client.is_configured = MagicMock(return_value=True)
+        bot._send_notification = MagicMock()
+        bot.scheduler = MagicMock()
+        return bot
+
+    def test_data_failure_schedules_retry_and_returns_status(self):
+        """데이터 품질 검증 실패 시 재시도를 예약하고 'data_failure'를 반환한다."""
+        bot = self._prep_bot()
+        bot._collect_strategy_data = MagicMock(return_value={"date": "20260630"})
+        bot._validate_signal_data = MagicMock(
+            return_value=(False, ["펀더멘탈 수집 실패"])
+        )
+
+        status = bot.execute_rebalance()
+
+        assert status == "data_failure", "데이터 실패 시 'data_failure' 반환해야 함"
+        bot.scheduler.add_job.assert_called_once()
+
+    def test_no_signals_returns_skipped_without_retry(self):
+        """시그널이 없으면 'skipped' 반환하고 재시도를 예약하지 않는다."""
+        bot = self._prep_bot()
+        bot._collect_strategy_data = MagicMock(return_value={"date": "20260630"})
+        bot._validate_signal_data = MagicMock(return_value=(True, []))
+        bot._strategy.generate_signals.return_value = {}
+        bot._strategy.num_stocks = 7
+        bot._generate_etf_signals = MagicMock(return_value={})
+        bot._get_etf_universe_tickers = MagicMock(return_value=set())
+        bot.allocator.get_long_term_budget.return_value = 0
+
+        status = bot.execute_rebalance()
+
+        assert status == "skipped", "시그널 없으면 'skipped' 반환해야 함"
+        bot.scheduler.add_job.assert_not_called()
+
+    def test_retry_gives_up_after_max_attempts(self):
+        """최대 재시도 횟수 소진 시 재시도를 예약하지 않고 CRITICAL 알림을 보낸다."""
+        bot = self._prep_bot()
+
+        from src.scheduler.main import _REBALANCE_RETRY_DELAYS_MIN
+
+        last_attempt = len(_REBALANCE_RETRY_DELAYS_MIN)
+        scheduled = bot._schedule_rebalance_retry(last_attempt)
+
+        assert scheduled is False, "최대 횟수 초과 시 False 반환해야 함"
+        bot.scheduler.add_job.assert_not_called()
+        # CRITICAL 알림 발송 확인
+        assert any(
+            kw.get("level") == "CRITICAL"
+            for _, kw in bot._send_notification.call_args_list
+        ), "최종 실패 시 CRITICAL 알림이 발송되어야 함"
+
+    def test_retry_schedules_with_backoff_date_trigger(self):
+        """첫 재시도는 백오프 지연으로 DateTrigger 잡을 등록하고 True를 반환한다."""
+        bot = self._prep_bot()
+
+        scheduled = bot._schedule_rebalance_retry(0)
+
+        assert scheduled is True, "재시도 예약 성공 시 True 반환해야 함"
+        bot.scheduler.add_job.assert_called_once()
+        # attempt=1로 다음 회차가 전달되는지 확인
+        _, kwargs = bot.scheduler.add_job.call_args
+        assert kwargs.get("kwargs", {}).get("attempt") == 1, (
+            "다음 시도 회차(attempt=1)가 전달되어야 함"
+        )

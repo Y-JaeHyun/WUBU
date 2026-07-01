@@ -72,6 +72,12 @@ logger = get_logger(__name__)
 
 KST = pytz.timezone("Asia/Seoul")
 
+# 리밸런싱 데이터 일시장애(장 초반 KRX 포털 불안정 등) 시 자동 재시도 백오프(분).
+# 정규 09:05 실행 실패 시 아래 지연만큼 뒤에 순차 재시도한다: ~09:30, ~10:00, ~11:00.
+# pykrx 업스트림이 개장 직후 깨진 응답을 주는 경우가 있어, 하루치 리밸런싱이
+# 일시장애 하나로 통째 스킵되는 것을 방지한다.
+_REBALANCE_RETRY_DELAYS_MIN = [25, 55, 115]
+
 
 class TradingBot:
     """트레이딩 봇 메인 클래스.
@@ -1193,21 +1199,31 @@ class TradingBot:
 
         return signals
 
-    def execute_rebalance(self) -> None:
+    def execute_rebalance(self, attempt: int = 0) -> str:
         """09:05 - 통합 리밸런싱 실행 (해당일만).
 
         장기 + ETF 시그널을 병합하여 단일 diff 기반으로 실행한다.
         allocator가 없으면 장기 단독 실행으로 폴백한다.
+
+        Args:
+            attempt: 시도 회차. 0=정규 09:05 실행, 1+=데이터 일시장애 후 자동 재시도.
+
+        Returns:
+            실행 결과 상태 문자열:
+              - "success": 리밸런싱 정상 실행
+              - "skipped": 거래일/리밸런싱일 아님 또는 시그널 없음(재시도 불필요)
+              - "data_failure": 데이터 품질 검증 실패(재시도 예약됨)
+              - "error": 설정 오류/예외(재시도 불필요)
         """
         if not self._is_trading_day():
-            return
+            return "skipped"
 
         try:
             today = datetime.now(KST).date()
 
             if not self._is_rebalance_day(today):
                 logger.info("오늘은 리밸런싱일이 아닙니다. 실행을 스킵합니다.")
-                return
+                return "skipped"
 
             if self._strategy is None:
                 logger.error("전략이 설정되지 않았습니다. 리밸런싱을 실행할 수 없습니다.")
@@ -1215,7 +1231,7 @@ class TradingBot:
                     "[리밸런싱 오류] 전략이 미설정 상태입니다.",
                     level="CRITICAL",
                 )
-                return
+                return "error"
 
             if not self.kis_client.is_configured():
                 logger.error("KIS API가 설정되지 않았습니다.")
@@ -1223,7 +1239,7 @@ class TradingBot:
                     "[리밸런싱 오류] KIS API 미설정 상태입니다.",
                     level="CRITICAL",
                 )
-                return
+                return "error"
 
             # T-1 데이터 수집 (07:30 프리워밍 캐시 히트 기대)
             prev_day = self.holidays.prev_trading_day(today)
@@ -1234,13 +1250,11 @@ class TradingBot:
             # 데이터 품질 검증
             is_valid, issues = self._validate_signal_data(strategy_data)
             if not is_valid:
-                issue_text = "\n".join(f"  - {i}" for i in issues)
                 logger.error("데이터 품질 검증 실패. 리밸런싱을 중단합니다.")
-                self._send_notification(
-                    f"[리밸런싱 중단] 데이터 품질 검증 실패:\n{issue_text}",
-                    level="CRITICAL",
-                )
-                return
+                # 데이터 일시장애일 수 있으므로 뒤로 미뤄 자동 재시도한다.
+                # (재시도 예약/최종 실패 알림은 _schedule_rebalance_retry가 담당)
+                self._schedule_rebalance_retry(attempt, issues=issues)
+                return "data_failure"
 
             # 장기 시그널 생성
             date_str = today.strftime("%Y%m%d")
@@ -1269,7 +1283,7 @@ class TradingBot:
                     f"[리밸런싱 오류] 장기 시그널 생성 실패: {e}",
                     level="CRITICAL",
                 )
-                return
+                return "error"
 
             # 매수가능성 필터 (allocator 있을 때만)
             if long_signals and self.allocator:
@@ -1323,7 +1337,7 @@ class TradingBot:
                     self._send_notification(
                         "[리밸런싱] 시그널이 없어 리밸런싱을 스킵합니다."
                     )
-                    return
+                    return "skipped"
 
                 self._send_notification(
                     f"[통합 리밸런싱 시작] {today.strftime('%Y-%m-%d')}\n"
@@ -1342,7 +1356,7 @@ class TradingBot:
                     self._send_notification(
                         "[리밸런싱] 시그널이 없어 스킵합니다."
                     )
-                    return
+                    return "skipped"
 
                 self._send_notification(
                     f"[리밸런싱 시작] {today.strftime('%Y-%m-%d')}\n"
@@ -1376,6 +1390,7 @@ class TradingBot:
             self._send_notification("\n".join(lines), level=level)
 
             logger.info("리밸런싱 실행 완료")
+            return "success"
 
         except Exception as e:
             logger.error("리밸런싱 실행 중 예외 발생: %s", e)
@@ -1383,6 +1398,69 @@ class TradingBot:
             self._send_notification(
                 f"[리밸런싱 실행 오류] {e}", level="CRITICAL"
             )
+            return "error"
+
+    def _schedule_rebalance_retry(
+        self, attempt: int, issues: list[str] | None = None,
+    ) -> bool:
+        """데이터 일시장애로 중단된 리밸런싱의 다음 재시도를 예약한다.
+
+        정규 09:05 실행이 데이터 품질 검증에서 실패하면(장 초반 KRX 포털 불안정 등)
+        하루치 리밸런싱을 통째 포기하지 않고, 백오프 간격으로 재실행을 예약한다.
+        재시도 잡은 fresh 데이터 수집부터 다시 수행하며, 실주문 diff는 매번 실계좌
+        잔고 기준으로 재계산되므로 부분 체결 상태에서도 안전하게 수렴한다.
+
+        알림 레벨: 재시도 여력이 남아 있으면 WARNING(과도한 CRITICAL 방지),
+        재시도를 모두 소진하면 CRITICAL로 에스컬레이션한다.
+
+        Args:
+            attempt: 방금 실패한 시도 회차 (0=정규 09:05 실행).
+            issues: 데이터 품질 검증에서 보고된 문제 목록 (알림 본문에 포함).
+
+        Returns:
+            재시도를 예약했으면 True, 최대 횟수 소진으로 포기했으면 False.
+        """
+        issue_text = (
+            "\n" + "\n".join(f"  - {i}" for i in issues) if issues else ""
+        )
+
+        if attempt >= len(_REBALANCE_RETRY_DELAYS_MIN):
+            logger.error(
+                "리밸런싱 재시도 %d회 모두 데이터 실패 — 오늘 리밸런싱을 포기합니다.",
+                attempt,
+            )
+            self._send_notification(
+                f"[리밸런싱 최종 실패] 데이터 일시장애로 {attempt}회 재시도 모두 "
+                f"실패했습니다. 수동 재실행이 필요합니다.{issue_text}",
+                level="CRITICAL",
+            )
+            return False
+
+        from apscheduler.triggers.date import DateTrigger
+
+        delay_min = _REBALANCE_RETRY_DELAYS_MIN[attempt]
+        run_at = datetime.now(KST) + timedelta(minutes=delay_min)
+        next_attempt = attempt + 1
+
+        self.scheduler.add_job(
+            self.execute_rebalance,
+            DateTrigger(run_date=run_at),
+            kwargs={"attempt": next_attempt},
+            id=f"rebalance_retry_{next_attempt}",
+            name=f"리밸런싱 재시도 {next_attempt}회",
+            misfire_grace_time=600,
+            replace_existing=True,
+        )
+        logger.warning(
+            "리밸런싱 데이터 실패 — %d분 후 자동 재시도 예약 (%d회차, %s)",
+            delay_min, next_attempt, run_at.strftime("%H:%M"),
+        )
+        self._send_notification(
+            f"[리밸런싱 재시도 예약] 데이터 검증 실패 → {run_at.strftime('%H:%M')} "
+            f"자동 재시도 예정 ({next_attempt}회차){issue_text}",
+            level="WARNING",
+        )
+        return True
 
     def _create_etf_strategy(self):
         """Feature flag에 따라 적절한 ETF 로테이션 전략을 생성한다.
